@@ -1,0 +1,13 @@
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","location":"ws_hub.go:cert_result","message":"before sanitize","ovpn_len":0,"ovpn_short":true,"sessionId":"892464","timestamp":1776057196764}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","len_changed":false,"location":"ws_hub.go:cert_result","message":"after sanitize","ovpn_len":0,"sessionId":"892464","timestamp":1776057196764}
+{"cert_cn":"vt-node-30-local-only","err_len":335,"hypothesisId":"H5","location":"ws_hub.go:cert_result","message":"issue failed","sessionId":"892464","timestamp":1776057208227}
+{"hub_online":true,"hypothesisId":"H1","inst_mode":"local-only","inst_proto":"tcp","location":"handlers.go:finalizeUserGrantCert","message":"issue_cert plan","node_id":"node-30","norm_proto":"tcp","sessionId":"892464","timestamp":1776057295631}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","location":"ws_hub.go:cert_result","message":"before sanitize","ovpn_len":8324,"ovpn_short":false,"sessionId":"892464","timestamp":1776057295836}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","len_changed":true,"location":"ws_hub.go:cert_result","message":"after sanitize","ovpn_len":4998,"sessionId":"892464","timestamp":1776057295836}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","location":"ws_hub.go:cert_result","message":"before sanitize","ovpn_len":0,"ovpn_short":true,"sessionId":"892464","timestamp":1776059711302}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","len_changed":false,"location":"ws_hub.go:cert_result","message":"after sanitize","ovpn_len":0,"sessionId":"892464","timestamp":1776059711302}
+{"cert_cn":"vt-node-30-local-only","err_len":335,"hypothesisId":"H5","location":"ws_hub.go:cert_result","message":"issue failed","sessionId":"892464","timestamp":1776059728726}
+{"hub_online":true,"hypothesisId":"H1","inst_mode":"local-only","inst_proto":"tcp","location":"handlers.go:finalizeUserGrantCert","message":"issue_cert plan","node_id":"node-30","norm_proto":"tcp","sessionId":"892464","timestamp":1776059845453}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","location":"ws_hub.go:cert_result","message":"before sanitize","ovpn_len":8328,"ovpn_short":false,"sessionId":"892464","timestamp":1776059845578}
+{"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","len_changed":true,"location":"ws_hub.go:cert_result","message":"after sanitize","ovpn_len":5002,"sessionId":"892464","timestamp":1776059845579}
+{"hub_online":false,"hypothesisId":"H1","inst_mode":"local-only","inst_proto":"udp","location":"handlers.go:finalizeUserGrantCert","message":"issue_cert plan","node_id":"node-40","norm_proto":"udp","sessionId":"892464","timestamp":1776067068169}

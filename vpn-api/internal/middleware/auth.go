@@ -1,0 +1,65 @@
+package middleware
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+func JWT(secret string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		auth := c.GetHeader("Authorization")
+		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
+			return
+		}
+
+		tokenStr := strings.TrimPrefix(auth, "Bearer ")
+		token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+			return []byte(secret), nil
+		})
+		if err != nil || !token.Valid {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if ok {
+			c.Set("admin", claims["sub"])
+			c.Set("role", claims["role"])
+			if perms, exists := claims["perms"]; exists {
+				c.Set("permissions", perms)
+			}
+		}
+		c.Next()
+	}
+}
+
+func RequirePermission(module string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, _ := c.Get("role")
+		roleStr, _ := role.(string)
+		if roleStr == "admin" {
+			c.Next()
+			return
+		}
+
+		perms, _ := c.Get("permissions")
+		permsStr, _ := perms.(string)
+		if permsStr == "*" {
+			c.Next()
+			return
+		}
+
+		for _, p := range strings.Split(permsStr, ",") {
+			if strings.TrimSpace(p) == module || strings.TrimSpace(p) == "*" {
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "no permission for " + module})
+	}
+}
