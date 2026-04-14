@@ -108,6 +108,10 @@ case "$MODE" in
       echo "错误: 未找到 $DEPLOY_SCRIPT"
       exit 1
     fi
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/vpn-api/scripts/agent-release-version.inc.sh"
+    echo "[INFO] AGENT_RELEASE_VERSION（预览，与编译结果一致）: $(resolve_agent_release_version "$SCRIPT_DIR/vpn-api")"
+    echo ""
     echo "  即将安装: 控制面 (API + Web 静态构建；Nginx 示例见 docs/)"
     echo ""
     exec bash "$DEPLOY_SCRIPT" --source-dir "$SCRIPT_DIR" "${EXTRA_ARGS[@]}"

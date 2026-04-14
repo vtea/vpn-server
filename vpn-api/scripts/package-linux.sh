@@ -7,6 +7,10 @@ DIST_DIR="${PROJECT_DIR}/dist"
 OUT_NAME="vpn-api-linux-bundle"
 VERSION="${VERSION:-$(date +%Y%m%d-%H%M%S)}"
 PKG_ROOT="${DIST_DIR}/${OUT_NAME}-${VERSION}"
+AGENT_RELEASE_FALLBACK="${VERSION}"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/agent-release-version.inc.sh"
+AGENT_RELEASE_VERSION="${AGENT_RELEASE_VERSION:-$(resolve_agent_release_version "$PROJECT_DIR")}"
 
 require_cmd() {
   local cmd="$1"
@@ -24,12 +28,13 @@ echo "[2/6] prepare output directories"
 rm -rf "${PKG_ROOT}"
 mkdir -p "${PKG_ROOT}/bin" "${PKG_ROOT}/scripts" "${PKG_ROOT}/systemd" "${PKG_ROOT}/config"
 
-echo "[3/6] build binaries"
+echo "[3/6] build binaries (agent buildVersion=${AGENT_RELEASE_VERSION})"
 cd "${PROJECT_DIR}"
 go mod tidy
+agent_ldflags="-X main.buildVersion=${AGENT_RELEASE_VERSION}"
 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o "${PKG_ROOT}/bin/vpn-api" ./cmd/api
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "${PKG_ROOT}/bin/vpn-agent-linux-amd64" ./cmd/agent
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "${PKG_ROOT}/bin/vpn-agent-linux-arm64" ./cmd/agent
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${agent_ldflags}" -o "${PKG_ROOT}/bin/vpn-agent-linux-amd64" ./cmd/agent
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "${agent_ldflags}" -o "${PKG_ROOT}/bin/vpn-agent-linux-arm64" ./cmd/agent
 chmod +x "${PKG_ROOT}/bin/"*
 
 echo "[4/6] copy runtime scripts"
@@ -38,7 +43,7 @@ cp "${PROJECT_DIR}/scripts/node-setup.sh" "${PKG_ROOT}/scripts/node-setup.sh"
 chmod +x "${PKG_ROOT}/scripts/"*.sh
 
 echo "[5/6] write env/systemd templates"
-cat > "${PKG_ROOT}/config/vpn-api.env.example" <<'EOF'
+cat > "${PKG_ROOT}/config/vpn-api.env.example" <<EOF
 API_PORT=56700
 DB_DRIVER=sqlite
 DB_PATH=/opt/vpn-api/data/vpn.db
@@ -47,7 +52,7 @@ CA_DIR=/opt/vpn-api/ca
 EXTERNAL_URL=http://127.0.0.1:56700
 # EXTERNAL_URL_LAN=http://192.168.1.10:56700
 # CORS_ALLOWED_ORIGINS=https://vpn-admin.example.com
-# AGENT_LATEST_VERSION=0.2.1
+AGENT_LATEST_VERSION=${AGENT_RELEASE_VERSION}
 # IPLIST_DUAL_ENABLED=true
 VPN_AGENT_BIN_DIR=/opt/vpn-api/bin
 EOF

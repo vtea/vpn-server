@@ -99,12 +99,29 @@ confirm() {
   return 0
 }
 
+confirm_no_default() {
+  if [[ "$AUTO_YES" -eq 1 ]]; then return 0; fi
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+  local msg="${1:-Continue?}"
+  echo ""
+  local answer=""
+  read -rp "$(echo -e "${YELLOW}${msg} [y/N]${NC} ")" answer
+  answer="${answer:-N}"
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
+
 trim_space() {
   local s="${1:-}"
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   echo "$s"
 }
+
+_DEPLOY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${_DEPLOY_SCRIPT_DIR}/agent-release-version.inc.sh"
 
 is_ipv4() {
   local ip="${1:-}"
@@ -289,6 +306,118 @@ resolve_external_url_value() {
 
   err "非交互模式且未提供 --domain，同时自动探测公网 IP 失败。请显式传 --domain。"
   return 1
+}
+
+collect_port_listeners() {
+  local port="$1"
+  local out=""
+  if command -v ss >/dev/null 2>&1; then
+    out="$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" || $4 ~ p" " {print}' || true)"
+  fi
+  if [[ -z "$out" ]] && command -v netstat >/dev/null 2>&1; then
+    out="$(netstat -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" || $4 ~ p" " {print}' || true)"
+  fi
+  echo "$out"
+}
+
+port_listeners_belong_to_vpn_api() {
+  local listeners="${1:-}"
+  [[ -z "$listeners" ]] && return 1
+  if echo "$listeners" | grep -qE 'vpn-api|/vpn-api'; then
+    return 0
+  fi
+
+  local pids pid comm
+  pids="$(echo "$listeners" | sed -nE 's/.*pid=([0-9]+).*/\1/p; s/.*LISTEN[[:space:]]+([0-9]+)\/.*/\1/p' | sort -u)"
+  for pid in $pids; do
+    comm="$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$comm" == "vpn-api" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+stop_vpn_api_service() {
+  if ! systemctl stop vpn-api >/dev/null 2>&1; then
+    return 1
+  fi
+  sleep 1
+  return 0
+}
+
+ensure_install_port_ready() {
+  local listeners=""
+  local service_active=0
+  local can_interact=0
+  local needs_stop=0
+
+  if systemctl is-active --quiet vpn-api 2>/dev/null; then
+    service_active=1
+    warn "检测到 vpn-api 服务正在运行"
+  else
+    ok "vpn-api 服务未运行"
+  fi
+
+  listeners="$(collect_port_listeners "$API_PORT")"
+  if [[ -n "$listeners" ]]; then
+    warn "检测到端口 ${API_PORT} 已被占用:"
+    echo "$listeners" | sed 's/^/    /'
+  else
+    ok "端口 ${API_PORT} 可用"
+  fi
+
+  if [[ "$service_active" -eq 0 && -z "$listeners" ]]; then
+    return 0
+  fi
+
+  if [[ -t 0 && "$AUTO_YES" -ne 1 ]]; then
+    can_interact=1
+  fi
+
+  if [[ "$service_active" -eq 1 ]]; then
+    needs_stop=1
+  elif [[ -n "$listeners" ]] && port_listeners_belong_to_vpn_api "$listeners"; then
+    needs_stop=1
+  fi
+
+  if [[ "$needs_stop" -eq 1 ]]; then
+    if [[ "$can_interact" -eq 1 ]]; then
+      if ! confirm "检测到旧版 vpn-api 正在运行或占用端口，是否先停止后继续部署?"; then
+        err "管理员取消停止 vpn-api，已终止安装。"
+        return 1
+      fi
+    else
+      warn "非交互模式：将自动停止 vpn-api 以继续部署。"
+    fi
+
+    log "停止 vpn-api 服务 ..."
+    if stop_vpn_api_service; then
+      ok "vpn-api 已停止"
+    else
+      err "停止 vpn-api 失败，请先手动执行: systemctl stop vpn-api"
+      return 1
+    fi
+  fi
+
+  listeners="$(collect_port_listeners "$API_PORT")"
+  if [[ -n "$listeners" ]]; then
+    fail "端口 ${API_PORT} 仍被占用，无法保证新版本正常运行"
+    echo "$listeners" | sed 's/^/    /'
+    echo "  建议排查:"
+    echo "    ss -ltnp | grep :${API_PORT}"
+    echo "    systemctl status vpn-api"
+    if [[ "$can_interact" -eq 1 ]]; then
+      if confirm_no_default "端口未释放，是否仍强制继续部署（不推荐）?"; then
+        warn "管理员选择强制继续，后续可能启动失败。"
+        return 0
+      fi
+    fi
+    return 1
+  fi
+
+  ok "部署所需端口 ${API_PORT} 已就绪"
+  return 0
 }
 
 # 供 Phase 1 使用：precheck 已设置 PKG/ARCH；若单独调用或变量丢失则重新检测
@@ -795,21 +924,12 @@ precheck() {
   # certbot 为可选：check_cmd 在未安装时返回 1；独立语句在 set -e 下会导致脚本静默退出（看不到后续预检/部署）
   check_cmd certbot certbot false || true
 
-  # ── 0.4 检查端口占用 ───────────────────────────────────────────────────────
+  # ── 0.4 检查运行中的服务与端口占用 ─────────────────────────────────────────
 
-  log "检查端口占用 ..."
-
-  check_port() {
-    local port="$1" name="$2"
-    if ss -tlnp 2>/dev/null | grep -q ":${port} " || netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
-      warn "端口 $port ($name) 已被占用"
-      WARNINGS=$((WARNINGS+1))
-    else
-      ok "端口 $port ($name) 可用"
-    fi
-  }
-
-  check_port "$API_PORT" "API (vpn-api)"
+  log "检查服务运行状态与端口占用 ..."
+  if ! ensure_install_port_ready; then
+    ERRORS=$((ERRORS+1))
+  fi
   log "提示: 若使用 Nginx 反代静态站与 /api，请参考项目内 docs/nginx-control-plane.example.conf（本脚本不安装 Nginx）。"
 
   # ── 0.5 检查磁盘空间 ───────────────────────────────────────────────────────
@@ -1158,6 +1278,10 @@ find_source() {
 
 build_backend() {
   log "Phase 3: 编译后端 ..."
+  AGENT_RELEASE_VERSION="$(resolve_agent_release_version)"
+  export AGENT_RELEASE_VERSION
+  ok "Agent 构建版本字符串: ${AGENT_RELEASE_VERSION}"
+  local agent_ldflags="-X main.buildVersion=${AGENT_RELEASE_VERSION}"
   local golog net_round=0
   golog="$(mktemp)"
   # 未设置 GOPROXY 时默认国内镜像优先，再回退官方（可被用户 export 或菜单项 4 覆盖）
@@ -1173,8 +1297,8 @@ build_backend() {
     (
       go mod tidy && \
       CGO_ENABLED=1 go build -o /usr/local/bin/vpn-api ./cmd/api && \
-      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /usr/local/bin/vpn-agent-linux-amd64 ./cmd/agent && \
-      CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /usr/local/bin/vpn-agent-linux-arm64 ./cmd/agent
+      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${agent_ldflags}" -o /usr/local/bin/vpn-agent-linux-amd64 ./cmd/agent && \
+      CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "${agent_ldflags}" -o /usr/local/bin/vpn-agent-linux-arm64 ./cmd/agent
     ) >>"$golog" 2>&1
     local rc=$?
     set -e
@@ -1209,6 +1333,7 @@ build_backend() {
   mkdir -p "$INSTALL_DIR/bin"
   cp -a /usr/local/bin/vpn-agent-linux-amd64 /usr/local/bin/vpn-agent-linux-arm64 "$INSTALL_DIR/bin/"
   chmod +x "$INSTALL_DIR/bin/vpn-agent-linux-amd64" "$INSTALL_DIR/bin/vpn-agent-linux-arm64"
+  printf '%s\n' "${AGENT_RELEASE_VERSION}" > "${INSTALL_DIR}/.agent-release-version" 2>/dev/null || true
 
   ok "vpn-api  $(ls -lh /usr/local/bin/vpn-api | awk '{print $5}')"
   ok "vpn-agent-linux-amd64 $(ls -lh /usr/local/bin/vpn-agent-linux-amd64 | awk '{print $5}')"
@@ -1216,6 +1341,15 @@ build_backend() {
 }
 
 build_frontend() {
+  if [[ "$SKIP_FRONTEND" -eq 0 ]] && [[ -t 0 && "$AUTO_YES" -ne 1 ]]; then
+    if ! confirm "是否构建并部署前端管理台?"; then
+      SKIP_FRONTEND=1
+      log "管理员选择跳过前端构建"
+    fi
+  elif [[ "$SKIP_FRONTEND" -eq 0 ]]; then
+    log "非交互模式默认构建前端（如需跳过请使用 --skip-frontend）"
+  fi
+
   if [[ "$SKIP_FRONTEND" -eq 1 ]] || [[ ! -d "$INSTALL_DIR/vpn-admin-web/src" ]]; then
     log "Phase 3b: 跳过前端构建"
     return
@@ -1294,6 +1428,8 @@ setup_api() {
 
   resolve_external_url_value
   local EXTERNAL_URL_VALUE="${FINAL_EXTERNAL_URL}"
+  local agent_latest_ver="${AGENT_RELEASE_VERSION:-}"
+  [[ -z "${agent_latest_ver}" ]] && agent_latest_ver="$(resolve_agent_release_version)"
 
   cat > /etc/systemd/system/vpn-api.service <<UNIT
 [Unit]
@@ -1316,6 +1452,7 @@ Environment=DB_DRIVER=sqlite
 Environment=CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
 Environment=VPN_AGENT_BIN_DIR=${INSTALL_DIR}/bin
 Environment=NODE_SETUP_SCRIPT_PATH=${INSTALL_DIR}/scripts/node-setup.sh
+Environment=AGENT_LATEST_VERSION=${agent_latest_ver}
 
 [Install]
 WantedBy=multi-user.target
@@ -1430,6 +1567,7 @@ main() {
   fi
   install_deps
   find_source
+  log "AGENT_RELEASE_VERSION（编译前预览，与 Phase 3/systemd 一致）: $(resolve_agent_release_version)"
   build_backend
   build_frontend
   setup_api

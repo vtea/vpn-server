@@ -6,6 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SCRIPT="${SCRIPT_DIR}/deploy-control-plane.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/agent-release-version.inc.sh"
 
 if [[ ! -f "${DEPLOY_SCRIPT}" ]]; then
   echo "[ERROR] deploy script not found: ${DEPLOY_SCRIPT}" >&2
@@ -26,5 +28,9 @@ else
       ;;
   esac
 fi
+
+_VPN_API_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+echo "[INFO] AGENT_RELEASE_VERSION（预览，与 Phase 3 编译结果一致）: $(resolve_agent_release_version "${_VPN_API_ROOT}")"
+echo ""
 
 exec bash "${DEPLOY_SCRIPT}" "$@"

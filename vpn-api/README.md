@@ -11,7 +11,20 @@ go build -o vpn-agent ./cmd/agent
 
 # 交叉编译 Agent (Linux)
 GOOS=linux GOARCH=amd64 go build -o vpn-agent-linux ./cmd/agent
+
+# 生产建议：注入自报版本（与升级任务、管理台「节点 agent 版本」一致）
+REL="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+GOOS=linux GOARCH=amd64 go build -ldflags "-X main.buildVersion=${REL}" -o vpn-agent-linux-amd64 ./cmd/agent
 ```
+
+### Agent 版本字符串（`agent_version`）
+
+- 节点进程通过 WebSocket 上报的 `agent_version` 来自 `cmd/agent` 的 `buildVersion`（编译期 `-ldflags "-X main.buildVersion=..."`）；**未注入时**默认恒为 `0.2.1`，与代码新旧无关。
+- **单一来源（推荐）**：可在 `vpn-api/` 目录放置单行 `VERSION` 文件（可选）→ 否则 `git describe --tags --always --dirty` → 否则兜底。解析逻辑集中在 [`scripts/agent-release-version.inc.sh`](scripts/agent-release-version.inc.sh)，由一键部署、根目录 [`install.sh`](../install.sh)、[`scripts/install.sh`](scripts/install.sh) 与打包脚本共用；安装入口会在执行部署前打印 **`AGENT_RELEASE_VERSION` 预览**，Phase 3 编译与 systemd **`AGENT_LATEST_VERSION`** 与其一致。
+- **判断是否「拉到预期二进制」**：不要只看 UI 版本号；在控制面与节点分别计算 SHA256 对照，例如：
+  - 控制面：`sha256sum /opt/vpn-api/bin/vpn-agent-linux-amd64`（或 `VPN_AGENT_BIN_DIR` 下实际文件）
+  - 节点：`curl -fsSL "http://<控制面>:56700/api/downloads/vpn-agent-linux-amd64" | sha256sum`
+- **可选后续**：让 `node-setup.sh` 改为注册响应里的带版本下载 URL，需控制面磁盘上存在对应版本 artifact；当前无版本端点仍为主路径，见 `handlers.go` 中 `serveVPNAgentDownload` / `ServeVPNAgentVersionedDownload`。
 
 ## 服务器可运行打包（三种方式）
 
@@ -47,6 +60,8 @@ bash scripts/package-linux.sh
 cd vpn-api
 cp docker.env.example docker.env
 # 修改 docker.env 中的 JWT_SECRET 与 EXTERNAL_URL
+# 可选：注入与脚本一致的版本字符串（默认 compose 使用 0.2.1-docker）
+#   AGENT_RELEASE_VERSION="$(git describe --tags --always --dirty)" docker compose up -d --build
 docker compose up -d --build
 ```
 
@@ -66,6 +81,7 @@ DB_PATH=./vpn.db    # SQLite 路径（启动时会 SetMaxOpenConns(1)，避免 W
 JWT_SECRET=xxx      # JWT 密钥（生产环境必须修改）
 EXTERNAL_URL=...    # 控制面对外基址（公网 IP/域名）。未设置时默认为 `http://127.0.0.1:端口`。**若仍为回环**：创建节点/换发令牌时，会尽量用**当前 HTTP 请求的 Host / X-Forwarded-*** 自动推断部署命令里的地址（适用于你用公网 IP 或域名打开管理台、且反代正确传递转发头的情况）。无法可靠自动探测「公网 IP」（NAT/多网卡/离线环境）；推断失败时仍须手动设置本变量。
 EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTERNAL_URL 可同时配置（内网节点用 LAN 命令）
+# AGENT_LATEST_VERSION=0.2.1   # 可选：与已部署 agent 的 buildVersion 一致时，升级默认值/推荐 URL 与节点自报一致；一键部署脚本会写入与编译相同的值
 # 跨域：管理台与 API 不同源时设置（逗号分隔多个来源；仅开发可用 * 表示任意来源）
 # CORS_ALLOWED_ORIGINS=https://vpn-admin.example.com,http://localhost:56701
 ```

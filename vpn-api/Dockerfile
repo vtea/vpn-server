@@ -1,15 +1,18 @@
 FROM golang:1.23-bookworm AS builder
 WORKDIR /src
 
+ARG AGENT_RELEASE_VERSION=0.2.1-docker
+
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/vpn-api ./cmd/api && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/vpn-agent-linux-amd64 ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/vpn-agent-linux-arm64 ./cmd/agent
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.buildVersion=${AGENT_RELEASE_VERSION}" -o /out/vpn-agent-linux-amd64 ./cmd/agent && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.buildVersion=${AGENT_RELEASE_VERSION}" -o /out/vpn-agent-linux-arm64 ./cmd/agent
 
 FROM debian:bookworm-slim AS runtime
+ARG AGENT_RELEASE_VERSION=0.2.1-docker
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates openvpn easy-rsa sqlite3 && \
     rm -rf /var/lib/apt/lists/*
@@ -31,7 +34,8 @@ ENV API_PORT=56700 \
     JWT_SECRET=change-this-secret \
     CA_DIR=/opt/vpn-api/ca \
     EXTERNAL_URL=http://127.0.0.1:56700 \
-    VPN_AGENT_BIN_DIR=/opt/vpn-api/bin
+    VPN_AGENT_BIN_DIR=/opt/vpn-api/bin \
+    AGENT_LATEST_VERSION=${AGENT_RELEASE_VERSION}
 
 EXPOSE 56700
 VOLUME ["/opt/vpn-api/data", "/opt/vpn-api/ca", "/opt/vpn-api/backups"]

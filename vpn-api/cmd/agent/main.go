@@ -52,6 +52,13 @@ func agentVersion() string {
 	return defaultAgentVersion
 }
 
+// versionsEqualForUpgrade compares upgrade target vs self-reported version, ignoring optional "v" prefix.
+func versionsEqualForUpgrade(a, b string) bool {
+	a = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(a), "v"))
+	b = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(b), "v"))
+	return a == b
+}
+
 func main() {
 	cfgPath := flag.String("config", "/etc/vpn-agent/agent.yaml", "agent config file (JSON)")
 	flag.Parse()
@@ -517,7 +524,7 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 		result.Error = "invalid upgrade payload"
 		return result
 	}
-	if version == agentVersion() {
+	if versionsEqualForUpgrade(version, agentVersion()) {
 		result.Success = true
 		result.Step = "noop"
 		return result

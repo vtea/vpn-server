@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        AGENT_RELEASE_VERSION: ${AGENT_RELEASE_VERSION:-0.2.1-docker}
     image: vpn-api:local
     container_name: vpn-api
     restart: unless-stopped
