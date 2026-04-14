@@ -279,6 +279,36 @@ cleanup_legacy_openvpn_units() {
   fi
 }
 
+cleanup_stale_openvpn_management_ports() {
+  local ports=("56730" "56731" "56732")
+  local port listeners line pid args
+  local cleaned=0
+  for port in "${ports[@]}"; do
+    listeners="$(ss -lntp 2>/dev/null | awk -v p="127.0.0.1:${port}" '$4 == p {print}')"
+    [[ -z "$listeners" ]] && continue
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1)"
+      [[ -z "$pid" ]] && continue
+      args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      if [[ "$args" != *"openvpn"* ]]; then
+        warn "  mgmt ${port} 被非 openvpn 进程占用，跳过自动清理: pid=${pid} cmd=${args:-unknown}"
+        continue
+      fi
+      warn "  清理占用 management ${port} 的旧 openvpn 进程: pid=${pid}"
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      cleaned=1
+    done <<< "$listeners"
+  done
+  if [[ "$cleaned" -eq 1 ]]; then
+    sleep 1
+  fi
+}
+
 extract_openvpn_conf_port_proto() {
   local conf="$1"
   local port proto
@@ -1735,6 +1765,7 @@ log "  NAT rules configured"
 
 log "Step 8/${TOTAL_STEPS}: Creating systemd services ..."
 cleanup_legacy_openvpn_units
+cleanup_stale_openvpn_management_ports
 
 FAILED_OPENVPN_MODES=()
 SKIPPED_OPENVPN_MODES=()
