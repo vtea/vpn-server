@@ -2442,13 +2442,20 @@ func (h *Handler) ServeVPNAgentVersionedDownload(c *gin.Context) {
 	var arch, version string
 	if seg1Lower == "amd64" || seg1Lower == "arm64" {
 		arch = seg1Lower
-		if !strings.Contains(seg2, "+") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid download path: expected {package}+{version} after architecture"})
+		pkg := ""
+		switch {
+		case strings.Contains(seg2, "+"):
+			parts := strings.SplitN(seg2, "+", 2)
+			pkg = strings.TrimSpace(parts[0])
+			version = strings.TrimSpace(parts[1])
+		case strings.HasPrefix(seg2, DefaultAgentDownloadPackage+"-"):
+			// 兼容写法：/api/downloads/vpn-agent/{arch}/vpn-agent-{version}
+			pkg = DefaultAgentDownloadPackage
+			version = strings.TrimSpace(strings.TrimPrefix(seg2, DefaultAgentDownloadPackage+"-"))
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid download path: expected {package}+{version} or {package}-{version} after architecture"})
 			return
 		}
-		parts := strings.SplitN(seg2, "+", 2)
-		pkg := strings.TrimSpace(parts[0])
-		version = strings.TrimSpace(parts[1])
 		if pkg == "" || version == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid download path: empty package or version"})
 			return

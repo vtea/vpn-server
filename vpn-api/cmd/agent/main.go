@@ -33,6 +33,11 @@ type Config struct {
 	NodeToken  string `json:"node_token"`
 	NodeID     string `json:"node_id"`
 	EasyRSADir string `json:"easyrsa_dir"`
+	AutoUpdateEnabled     bool   `json:"auto_update_enabled"`
+	AutoUpdateIntervalSec int    `json:"auto_update_interval_sec"`
+	AutoUpdateAPIURL      string `json:"auto_update_api_url"`
+	AutoUpdateUsername    string `json:"auto_update_username"`
+	AutoUpdatePassword    string `json:"auto_update_password"`
 }
 
 type WSMessage struct {
@@ -45,12 +50,24 @@ const defaultAgentVersion = "0.2.1"
 // buildVersion can be injected by -ldflags "-X main.buildVersion=vX.Y.Z".
 var buildVersion string
 var startupIPListReportOnce sync.Once
+var upgradeExecMu sync.Mutex
 
 func agentVersion() string {
 	if strings.TrimSpace(buildVersion) != "" {
-		return strings.TrimSpace(buildVersion)
+		return normalizeVersion(strings.TrimSpace(buildVersion))
 	}
 	return defaultAgentVersion
+}
+
+func normalizeVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimSuffix(v, "-unknown")
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return defaultAgentVersion
+	}
+	return v
 }
 
 // versionsEqualForUpgrade compares upgrade target vs self-reported version, ignoring optional "v" prefix.
@@ -61,6 +78,10 @@ func versionsEqualForUpgrade(a, b string) bool {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "upgrade" {
+		runManualUpgrade()
+		return
+	}
 	cfgPath := flag.String("config", "/etc/vpn-agent/agent.yaml", "agent config file (JSON)")
 	flag.Parse()
 
@@ -90,6 +111,7 @@ func main() {
 	go cronHealthReport(&activeConn, &connMu, cfg)
 	go monitorTunnelFailover(&activeConn, &connMu, cfg)
 	go cronCertRenewal(&activeConn, &connMu, cfg)
+	go autoUpdateLoop(cfg)
 
 	for {
 		if err := connectAndServe(cfg, &activeConn, &connMu); err != nil {
@@ -108,7 +130,45 @@ func loadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	cfg.AutoUpdateEnabled = parseBoolEnv("AUTO_UPDATE_ENABLED", cfg.AutoUpdateEnabled)
+	cfg.AutoUpdateIntervalSec = parseIntEnv("AUTO_UPDATE_INTERVAL_SEC", cfg.AutoUpdateIntervalSec)
+	if cfg.AutoUpdateIntervalSec <= 0 {
+		cfg.AutoUpdateIntervalSec = 10800
+	}
+	if strings.TrimSpace(cfg.AutoUpdateAPIURL) == "" {
+		cfg.AutoUpdateAPIURL = strings.TrimSpace(os.Getenv("AUTO_UPDATE_API_URL"))
+	}
+	if strings.TrimSpace(cfg.AutoUpdateUsername) == "" {
+		cfg.AutoUpdateUsername = strings.TrimSpace(os.Getenv("AUTO_UPDATE_USERNAME"))
+	}
+	if strings.TrimSpace(cfg.AutoUpdatePassword) == "" {
+		cfg.AutoUpdatePassword = strings.TrimSpace(os.Getenv("AUTO_UPDATE_PASSWORD"))
+	}
 	return &cfg, nil
+}
+
+func parseBoolEnv(key string, current bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return current
+	}
+}
+
+func parseIntEnv(key string, current int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return current
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return current
+	}
+	return v
 }
 
 func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mutex) error {
@@ -471,7 +531,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			return
 		}
 		log.Printf("upgrade_agent: task=%d version=%s", req.TaskID, req.Version)
-		execRes := performAgentUpgrade(req.Version, req.DownloadURLs, req.SHA256, req.RestartService)
+		execRes := performAgentUpgradeLocked(req.Version, req.DownloadURLs, req.SHA256, req.RestartService)
 		res := map[string]any{
 			"task_id":         req.TaskID,
 			"success":         execRes.Success,
@@ -507,6 +567,180 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		sendResult(conn, "upgrade_precheck_result", res)
 	}
+}
+
+func performAgentUpgradeLocked(version string, downloadURLs []string, expectedSHA256 string, restartService bool) upgradeExecResult {
+	upgradeExecMu.Lock()
+	defer upgradeExecMu.Unlock()
+	return performAgentUpgrade(version, downloadURLs, expectedSHA256, restartService)
+}
+
+type upgradeDefaultsResponse struct {
+	Defaults struct {
+		Version        string `json:"version"`
+		DownloadURL    string `json:"download_url"`
+		DownloadURLLAN string `json:"download_url_lan"`
+		SHA256         string `json:"sha256"`
+	} `json:"defaults"`
+}
+
+func loginForAutoUpdate(apiBase, username, password string) (string, error) {
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
+		return "", fmt.Errorf("auto update credentials missing")
+	}
+	payload, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	client := &http.Client{Timeout: 12 * time.Second}
+	for _, p := range []string{"/api/auth/login", "/api/login"} {
+		req, _ := http.NewRequest(http.MethodPost, strings.TrimRight(apiBase, "/")+p, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			continue
+		}
+		var out struct {
+			Token string `json:"token"`
+			JWT   string `json:"jwt"`
+		}
+		if json.Unmarshal(body, &out) == nil {
+			if t := strings.TrimSpace(out.Token); t != "" {
+				return t, nil
+			}
+			if t := strings.TrimSpace(out.JWT); t != "" {
+				return t, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("login failed")
+}
+
+func fetchUpgradeDefaults(apiBase, jwt string) (*upgradeDefaultsResponse, error) {
+	client := &http.Client{Timeout: 12 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, strings.TrimRight(apiBase, "/")+"/api/agent-upgrades/defaults", nil)
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("defaults endpoint status=%d", resp.StatusCode)
+	}
+	var out upgradeDefaultsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func compareSemverAgent(a, b string) int {
+	parse := func(v string) [3]int {
+		v = normalizeVersion(v)
+		parts := strings.Split(v, ".")
+		out := [3]int{}
+		for i := 0; i < len(parts) && i < 3; i++ {
+			n, _ := strconv.Atoi(strings.TrimSpace(parts[i]))
+			out[i] = n
+		}
+		return out
+	}
+	av, bv := parse(a), parse(b)
+	for i := 0; i < 3; i++ {
+		if av[i] > bv[i] {
+			return 1
+		}
+		if av[i] < bv[i] {
+			return -1
+		}
+	}
+	return 0
+}
+
+func tryAutoUpgrade(cfg *Config, perform bool, restart bool) error {
+	api := strings.TrimSpace(cfg.AutoUpdateAPIURL)
+	if api == "" {
+		api = strings.TrimSpace(cfg.APIURL)
+	}
+	jwt, err := loginForAutoUpdate(api, cfg.AutoUpdateUsername, cfg.AutoUpdatePassword)
+	if err != nil {
+		return err
+	}
+	def, err := fetchUpgradeDefaults(api, jwt)
+	if err != nil {
+		return err
+	}
+	target := normalizeVersion(def.Defaults.Version)
+	current := normalizeVersion(agentVersion())
+	if compareSemverAgent(target, current) <= 0 {
+		log.Printf("auto-update: up-to-date current=%s target=%s", current, target)
+		return nil
+	}
+	if !perform {
+		log.Printf("auto-update: update available current=%s target=%s", current, target)
+		return nil
+	}
+	urls := []string{strings.TrimSpace(def.Defaults.DownloadURLLAN), strings.TrimSpace(def.Defaults.DownloadURL)}
+	log.Printf("auto-update: upgrading current=%s target=%s", current, target)
+	res := performAgentUpgradeLocked(target, urls, strings.TrimSpace(def.Defaults.SHA256), restart)
+	if !res.Success {
+		return fmt.Errorf("upgrade failed: step=%s code=%s err=%s", res.Step, res.ErrorCode, res.Error)
+	}
+	return nil
+}
+
+func autoUpdateLoop(cfg *Config) {
+	if !cfg.AutoUpdateEnabled {
+		return
+	}
+	// jitter 30~120 seconds
+	jitter := 30 + int(time.Now().UnixNano()%91)
+	time.Sleep(time.Duration(jitter) * time.Second)
+	interval := time.Duration(cfg.AutoUpdateIntervalSec) * time.Second
+	tk := time.NewTicker(interval)
+	defer tk.Stop()
+	for {
+		if err := tryAutoUpgrade(cfg, true, true); err != nil {
+			log.Printf("auto-update: %v", err)
+		}
+		<-tk.C
+	}
+}
+
+func runManualUpgrade() {
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	apiURL := fs.String("api-url", "", "api base url, e.g. http://127.0.0.1:56700")
+	user := fs.String("username", "", "admin username")
+	pass := fs.String("password", "", "admin password")
+	checkOnly := fs.Bool("check", false, "check update only")
+	apply := fs.Bool("apply", false, "apply upgrade if newer")
+	_ = fs.Parse(os.Args[2:])
+	cfg := &Config{
+		APIURL:             strings.TrimSpace(*apiURL),
+		AutoUpdateAPIURL:   strings.TrimSpace(*apiURL),
+		AutoUpdateUsername: strings.TrimSpace(*user),
+		AutoUpdatePassword: strings.TrimSpace(*pass),
+	}
+	if cfg.APIURL == "" || cfg.AutoUpdateUsername == "" || cfg.AutoUpdatePassword == "" {
+		log.Fatalf("upgrade usage: vpn-agent upgrade --api-url URL --username USER --password PASS [--check|--apply]")
+	}
+	if !*checkOnly && !*apply {
+		*checkOnly = true
+	}
+	if *checkOnly {
+		if err := tryAutoUpgrade(cfg, false, false); err != nil {
+			log.Fatalf("upgrade check failed: %v", err)
+		}
+		log.Printf("upgrade check done")
+		return
+	}
+	if err := tryAutoUpgrade(cfg, true, true); err != nil {
+		log.Fatalf("upgrade apply failed: %v", err)
+	}
+	log.Printf("upgrade apply done")
 }
 
 func sendResult(conn *websocket.Conn, msgType string, payload any) {

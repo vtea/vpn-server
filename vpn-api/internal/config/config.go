@@ -28,7 +28,8 @@ func Load() Config {
 		CADir:              getOrDefault("CA_DIR", "./ca"),
 		ExternalURL:        getOrDefault("EXTERNAL_URL", "http://127.0.0.1:"+port),
 		ExternalURLLAN:     strings.TrimSpace(os.Getenv("EXTERNAL_URL_LAN")),
-		AgentLatestVersion: strings.TrimSpace(getOrDefault("AGENT_LATEST_VERSION", "0.2.1")),
+		// Empty means "auto detect from .agent-release-version".
+		AgentLatestVersion: strings.TrimSpace(os.Getenv("AGENT_LATEST_VERSION")),
 		CORSAllowedOrigins: parseCommaList(os.Getenv("CORS_ALLOWED_ORIGINS")),
 		IPListDualEnabled:  parseBoolDefault(os.Getenv("IPLIST_DUAL_ENABLED"), true),
 	}

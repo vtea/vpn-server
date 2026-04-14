@@ -90,6 +90,13 @@ type tunnelStatusEval struct {
 	LastHealthyAt       *time.Time
 }
 
+func normalizeAgentVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimSuffix(v, "-unknown")
+	return strings.TrimSpace(v)
+}
+
 func canonicalTunnelStatus(s string) string {
 	switch strings.TrimSpace(strings.ToLower(s)) {
 	case "ok":
@@ -307,7 +314,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 			if json.Unmarshal(msg.Payload, &rpt) == nil {
 				updates := map[string]any{"status": "online"}
 				if rpt.AgentVersion != "" {
-					updates["agent_version"] = rpt.AgentVersion
+					updates["agent_version"] = normalizeAgentVersion(rpt.AgentVersion)
 				}
 				if rpt.AgentArch != "" {
 					updates["agent_arch"] = strings.TrimSpace(strings.ToLower(rpt.AgentArch))
@@ -319,7 +326,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					updates["agent_capabilities"] = strings.Join(rpt.Capabilities, ",")
 				}
 				hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates)
-				log.Printf("agent report: node=%s version=%s arch=%s capabilities=%d wg_pubkey=%t", ac.NodeID, strings.TrimSpace(rpt.AgentVersion), strings.TrimSpace(rpt.AgentArch), len(rpt.Capabilities), strings.TrimSpace(rpt.WGPublicKey) != "")
+				log.Printf("agent report: node=%s version=%s arch=%s capabilities=%d wg_pubkey=%t", ac.NodeID, normalizeAgentVersion(rpt.AgentVersion), strings.TrimSpace(rpt.AgentArch), len(rpt.Capabilities), strings.TrimSpace(rpt.WGPublicKey) != "")
 			}
 		case "cert_result":
 			var res struct {

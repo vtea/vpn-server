@@ -48,10 +48,11 @@
           </template>
         </el-table-column>
         <el-table-column prop="node.online_users" label="在线" width="70" align="center" />
-        <el-table-column label="Agent版本" width="150">
+        <el-table-column label="Agent版本" width="220">
           <template #default="{ row }">
-            <span>{{ row.node?.agent_version || '-' }}</span>
+            <span>{{ displayAgentVersion(row.node?.agent_version) || '-' }}</span>
             <el-text v-if="row.node?.agent_arch" type="info" size="small"> / {{ row.node.agent_arch }}</el-text>
+            <el-text type="info" size="small"> (latest: {{ latestAgentVersion }})</el-text>
           </template>
         </el-table-column>
         <el-table-column label="升级提示" width="120" align="center">
@@ -239,6 +240,11 @@ const upgradeForm = reactive({
 })
 const upgradeCandidates = ref({})
 
+const displayAgentVersion = (v) => {
+  const s = String(v || '').trim().replace(/^v/i, '').replace(/-unknown$/i, '')
+  return s
+}
+
 const filteredRows = computed(() => {
   let list = rows.value
   if (statusFilter.value) {
@@ -294,7 +300,7 @@ const loadNodeUpgradeStatus = async () => {
       return
     }
     const items = res.data?.items || []
-    if (res.data?.latest_version) latestAgentVersion.value = res.data.latest_version
+    if (res.data?.latest_version) latestAgentVersion.value = displayAgentVersion(res.data.latest_version)
     const m = {}
     for (const it of items) {
       if (it.node_id) m[it.node_id] = it
@@ -443,7 +449,7 @@ const loadUpgradeDefaults = async () => {
       throw new Error('defaults endpoint not available')
     }
     const d = res.data?.defaults || {}
-    if (d.version) latestAgentVersion.value = d.version
+    if (d.version) latestAgentVersion.value = displayAgentVersion(d.version)
     upgradeCandidates.value = d.candidates || {}
     upgradeForm.version = d.version || upgradeForm.version
     upgradeForm.arch = d.recommended_arch || d.arch || upgradeForm.arch
@@ -472,7 +478,7 @@ const loadUpgradeDefaults = async () => {
       }
     }
     upgradeCandidates.value = fallback.candidates
-    latestAgentVersion.value = fallback.version
+    latestAgentVersion.value = displayAgentVersion(fallback.version)
     upgradeForm.version = fallback.version
     upgradeForm.arch = fallback.recommended_arch
     applyArchCandidate(upgradeForm.arch, fallback)
@@ -552,7 +558,7 @@ const upgradeStatusTagType = (status) => {
 }
 
 const parseVersion = (v) => {
-  const s = String(v || '').trim().replace(/^v/i, '')
+  const s = displayAgentVersion(v)
   if (!s) return null
   const parts = s.split('.').map((x) => Number.parseInt(x, 10))
   if (parts.some((n) => Number.isNaN(n))) return null

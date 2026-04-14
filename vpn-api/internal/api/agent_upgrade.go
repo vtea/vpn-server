@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,62 @@ import (
 	"vpn-api/internal/config"
 	"vpn-api/internal/model"
 )
+
+func readFirstLineTrimmed(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(lines[0])
+}
+
+// effectiveLatestAgentVersion returns the "latest version" used by API for upgrade hints.
+// Priority:
+// 1) AGENT_LATEST_VERSION (existing behavior; explicit override)
+// 2) .agent-release-version near deployment root (auto from deploy script)
+// 3) fallback "0.2.1"
+func (h *Handler) effectiveLatestAgentVersion() string {
+	if v := strings.TrimSpace(h.agentLatestVersion); v != "" {
+		return v
+	}
+	// deploy-control-plane writes INSTALL_DIR/.agent-release-version.
+	// When DB_PATH is INSTALL_DIR/data/vpn.db, we can infer INSTALL_DIR from DB_PATH.
+	if strings.EqualFold(h.dbDriver, "sqlite") && strings.TrimSpace(h.dbPath) != "" {
+		dp := filepath.Clean(strings.TrimSpace(h.dbPath))
+		dataDir := filepath.Dir(dp)
+		installDir := filepath.Clean(filepath.Join(dataDir, ".."))
+		if v := readFirstLineTrimmed(filepath.Join(installDir, ".agent-release-version")); v != "" {
+			return v
+		}
+	}
+	// Secondary candidates for custom layouts.
+	if h.caDir != "" {
+		parent := filepath.Dir(filepath.Clean(h.caDir))
+		if v := readFirstLineTrimmed(filepath.Join(parent, ".agent-release-version")); v != "" {
+			return v
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		wd = filepath.Clean(wd)
+		for _, p := range []string{
+			filepath.Join(wd, ".agent-release-version"),
+			filepath.Join(wd, "..", ".agent-release-version"),
+		} {
+			if v := readFirstLineTrimmed(p); v != "" {
+				return v
+			}
+		}
+	}
+	return "0.2.1"
+}
 
 type createAgentUpgradeReq struct {
 	Version      string `json:"version" binding:"required"`
@@ -31,7 +88,7 @@ func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
 	baseLAN := strings.TrimRight(h.externalURLLAN, "/")
 
 	makeURLs := func(arch string) (string, string) {
-		ver := strings.TrimSpace(nonEmptyOr(h.agentLatestVersion, "0.2.1"))
+		ver := h.effectiveLatestAgentVersion()
 		artifact := DefaultAgentDownloadPackage + "+" + ver
 		pubURL := base + "/api/downloads/vpn-agent/" + arch + "/" + artifact
 		lanURL := ""
@@ -74,7 +131,7 @@ func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"defaults": gin.H{
-			"version":          nonEmptyOr(h.agentLatestVersion, "0.2.1"),
+			"version":          h.effectiveLatestAgentVersion(),
 			"download_url":     recPub,
 			"download_url_lan": recLan,
 			"sha256":           recSHA,
@@ -270,7 +327,7 @@ ORDER BY i.updated_at DESC;
 		UpdatedAt     string `json:"updated_at"`
 		NeedsUpdate   bool   `json:"needs_update"`
 	}
-	latest := strings.TrimSpace(nonEmptyOr(h.agentLatestVersion, "0.2.1"))
+	latest := h.effectiveLatestAgentVersion()
 	out := make([]item, 0, len(rows))
 	for _, r := range rows {
 		cur := strings.TrimSpace(r.ResultVersion)
