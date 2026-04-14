@@ -52,7 +52,7 @@
           <template #default="{ row }">
             <span>{{ displayAgentVersion(row.node?.agent_version) || '-' }}</span>
             <el-text v-if="row.node?.agent_arch" type="info" size="small"> / {{ row.node.agent_arch }}</el-text>
-            <el-text type="info" size="small"> (latest: {{ latestAgentVersion }})</el-text>
+            <el-text type="info" size="small"> (latest: {{ latestAgentVersion || '-' }})</el-text>
           </template>
         </el-table-column>
         <el-table-column label="升级提示" width="120" align="center">
@@ -228,7 +228,7 @@ const upgradeLoading = ref(false)
 const upgradeTask = ref({})
 const upgradeItems = ref([])
 const upgradePollTimer = ref(null)
-const latestAgentVersion = ref('0.2.1')
+const latestAgentVersion = ref('')
 const nodeUpgradeStatusMap = ref({})
 const upgradeForm = reactive({
   version: '',
@@ -458,20 +458,20 @@ const loadUpgradeDefaults = async () => {
     // Backward compatible fallback when backend endpoint is unavailable (e.g. old api binary).
     const origin = window.location.origin
     const fallback = {
-      version: '0.2.1',
+      version: '19700101.000000',
       arch: 'amd64',
       recommended_arch: 'amd64',
-      download_url: `${origin}/api/downloads/vpn-agent/amd64/vpn-agent+0.2.1`,
+      download_url: `${origin}/api/downloads/vpn-agent/amd64/vpn-agent+19700101.000000`,
       download_url_lan: '',
       sha256: '',
       candidates: {
         amd64: {
-          download_url: `${origin}/api/downloads/vpn-agent/amd64/vpn-agent+0.2.1`,
+          download_url: `${origin}/api/downloads/vpn-agent/amd64/vpn-agent+19700101.000000`,
           download_url_lan: '',
           sha256: ''
         },
         arm64: {
-          download_url: `${origin}/api/downloads/vpn-agent/arm64/vpn-agent+0.2.1`,
+          download_url: `${origin}/api/downloads/vpn-agent/arm64/vpn-agent+19700101.000000`,
           download_url_lan: '',
           sha256: ''
         }
@@ -579,6 +579,8 @@ const compareVersion = (a, b) => {
 
 const agentUpgradeHintText = (current) => {
   if (!current) return '未上报'
+  if (!parseVersion(current)) return '版本异常'
+  if (!parseVersion(latestAgentVersion.value)) return '版本未知'
   const cmp = compareVersion(current, latestAgentVersion.value)
   if (cmp >= 0) return '已最新'
   return '需更新'
@@ -586,6 +588,7 @@ const agentUpgradeHintText = (current) => {
 
 const agentUpgradeHintType = (current) => {
   if (!current) return 'warning'
+  if (!parseVersion(current) || !parseVersion(latestAgentVersion.value)) return 'warning'
   const cmp = compareVersion(current, latestAgentVersion.value)
   return cmp >= 0 ? 'success' : 'danger'
 }

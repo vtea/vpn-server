@@ -39,7 +39,7 @@ func readFirstLineTrimmed(path string) string {
 // Priority:
 // 1) AGENT_LATEST_VERSION (existing behavior; explicit override)
 // 2) .agent-release-version near deployment root (auto from deploy script)
-// 3) fallback "0.2.1"
+// 3) fallback "19700101.000000"
 func (h *Handler) effectiveLatestAgentVersion() string {
 	if v := strings.TrimSpace(h.agentLatestVersion); v != "" {
 		return v
@@ -72,7 +72,7 @@ func (h *Handler) effectiveLatestAgentVersion() string {
 			}
 		}
 	}
-	return "0.2.1"
+	return "19700101.000000"
 }
 
 type createAgentUpgradeReq struct {

@@ -359,3 +359,55 @@ bash /opt/vpn-api/scripts/wg-gate-check.sh \
 1. 触发 `POST /api/nodes/:id/wg-refresh`；
 2. 对比刷新前后 `openvpn-*` `MainPID`（确认未受影响）；
 3. 校验 `invalid_config` 是否仅落在预期异常 peer（可选）。
+
+---
+
+## 14. Agent 版本与自动更新
+
+### 14.1 版本号规则
+
+- Agent 构建版本采用自动构建号：`YYYYMMDD.HHMMSS`。
+- 示例：`20260414.181530`。
+- 页面显示统一为：`<version> / <arch>`，不再显示 `-unknown` 后缀。
+
+### 14.2 手动检查/升级命令
+
+在节点上执行：
+
+```bash
+# 仅检查是否有新版本（不替换、不重启）
+vpn-agent upgrade --api-url "http://<api>:56700" --username "admin" --password "<pwd>" --check
+
+# 检测并升级（有新版本才替换并重启 vpn-agent）
+vpn-agent upgrade --api-url "http://<api>:56700" --username "admin" --password "<pwd>" --apply
+```
+
+### 14.3 自动更新开关（每 3 小时）
+
+在节点 `agent` 配置或环境变量中设置：
+
+```bash
+AUTO_UPDATE_ENABLED=true
+AUTO_UPDATE_INTERVAL_SEC=10800
+AUTO_UPDATE_API_URL=http://<api>:56700
+AUTO_UPDATE_USERNAME=admin
+AUTO_UPDATE_PASSWORD=<pwd>
+```
+
+说明：
+
+- 默认关闭（`AUTO_UPDATE_ENABLED=false` 或未设置）；
+- 自动更新仅重启 `vpn-agent`，不重启 `openvpn-*`。
+
+### 14.4 快速验证
+
+```bash
+# 1) 查看 agent 当前版本上报
+curl -sS -H "Authorization: Bearer <jwt>" "http://<api>:56700/api/nodes" | jq '.items[] | {id:.node.id, ver:.node.agent_version, arch:.node.agent_arch}'
+
+# 2) 验证升级默认版本
+curl -sS -H "Authorization: Bearer <jwt>" "http://<api>:56700/api/agent-upgrades/defaults" | jq '.defaults.version'
+
+# 3) 验证 WG 刷新门禁
+bash /opt/vpn-api/scripts/wg-gate-check.sh --api-url "http://127.0.0.1:56700" --username "admin"
+```

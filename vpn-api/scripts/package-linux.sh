@@ -5,12 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${PROJECT_DIR}/dist"
 OUT_NAME="vpn-api-linux-bundle"
-VERSION="${VERSION:-$(date +%Y%m%d-%H%M%S)}"
+VERSION="${VERSION:-$(date +%Y%m%d.%H%M%S)}"
 PKG_ROOT="${DIST_DIR}/${OUT_NAME}-${VERSION}"
 AGENT_RELEASE_FALLBACK="${VERSION}"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/agent-release-version.inc.sh"
-AGENT_RELEASE_VERSION="${AGENT_RELEASE_VERSION:-$(resolve_agent_release_version "$PROJECT_DIR")}"
+AGENT_RELEASE_VERSION="${AGENT_RELEASE_VERSION:-${VERSION}}"
 
 require_cmd() {
   local cmd="$1"

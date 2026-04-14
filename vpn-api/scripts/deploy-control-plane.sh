@@ -1278,7 +1278,7 @@ find_source() {
 
 build_backend() {
   log "Phase 3: 编译后端 ..."
-  AGENT_RELEASE_VERSION="$(resolve_agent_release_version)"
+  AGENT_RELEASE_VERSION="${AGENT_RELEASE_VERSION:-$(date +%Y%m%d.%H%M%S)}"
   export AGENT_RELEASE_VERSION
   ok "Agent 构建版本字符串: ${AGENT_RELEASE_VERSION}"
   local agent_ldflags="-X main.buildVersion=${AGENT_RELEASE_VERSION}"
@@ -1567,7 +1567,7 @@ main() {
   fi
   install_deps
   find_source
-  log "AGENT_RELEASE_VERSION（编译前预览，与 Phase 3/systemd 一致）: $(resolve_agent_release_version)"
+  log "AGENT_RELEASE_VERSION（编译前预览，与 Phase 3/systemd 一致）: ${AGENT_RELEASE_VERSION:-$(date +%Y%m%d.%H%M%S)}"
   build_backend
   build_frontend
   setup_api

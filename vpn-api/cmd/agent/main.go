@@ -45,7 +45,7 @@ type WSMessage struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-const defaultAgentVersion = "0.2.1"
+const defaultAgentVersion = "19700101.000000"
 
 // buildVersion can be injected by -ldflags "-X main.buildVersion=vX.Y.Z".
 var buildVersion string
@@ -725,7 +725,7 @@ func runManualUpgrade() {
 		AutoUpdatePassword: strings.TrimSpace(*pass),
 	}
 	if cfg.APIURL == "" || cfg.AutoUpdateUsername == "" || cfg.AutoUpdatePassword == "" {
-		log.Fatalf("upgrade usage: vpn-agent upgrade --api-url URL --username USER --password PASS [--check|--apply]")
+		log.Fatalf("upgrade usage: vpn-server upgrade --api-url URL --username USER --password PASS [--check|--apply]")
 	}
 	if !*checkOnly && !*apply {
 		*checkOnly = true

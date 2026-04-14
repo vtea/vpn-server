@@ -40,7 +40,7 @@ resolve_agent_release_version() {
     done
   fi
   if [[ -z "$v" ]]; then
-    v="${AGENT_RELEASE_FALLBACK:-0.2.1}"
+    v="${AGENT_RELEASE_FALLBACK:-$(date +%Y%m%d.%H%M%S)}"
   fi
   v="${v// /_}"
   v="${v//\"/}"

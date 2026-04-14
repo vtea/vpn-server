@@ -49,11 +49,22 @@ type Handler struct {
 }
 
 func NewHandler(db *gorm.DB, jwtSecret string, hub *WSHub, ca *service.CentralCA, externalURL, externalURLLAN, agentLatestVersion, caDir, dbPath, dbDriver string, ipListDualEnabled bool) *Handler {
-	return &Handler{
+	h := &Handler{
 		db: db, jwtSecret: jwtSecret, hub: hub, ca: ca, adminWS: NewAdminWSHub(),
 		externalURL: externalURL, externalURLLAN: strings.TrimSpace(externalURLLAN), agentLatestVersion: strings.TrimSpace(agentLatestVersion), caDir: caDir,
 		dbPath: dbPath, dbDriver: strings.TrimSpace(dbDriver), ipListDualEnabled: ipListDualEnabled,
 	}
+	h.normalizePersistedAgentVersions()
+	return h
+}
+
+func (h *Handler) normalizePersistedAgentVersions() {
+	if h == nil || h.db == nil {
+		return
+	}
+	_ = h.db.Model(&model.Node{}).
+		Where("agent_version LIKE ?", "%-unknown").
+		Update("agent_version", gorm.Expr("REPLACE(agent_version, ?, '')", "-unknown")).Error
 }
 
 func (h *Handler) audit(c *gin.Context, action, target, detail string) {
