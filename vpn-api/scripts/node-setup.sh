@@ -167,7 +167,9 @@ check_instance_ports_from_bootstrap_json() {
   log "检查 OpenVPN 监听端口占用（控制面下发） ..."
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(echo "$json" | jq -r ".instances[$i].enabled // true")"
-    [[ "$inst_en" == "false" ]] && continue
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
     mode="$(echo "$json" | jq -r ".instances[$i].mode // \"unknown\"")"
     port="$(echo "$json" | jq -r ".instances[$i].port")"
     p="$(echo "$json" | jq -r ".instances[$i].proto // \"udp\"" | tr '[:upper:]' '[:lower:]')"
@@ -240,6 +242,19 @@ check_instance_ports_from_bootstrap_json() {
       fi
     fi
   fi
+}
+
+is_enabled_value() {
+  local v
+  v="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
+  case "$v" in
+    ""|"0"|"false"|"no"|"off"|"null")
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 # 清理可能与本脚本生成实例冲突的历史 OpenVPN 单元（例如 openvpn-server@server）
@@ -545,7 +560,9 @@ collect_required_ports_from_bootstrap_file() {
   ic="$(jq '.instances | length' "$f")"
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
-    [[ "$inst_en" == "false" ]] && continue
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
     mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
     port="$(jq -r ".instances[$i].port" "$f")"
     p="$(jq -r ".instances[$i].proto // \"udp\"" "$f" | tr '[:upper:]' '[:lower:]')"
@@ -718,7 +735,9 @@ post_deploy_health_check() {
   ic="$(jq '.instances | length' "$f")"
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
-    [[ "$inst_en" == "false" ]] && continue
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
     mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
     if is_mode_skipped "$mode"; then
       warn "服务健康跳过: openvpn-${mode}.service（管理员选择跳过）"
@@ -764,7 +783,9 @@ print_external_firewall_reminder() {
   ic="$(echo "$json" | jq '.instances | length')"
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(echo "$json" | jq -r ".instances[$i].enabled // true")"
-    [[ "$inst_en" == "false" ]] && continue
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
     port="$(echo "$json" | jq -r ".instances[$i].port")"
     p="$(echo "$json" | jq -r ".instances[$i].proto // \"udp\"" | tr '[:upper:]' '[:lower:]')"
     [[ "$p" != "tcp" ]] && p="udp"
@@ -1293,8 +1314,8 @@ mgmt_port_for_mode() {
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
   INST_EN="$(echo "$NODE_JSON" | jq -r ".instances[$i].enabled // true")"
-  if [[ "$INST_EN" == "false" ]]; then
-    log "  Skip OpenVPN ${MODE:-?} (instance disabled in control plane)"
+  if ! is_enabled_value "$INST_EN"; then
+    log "  Skip OpenVPN ${MODE:-?} (instance disabled in control plane, enabled=$INST_EN)"
     continue
   fi
   PORT="$(echo "$NODE_JSON" | jq -r ".instances[$i].port")"
@@ -1488,7 +1509,7 @@ TABLE_NUM=100
 
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   INST_EN="$(jq -r ".instances[$i].enabled // true" "$NODE_JSON_FILE")"
-  if [[ "$INST_EN" == "false" ]]; then
+  if ! is_enabled_value "$INST_EN"; then
     continue
   fi
 
@@ -1668,7 +1689,7 @@ INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE")"
 
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   INST_EN="$(jq -r ".instances[$i].enabled // true" "$NODE_JSON_FILE")"
-  if [[ "$INST_EN" == "false" ]]; then
+  if ! is_enabled_value "$INST_EN"; then
     continue
   fi
 
@@ -1721,9 +1742,9 @@ SKIPPED_OPENVPN_MODES=()
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
   INST_EN="$(echo "$NODE_JSON" | jq -r ".instances[$i].enabled // true")"
-  if [[ "$INST_EN" == "false" ]]; then
+  if ! is_enabled_value "$INST_EN"; then
     systemctl disable --now "openvpn-${MODE}.service" 2>/dev/null || true
-    log "  OpenVPN ${MODE} left stopped (instance disabled)"
+    log "  OpenVPN ${MODE} left stopped (instance disabled, enabled=$INST_EN)"
     continue
   fi
 
@@ -1862,7 +1883,7 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   PORT="$(echo "$NODE_JSON" | jq -r ".instances[$i].port")"
   P="$(echo "$NODE_JSON" | jq -r ".instances[$i].proto // \"udp\"" | tr '[:upper:]' '[:lower:]')"
   [[ "$P" != "tcp" ]] && P="udp"
-  if [[ "$INST_EN" == "false" ]]; then
+  if ! is_enabled_value "$INST_EN"; then
     log "  openvpn-${MODE} -> :${PORT}/${P} (disabled)"
   else
     log "  openvpn-${MODE} -> :${PORT}/${P}"
