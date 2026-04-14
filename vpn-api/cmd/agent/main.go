@@ -1254,6 +1254,7 @@ const (
 	defaultWGListenOwnerIface = "wg-node-10"
 	failoverRestartThreshold  = 2
 	failoverCooldownDuration  = 5 * time.Minute
+	wgHandshakeFreshWindowSec = 300
 )
 
 type failoverTunnel struct {
@@ -1265,6 +1266,8 @@ type failoverTunnel struct {
 type failoverPeerState struct {
 	ConsecutiveFailures int
 	CooldownUntil       time.Time
+	LastRxBytes         int64
+	LastTxBytes         int64
 }
 
 func parseFailoverTunnelsFromConfigJSON(data []byte) []failoverTunnel {
@@ -1358,6 +1361,10 @@ func classifyWGStartError(msg string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func isFreshWGHandshake(ageSec int64) bool {
+	return ageSec >= 0 && ageSec <= wgHandshakeFreshWindowSec
 }
 
 func sanitizeWGConfigListenPorts(ownerIface string, reqListenPort int) ([]string, error) {
@@ -1904,7 +1911,7 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 		for _, t := range tunnels {
 			state := peerStates[t.PeerNodeID]
 			if state == nil {
-				state = &failoverPeerState{}
+				state = &failoverPeerState{LastRxBytes: -1, LastTxBytes: -1}
 				peerStates[t.PeerNodeID] = state
 			}
 			now := time.Now()
@@ -1979,20 +1986,48 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 					continue
 				}
 			}
-			_, err := exec.Command("ping", "-c", "1", "-W", "2", t.PeerIP).Output()
-			if err != nil {
+			hsAge, hsErr := queryWGHandshakeAgeSec(iface)
+			rx, tx, txErr := queryWGTransfer(iface)
+			hasTrafficProgress := false
+			if txErr == nil {
+				if state.LastRxBytes >= 0 && state.LastTxBytes >= 0 && (rx > state.LastRxBytes || tx > state.LastTxBytes) {
+					hasTrafficProgress = true
+				}
+				state.LastRxBytes = rx
+				state.LastTxBytes = tx
+			}
+			isHealthy := (hsErr == nil && isFreshWGHandshake(hsAge)) || hasTrafficProgress
+			if !isHealthy {
 				state.ConsecutiveFailures++
 				if state.ConsecutiveFailures < failoverRestartThreshold {
 					logKey := "probe-failed-threshold:" + t.PeerNodeID
 					if shouldLogFailoverEvent(lastLogAt, logKey, now) {
-						log.Printf("failover: tunnel to %s probe failed (%d/%d), waiting before restart", t.PeerNodeID, state.ConsecutiveFailures, failoverRestartThreshold)
+						log.Printf(
+							"failover: tunnel to %s unhealthy (%d/%d), waiting before restart (hs_age=%d hs_err=%v tx_err=%v)",
+							t.PeerNodeID,
+							state.ConsecutiveFailures,
+							failoverRestartThreshold,
+							hsAge,
+							hsErr,
+							txErr,
+						)
 					}
 					continue
 				}
-				log.Printf("failover: tunnel to %s DOWN, attempting restart (reason=probe_failed)", t.PeerNodeID)
+				log.Printf("failover: tunnel to %s DOWN, attempting restart (reason=stale_handshake_or_no_transfer)", t.PeerNodeID)
 				exec.Command("systemctl", "restart", "wg-quick@wg-"+t.PeerNodeID).Run()
 				time.Sleep(3 * time.Second)
-				if _, err2 := exec.Command("ping", "-c", "1", "-W", "2", t.PeerIP).Output(); err2 != nil {
+				hsAge2, hsErr2 := queryWGHandshakeAgeSec(iface)
+				rx2, tx2, txErr2 := queryWGTransfer(iface)
+				recovered := hsErr2 == nil && isFreshWGHandshake(hsAge2)
+				if !recovered && txErr2 == nil && state.LastRxBytes >= 0 && state.LastTxBytes >= 0 && (rx2 > state.LastRxBytes || tx2 > state.LastTxBytes) {
+					recovered = true
+				}
+				if txErr2 == nil {
+					state.LastRxBytes = rx2
+					state.LastTxBytes = tx2
+				}
+				if !recovered {
 					log.Printf("failover: tunnel to %s still DOWN after restart", t.PeerNodeID)
 					state.CooldownUntil = now.Add(failoverCooldownDuration)
 					state.ConsecutiveFailures = 0
