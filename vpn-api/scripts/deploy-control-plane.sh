@@ -864,11 +864,12 @@ precheck() {
 
   echo ""
   echo "  [核心依赖]"
-  check_cmd curl curl
-  check_cmd wget wget
-  check_cmd git git
-  check_cmd jq jq
-  check_cmd sqlite3 sqlite3
+  # set -e 下缺失依赖会返回非 0；这里统一吞掉返回值，仅收集 TO_INSTALL，避免预检提前退出
+  check_cmd curl curl || true
+  check_cmd wget wget || true
+  check_cmd git git || true
+  check_cmd jq jq || true
+  check_cmd sqlite3 sqlite3 || true
 
   echo ""
   echo "  [Go 编译环境]"
