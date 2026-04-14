@@ -230,13 +230,13 @@
               <code>instances.proto</code> 为准；下拉未点「保存」前不会生效。用户 .ovpn 的 <code>proto</code> 在签发时写入，改协议后须在「用户 → 授权」中<strong>重试签发</strong>并重新下载配置。
             </p>
             <p>
-              <strong><code>local-only</code></strong>：向客户端推送默认路由，流量经本入口节点公网出口上网（NAT 到本机 WAN）。<strong>出口节点</strong>留空即可；若填写对端节点 ID（须与本页「相关隧道」一致），则该实例流量经 WireGuard 到对端再出网。
+              <strong>节点直连（<code>node-direct</code>）</strong>：向客户端推送默认路由，流量经本入口节点公网出口上网（NAT 到本机 WAN）。<strong>出口节点</strong>留空即可；若填写对端节点 ID（须与本页「相关隧道」一致），则该实例流量经 WireGuard 到对端再出网。
             </p>
             <p>
-              <strong><code>hk-smart-split</code> / <code>hk-global</code> / <code>us-global</code></strong>：<strong>出口节点</strong>填写对端节点 ID；留空时节点脚本仍按旧逻辑尝试 <code>hongkong</code>/<code>usa</code> 等内置名。
+              <strong>国内分流（<code>cn-split</code>）/ 全局（<code>global</code>）</strong>：<strong>出口节点</strong>填写对端节点 ID；留空时节点脚本仍按旧逻辑尝试 <code>hongkong</code> 等内置名。
             </p>
             <p>
-              <strong>新建节点</strong>默认仅启用 <code>local-only</code>；其余模式需在下方表格中打开「启用」后，在节点上重新执行安装脚本或等待同步，以生成对应 OpenVPN 与路由。
+              <strong>新建节点</strong>默认仅启用 <code>node-direct</code>（节点直连）；其余模式需在下方表格中打开「启用」后，在节点上重新执行安装脚本或等待同步，以生成对应 OpenVPN 与路由。
             </p>
             <p>
               <strong>在线用户</strong>由 Agent 按各模式固定 management 端口统计；若长期为 0 请见运维手册第 3.3 节。若客户端开启「仅允许 VPN 流量」而所用实例未推默认路由（旧版节点），可能出现连上但无公网，见用户指南。
@@ -254,7 +254,7 @@
           effect="plain"
           class="listen-summary-tag"
         >
-          {{ inst.mode }} 已保存 {{ protoUpper(inst.proto) }}/{{ inst.port
+          {{ modeLabel(inst.mode) }} 已保存 {{ protoUpper(inst.proto) }}/{{ inst.port
           }}<span v-if="instanceListenDirty(inst)" class="listen-summary-pending">
             · 未保存 {{ protoUpper(editProto[inst.id]) }}/{{ editPort[inst.id] }}
           </span>
@@ -291,7 +291,9 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="mode" label="模式" min-width="128" show-overflow-tooltip />
+        <el-table-column label="模式" min-width="128" show-overflow-tooltip>
+          <template #default="{ row }">{{ modeLabel(row.mode) }}</template>
+        </el-table-column>
         <el-table-column label="协议" width="104" align="center">
           <template #default="{ row }">
             <el-select v-model="editProto[row.id]" size="small" class="inst-select-proto">
@@ -330,7 +332,7 @@
                 clearable
                 filterable
                 :placeholder="
-                  row.mode === 'local-only' ? '未指定（本入口节点公网出口）' : '未指定（HK/US 内置名回退）'
+                  row.mode === 'node-direct' ? '未指定（本入口节点公网出口）' : '未指定（内置名回退）'
                 "
                 size="small"
                 class="inst-select-exit"
@@ -393,7 +395,9 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column prop="mode" label="模式" min-width="128" show-overflow-tooltip />
+            <el-table-column label="模式" min-width="128" show-overflow-tooltip>
+              <template #default="{ row }">{{ modeLabel(row.mode) }}</template>
+            </el-table-column>
             <el-table-column label="协议" width="96" align="center">
               <template #default="{ row }">{{ protoUpper(row.proto) }}</template>
             </el-table-column>
@@ -564,11 +568,19 @@ const rotateData = reactive({
 const enabledInstances = computed(() => (instances.value || []).filter((i) => i.enabled === true))
 const disabledInstances = computed(() => (instances.value || []).filter((i) => i.enabled !== true))
 
+const modeLabel = (mode) => {
+  const m = {
+    'node-direct': '节点直连',
+    'cn-split': '国内分流',
+    global: '全局'
+  }
+  return m[mode] || mode || '-'
+}
+
 const instanceModeUsesExit = (mode) =>
-  mode === 'local-only' ||
-  mode === 'hk-smart-split' ||
-  mode === 'hk-global' ||
-  mode === 'us-global'
+  mode === 'node-direct' ||
+  mode === 'cn-split' ||
+  mode === 'global'
 
 const peerTunnelIds = computed(() => {
   const ids = []
@@ -594,7 +606,7 @@ const tunnelPeerLine = (row) => {
 const exitCellLabel = (row) => {
   const e = (row.exit_node || '').trim()
   if (!e) {
-    return row.mode === 'local-only' ? '本入口节点出口' : '—'
+    return row.mode === 'node-direct' ? '本入口节点出口' : '—'
   }
   return peerTunnelOptionLabel(e)
 }

@@ -29,10 +29,10 @@ import (
 )
 
 type Config struct {
-	APIURL     string `json:"api_url"`
-	NodeToken  string `json:"node_token"`
-	NodeID     string `json:"node_id"`
-	EasyRSADir string `json:"easyrsa_dir"`
+	APIURL                string `json:"api_url"`
+	NodeToken             string `json:"node_token"`
+	NodeID                string `json:"node_id"`
+	EasyRSADir            string `json:"easyrsa_dir"`
 	AutoUpdateEnabled     bool   `json:"auto_update_enabled"`
 	AutoUpdateIntervalSec int    `json:"auto_update_interval_sec"`
 	AutoUpdateAPIURL      string `json:"auto_update_api_url"`
@@ -1310,11 +1310,11 @@ PersistentKeepalive = 25
 		}
 	}
 	resp := map[string]any{
-		"success":        len(restartErrors) == 0,
-		"node_id":        req.NodeID,
-		"total_peers":    len(results),
-		"success_peers":  okCount,
-		"results":        results,
+		"success":       len(restartErrors) == 0,
+		"node_id":       req.NodeID,
+		"total_peers":   len(results),
+		"success_peers": okCount,
+		"results":       results,
 	}
 	if len(restartErrors) > 0 {
 		resp["error"] = strings.Join(restartErrors, "; ")
@@ -1497,14 +1497,12 @@ func applyOpenVPNServerFromInstancesPayload(payload []byte) {
 // openvpnMgmtPortForMode 与 node-setup.sh 中 per-mode management 端口约定一致（与 instances JSON 数组顺序无关）。
 func openvpnMgmtPortForMode(mode string) (int, bool) {
 	switch mode {
-	case "local-only":
+	case "node-direct":
 		return 56730, true
-	case "hk-smart-split":
+	case "cn-split":
 		return 56731, true
-	case "hk-global":
+	case "global":
 		return 56732, true
-	case "us-global":
-		return 56733, true
 	default:
 		return 0, false
 	}

@@ -868,7 +868,7 @@ do_uninstall() {
   systemctl disable vpn-agent.service 2>/dev/null || true
   systemctl stop vpn-routing.service 2>/dev/null || true
   systemctl disable vpn-routing.service 2>/dev/null || true
-  for m in local-only hk-smart-split hk-global us-global; do
+  for m in node-direct cn-split global; do
     systemctl stop "openvpn-${m}.service" 2>/dev/null || true
     systemctl disable "openvpn-${m}.service" 2>/dev/null || true
     rm -f "/etc/systemd/system/openvpn-${m}.service"
@@ -1280,10 +1280,9 @@ mkdir -p /var/log/openvpn
 mgmt_port_for_mode() {
   local m="$1" idx="$2"
   case "$m" in
-    local-only) echo $((56730 + 0)) ;;
-    hk-smart-split) echo $((56730 + 1)) ;;
-    hk-global) echo $((56730 + 2)) ;;
-    us-global) echo $((56730 + 3)) ;;
+    node-direct) echo $((56730 + 0)) ;;
+    cn-split) echo $((56730 + 1)) ;;
+    global) echo $((56730 + 2)) ;;
     *)
       echo $((56730 + idx))
       log "  WARNING: unknown mode $m for management port, fallback 56730+$idx"
@@ -1499,16 +1498,16 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   [[ "$EXIT_NODE" == "null" ]] && EXIT_NODE=""
 
   case "$MODE" in
-    local-only)
+    node-direct)
       # 无 exit_node：走主机默认路由 + NAT SNAT 到本机 WAN（不建策略表）
       if [[ -z "$EXIT_NODE" ]]; then
         continue
       fi
       TABLE_NUM=$((TABLE_NUM + 1))
       PEER_IP="$(get_peer_ip "$EXIT_NODE")"
-      [[ -z "$PEER_IP" ]] && { echo "No tunnel peer for local-only exit_node=$EXIT_NODE"; continue; }
+      [[ -z "$PEER_IP" ]] && { echo "No tunnel peer for node-direct exit_node=$EXIT_NODE"; continue; }
       PEER_DEV="$(pick_wg_dev "$EXIT_NODE" "")"
-      [[ -z "$PEER_DEV" ]] && { echo "No wg dev for local-only exit_node=$EXIT_NODE"; continue; }
+      [[ -z "$PEER_DEV" ]] && { echo "No wg dev for node-direct exit_node=$EXIT_NODE"; continue; }
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
         echo "${TABLE_NUM} vpn_local_exit" >> /etc/iproute2/rt_tables
@@ -1518,9 +1517,9 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
 
       ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
       ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
-      echo "local-only+exit table $TABLE_NUM: all->$PEER_IP ($PEER_DEV) exit_node=$EXIT_NODE"
+      echo "node-direct+exit table $TABLE_NUM: all->$PEER_IP ($PEER_DEV) exit_node=$EXIT_NODE"
       ;;
-    hk-smart-split)
+    cn-split)
       TABLE_NUM=$((TABLE_NUM + 1))
       if [[ -n "$EXIT_NODE" ]]; then
         HK_IP="$(get_peer_ip "$EXIT_NODE")"
@@ -1555,14 +1554,14 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
       echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
       ;;
-    hk-global)
+    global)
       TABLE_NUM=$((TABLE_NUM + 1))
       if [[ -n "$EXIT_NODE" ]]; then
         HK_IP="$(get_peer_ip "$EXIT_NODE")"
       else
         HK_IP="$(get_peer_ip hongkong)"; [[ -z "$HK_IP" ]] && HK_IP="$(get_peer_ip hong-kong)"
       fi
-      [[ -z "$HK_IP" ]] && { echo "No HK tunnel for hk-global (exit_node=${EXIT_NODE:-legacy})"; continue; }
+      [[ -z "$HK_IP" ]] && { echo "No tunnel for global (exit_node=${EXIT_NODE:-legacy})"; continue; }
 
       if [[ -n "$EXIT_NODE" ]]; then
         HK_DEV="$(pick_wg_dev "$EXIT_NODE" "")"
@@ -1578,32 +1577,7 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
 
       ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
       ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
-      echo "hk-global table $TABLE_NUM: all->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
-      ;;
-    us-global)
-      TABLE_NUM=$((TABLE_NUM + 1))
-      if [[ -n "$EXIT_NODE" ]]; then
-        US_IP="$(get_peer_ip "$EXIT_NODE")"
-      else
-        US_IP="$(get_peer_ip usa)"; [[ -z "$US_IP" ]] && US_IP="$(get_peer_ip us)"
-      fi
-      [[ -z "$US_IP" ]] && { echo "No US tunnel for us-global (exit_node=${EXIT_NODE:-legacy})"; continue; }
-
-      if [[ -n "$EXIT_NODE" ]]; then
-        US_DEV="$(pick_wg_dev "$EXIT_NODE" "")"
-      else
-        US_DEV="$(pick_wg_dev "usa" "us")"
-      fi
-
-      grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
-        echo "${TABLE_NUM} vpn_us_global" >> /etc/iproute2/rt_tables
-
-      ip route flush table $TABLE_NUM 2>/dev/null || true
-      ip route add default via "$US_IP" dev "$US_DEV" table $TABLE_NUM 2>/dev/null || true
-
-      ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
-      ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
-      echo "us-global table $TABLE_NUM: all->$US_IP ($US_DEV) exit_node=${EXIT_NODE:-legacy}"
+      echo "global table $TABLE_NUM: all->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
       ;;
   esac
 done
@@ -1707,18 +1681,18 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   iptables -A VPN_FORWARD -d "$SUBNET" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
   case "$MODE" in
-    local-only)
+    node-direct)
       if [[ -z "$EXIT_NODE" ]]; then
         iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -o "$DEFAULT_IF" -j SNAT --to-source "$LOCAL_IP"
       else
         iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -j MASQUERADE
       fi
       ;;
-    *-smart-split)
+    cn-split)
       iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -m set --match-set china-ip dst -j SNAT --to-source "$LOCAL_IP"
       iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -j MASQUERADE
       ;;
-    *-global)
+    global)
       iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -j MASQUERADE
       ;;
   esac

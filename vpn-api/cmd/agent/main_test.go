@@ -8,17 +8,17 @@ import (
 )
 
 func TestParseInstancesFromNodeConfigJSON_topLevel(t *testing.T) {
-	raw := `{"node_id":"node-1","instances":[{"mode":"local-only","proto":"tcp","port":57318}]}`
+	raw := `{"node_id":"node-1","instances":[{"mode":"node-direct","proto":"tcp","port":57318}]}`
 	list := parseInstancesFromNodeConfigJSON([]byte(raw))
-	if len(list) != 1 || list[0].Mode != "local-only" || list[0].Proto != "tcp" {
+	if len(list) != 1 || list[0].Mode != "node-direct" || list[0].Proto != "tcp" {
 		t.Fatalf("got %#v", list)
 	}
 }
 
 func TestParseInstancesFromNodeConfigJSON_nestedConfigObject(t *testing.T) {
-	raw := `{"config":{"instances":[{"mode":"hk-smart-split","proto":"udp","port":57319}]}}`
+	raw := `{"config":{"instances":[{"mode":"cn-split","proto":"udp","port":57319}]}}`
 	list := parseInstancesFromNodeConfigJSON([]byte(raw))
-	if len(list) != 1 || list[0].Mode != "hk-smart-split" {
+	if len(list) != 1 || list[0].Mode != "cn-split" {
 		t.Fatalf("got %#v", list)
 	}
 }
@@ -26,12 +26,12 @@ func TestParseInstancesFromNodeConfigJSON_nestedConfigObject(t *testing.T) {
 func TestParseInstancesFromNodeConfigJSON_configJSONString(t *testing.T) {
 	inner, _ := json.Marshal(map[string]any{
 		"instances": []map[string]any{
-			{"mode": "us-global", "proto": "tcp"},
+			{"mode": "global", "proto": "tcp"},
 		},
 	})
 	outer, _ := json.Marshal(map[string]any{"config": string(inner)})
 	list := parseInstancesFromNodeConfigJSON(outer)
-	if len(list) != 1 || list[0].Mode != "us-global" || list[0].Proto != "tcp" {
+	if len(list) != 1 || list[0].Mode != "global" || list[0].Proto != "tcp" {
 		t.Fatalf("got %#v", list)
 	}
 }

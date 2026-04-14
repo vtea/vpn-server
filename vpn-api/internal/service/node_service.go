@@ -22,10 +22,33 @@ var defaultModes = []struct {
 	Mode string
 	Idx  int
 }{
-	{"local-only", 0},
-	{"hk-smart-split", 1},
-	{"hk-global", 2},
-	{"us-global", 3},
+	{"node-direct", 0},
+	{"cn-split", 1},
+	{"global", 2},
+}
+
+var legacyModeIDMap = map[string]string{
+	"local-only":     "node-direct",
+	"hk-smart-split": "cn-split",
+	"hk-global":      "global",
+	"us-global":      "global",
+}
+
+func NormalizeInstanceMode(mode string) string {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	if x, ok := legacyModeIDMap[m]; ok {
+		return x
+	}
+	return m
+}
+
+func IsSupportedInstanceMode(mode string) bool {
+	switch NormalizeInstanceMode(mode) {
+	case "node-direct", "cn-split", "global":
+		return true
+	default:
+		return false
+	}
 }
 
 func NextNodeNumber(db *gorm.DB) (int, error) {
@@ -55,9 +78,9 @@ func BuildDefaultInstances(nodeID string, nodeNumber int) []model.Instance {
 	}, 0)
 }
 
-// BuildInstancesForMembership 为节点在某组网网段下生成四套 OpenVPN 接入配置。
+// BuildInstancesForMembership 为节点在某组网网段下生成三套 OpenVPN 接入配置。
 // default 网段（SecondOctet=0）：10.{node_number}.{idx}.0/24，端口 PortBase+idx。
-// 其他网段：10.{SecondOctet}.{slot*4+idx}.0/24，端口 PortBase+idx。
+// 其他网段：10.{SecondOctet}.{slot*3+idx}.0/24，端口 PortBase+idx。
 func BuildInstancesForMembership(nodeID string, nodeNumber int, seg model.NetworkSegment, slot uint8) []model.Instance {
 	instances := make([]model.Instance, 0, len(defaultModes))
 	for _, m := range defaultModes {
@@ -65,7 +88,7 @@ func BuildInstancesForMembership(nodeID string, nodeNumber int, seg model.Networ
 		if seg.SecondOctet == 0 {
 			subnet = fmt.Sprintf("10.%d.%d.0/24", nodeNumber, m.Idx)
 		} else {
-			third := int(slot)*4 + m.Idx
+			third := int(slot)*3 + m.Idx
 			if third > 255 {
 				third = 255
 			}
@@ -78,13 +101,13 @@ func BuildInstancesForMembership(nodeID string, nodeNumber int, seg model.Networ
 			Port:      seg.PortBase + m.Idx,
 			Proto:     NormalizeInstanceProto(seg.DefaultOvpnProto),
 			Subnet:    subnet,
-			Enabled:   m.Mode == "local-only",
+			Enabled:   m.Mode == "node-direct",
 		})
 	}
 	return instances
 }
 
-// NextSegmentSlot 在网段内分配下一个槽位（每节点占 4 个第三段地址）。最多 64 个节点/网段。
+// NextSegmentSlot 在网段内分配下一个槽位（每节点占 3 个第三段地址）。最多 64 个节点/网段。
 func NextSegmentSlot(db *gorm.DB, segmentID string) (uint8, error) {
 	var ms int
 	err := db.Model(&model.NodeSegment{}).

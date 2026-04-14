@@ -35,6 +35,9 @@ func main() {
 	if err := autoMigrateAndSeed(db); err != nil {
 		log.Fatalf("init db failed: %v", err)
 	}
+	if err := migrateLegacyModeIDs(db); err != nil {
+		log.Fatalf("mode migration failed: %v", err)
+	}
 	if err := ensureSegmentsAndBackfill(db); err != nil {
 		log.Fatalf("segment migration failed: %v", err)
 	}
@@ -185,7 +188,7 @@ func ensureSegmentsAndBackfill(db *gorm.DB) error {
 		seg := model.NetworkSegment{
 			ID:               "default",
 			Name:             "默认组网网段",
-			Description:      "默认组网：10.{节点号}.{模式序号}.0/24；监听 56710–56713（默认 UDP）",
+			Description:      "默认组网：10.{节点号}.{模式序号}.0/24；监听 56710–56712（默认 UDP）",
 			SecondOctet:      0,
 			PortBase:         56710,
 			DefaultOvpnProto: "udp",
@@ -314,6 +317,34 @@ func autoMigrateAndSeed(db *gorm.DB) error {
 		db.Create(&model.AuditLog{AdminUser: "system", Action: "seed_admin", Target: "admin", Detail: "created default admin account"})
 	}
 	return nil
+}
+
+func migrateLegacyModeIDs(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		updates := map[string]string{
+			"local-only":     "node-direct",
+			"hk-smart-split": "cn-split",
+			"hk-global":      "global",
+			"us-global":      "global",
+		}
+		for from, to := range updates {
+			if err := tx.Model(&model.Instance{}).Where("mode = ?", from).Update("mode", to).Error; err != nil {
+				return err
+			}
+		}
+
+		var bad []string
+		if err := tx.Model(&model.Instance{}).
+			Where("mode NOT IN ?", []string{"node-direct", "cn-split", "global"}).
+			Distinct().
+			Pluck("mode", &bad).Error; err != nil {
+			return err
+		}
+		if len(bad) > 0 {
+			return fmt.Errorf("unsupported instance modes found after migration: %v", bad)
+		}
+		return nil
+	})
 }
 
 func ensureIPListSources(db *gorm.DB) error {

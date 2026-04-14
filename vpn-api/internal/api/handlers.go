@@ -1593,6 +1593,11 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	mode := service.NormalizeInstanceMode(req.Mode)
+	if !service.IsSupportedInstanceMode(mode) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mode: only node-direct/cn-split/global are allowed"})
+		return
+	}
 	segID := strings.TrimSpace(req.SegmentID)
 	if segID == "" {
 		var err error
@@ -1609,12 +1614,12 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		return
 	}
 	exitTrim := strings.TrimSpace(req.ExitNode)
-	if instanceModeUsesExitPeer(req.Mode) && exitTrim != "" && !h.tunnelConnectsPeers(nodeID, exitTrim) {
+	if instanceModeUsesExitPeer(mode) && exitTrim != "" && !h.tunnelConnectsPeers(nodeID, exitTrim) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "exit_node 须为本节点「相关隧道」中的对端节点 ID"})
 		return
 	}
 	inst := model.Instance{
-		NodeID: nodeID, SegmentID: segID, Mode: req.Mode, Port: req.Port,
+		NodeID: nodeID, SegmentID: segID, Mode: mode, Port: req.Port,
 		Proto: service.NormalizeInstanceProto(req.Proto), Subnet: req.Subnet, ExitNode: exitTrim, Enabled: true,
 	}
 	if err := h.db.Create(&inst).Error; err != nil {
@@ -1623,7 +1628,7 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 	}
 	h.db.Model(&model.Node{}).Where("id = ?", nodeID).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
 	h.pushInstancesConfigToNode(nodeID)
-	h.audit(c, "create_instance", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("mode=%s port=%d", req.Mode, req.Port))
+	h.audit(c, "create_instance", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("mode=%s port=%d", mode, req.Port))
 	c.JSON(http.StatusCreated, gin.H{"instance": inst})
 }
 
@@ -1636,8 +1641,8 @@ type patchInstanceReq struct {
 }
 
 func instanceModeUsesExitPeer(mode string) bool {
-	switch mode {
-	case "local-only", "hk-smart-split", "hk-global", "us-global":
+	switch service.NormalizeInstanceMode(mode) {
+	case "node-direct", "cn-split", "global":
 		return true
 	default:
 		return false

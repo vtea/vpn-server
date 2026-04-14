@@ -162,10 +162,9 @@ for bin in curl jq systemctl; do
 done
 
 SERVICES=(
-  "openvpn-local-only"
-  "openvpn-hk-smart-split"
-  "openvpn-hk-global"
-  "openvpn-us-global"
+  "openvpn-node-direct"
+  "openvpn-cn-split"
+  "openvpn-global"
 )
 
 discover_target_nodes() {

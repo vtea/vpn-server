@@ -125,7 +125,7 @@ if [[ "$ROLE" == "node" ]]; then
   check_service "vpn-routing.service"
   check_service "dnsmasq"
 
-  for svc in openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global; do
+  for svc in openvpn-node-direct openvpn-cn-split openvpn-global; do
     check_service "$svc"
   done
 

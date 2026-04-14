@@ -13,7 +13,8 @@ type Admin struct {
 
 // Permissions is a comma-separated list of module keys.
 // "*" means full access. Available modules:
-//   nodes, users, rules, tunnels, audit, admins
+//
+//	nodes, users, rules, tunnels, audit, admins
 func (a *Admin) HasPermission(module string) bool {
 	if a.Role == "admin" || a.Permissions == "*" {
 		return true
@@ -128,7 +129,7 @@ type NetworkSegment struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
-// NodeSegment 节点与组网网段多对多；Slot 在网段内用于 10.x.(slot*4+idx) 分配（旧公式网段固定为 0）。
+// NodeSegment 节点与组网网段多对多；Slot 在网段内用于 10.x.(slot*3+idx) 分配（旧公式网段固定为 0）。
 type NodeSegment struct {
 	NodeID    string `json:"node_id" gorm:"primaryKey"`
 	SegmentID string `json:"segment_id" gorm:"primaryKey"`

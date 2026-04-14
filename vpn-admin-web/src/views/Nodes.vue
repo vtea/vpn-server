@@ -75,7 +75,7 @@
               size="small"
               class="instance-tag"
             >
-              {{ inst.segment_id || 'default' }} · {{ inst.mode }} {{ (inst.proto || 'udp').toUpperCase() }}/{{ inst.port }}
+              {{ inst.segment_id || 'default' }} · {{ modeLabel(inst.mode) }} {{ (inst.proto || 'udp').toUpperCase() }}/{{ inst.port }}
             </el-tag>
             <el-text v-if="!enabledInstances(row.instances).length" type="info" size="small">暂无</el-text>
           </template>
@@ -262,6 +262,14 @@ const filteredRows = computed(() => {
 
 const enabledInstances = (list) => (list || []).filter((i) => i.enabled === true)
 const onlineNodes = computed(() => rows.value.filter(r => r.node?.status === 'online'))
+const modeLabel = (mode) => {
+  const m = {
+    'node-direct': '节点直连',
+    'cn-split': '国内分流',
+    global: '全局'
+  }
+  return m[mode] || mode || '-'
+}
 
 const loadSegments = async () => {
   try {
@@ -325,7 +333,7 @@ const doAdd = async () => {
       segment_ids: addForm.segment_ids
     })
     ElMessage.success(
-      '节点创建成功。默认仅启用 local-only 接入，其它模式请在节点详情「组网接入」中手动启用并保存。'
+      '节点创建成功。默认仅启用“节点直连”，其它模式请在节点详情「组网接入」中手动启用并保存。'
     )
     showAdd.value = false
     Object.assign(addForm, { name: '', region: '', public_ip: '', segment_ids: ['default'] })
