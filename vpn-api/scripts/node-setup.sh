@@ -658,7 +658,7 @@ is_mode_skipped() {
 verify_required_ports_listening_file() {
   local f="$1"
   [[ ! -f "$f" ]] && { warn "无 $f，无法执行监听验收"; return 1; }
-  local proto port component mode listeners errors
+  local proto port component mode listeners errors tries
   errors=0
   while IFS='|' read -r component mode proto port; do
     [[ -z "$port" ]] && continue
@@ -666,11 +666,19 @@ verify_required_ports_listening_file() {
       warn "监听验收跳过: ${component}:${mode}（管理员选择跳过）"
       continue
     fi
-    if [[ "$proto" == "tcp" ]]; then
-      listeners="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print}')"
-    else
-      listeners="$(ss -ulnp 2>/dev/null | awk -v p=":${port}" '$5 ~ p {print}')"
-    fi
+    listeners=""
+    tries=0
+    # openvpn 刚启动后监听建立可能有短暂延迟，做短重试避免瞬时误判
+    while [[ "$tries" -lt 3 ]]; do
+      if [[ "$proto" == "tcp" ]]; then
+        listeners="$(ss -H -tlnp "( sport = :${port} )" 2>/dev/null || true)"
+      else
+        listeners="$(ss -H -ulnp "( sport = :${port} )" 2>/dev/null || true)"
+      fi
+      [[ -n "$listeners" ]] && break
+      tries=$((tries + 1))
+      sleep 1
+    done
     if [[ -z "$listeners" ]]; then
       fail "监听缺失: ${component}:${mode} ${proto}/${port}"
       errors=$((errors + 1))
@@ -1804,6 +1812,10 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable vpn-routing.service
+if ! systemctl restart vpn-routing.service; then
+  warn "vpn-routing.service 启动失败，将在健康检查中报告详情"
+  journalctl -u vpn-routing.service -n 30 --no-pager -o cat | sed 's/^/    /' || true
+fi
 
 # ── Step 9: Install vpn-agent ────────────────────────────────────────────────
 

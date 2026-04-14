@@ -975,7 +975,7 @@ precheck() {
     for pkg in "${TO_INSTALL[@]}"; do
       case "$pkg" in
         go|go-upgrade)
-          echo "    • Go 1.22.5 (从 go.dev 下载官方二进制)" ;;
+          echo "    • Go 1.22.5（优先官方二进制，多源失败后回退系统包）" ;;
         nodejs|node-upgrade)
           echo "    • Node.js 20.x LTS (从 nodesource 或官方二进制)" ;;
         npm)
@@ -1106,30 +1106,66 @@ install_go() {
 
   local GO_PKG="go1.22.5.linux-amd64.tar.gz"
   [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && GO_PKG="go1.22.5.linux-arm64.tar.gz"
+  local INSTALLED=0
 
-  while true; do
-    if curl -fsSL --connect-timeout 60 -o /tmp/go.tar.gz "https://go.dev/dl/${GO_PKG}" && [[ -s /tmp/go.tar.gz ]]; then
+  # 方式 1: 官方二进制（多源兜底）
+  local GO_URLS=(
+    "https://go.dev/dl/${GO_PKG}"
+    "https://dl.google.com/go/${GO_PKG}"
+  )
+  while [[ "$INSTALLED" -eq 0 ]]; do
+    local u=""
+    for u in "${GO_URLS[@]}"; do
+      if curl -fsSL --connect-timeout 60 -o /tmp/go.tar.gz "$u" && [[ -s /tmp/go.tar.gz ]]; then
+        rm -rf /usr/local/go
+        if tar -C /usr/local -xzf /tmp/go.tar.gz; then
+          INSTALLED=1
+          rm -f /tmp/go.tar.gz
+          break
+        fi
+        rm -f /tmp/go.tar.gz
+      fi
+      rm -f /tmp/go.tar.gz
+    done
+    [[ "$INSTALLED" -eq 1 ]] && break
+    if ! prompt_network_proxy_retry "curl 下载 Go（go.dev / dl.google.com）"; then
       break
     fi
-    rm -f /tmp/go.tar.gz
-    if ! prompt_network_proxy_retry "curl 下载 Go (https://go.dev/dl/)"; then
-      err "下载 Go 失败（请检查网络或代理）"
-      exit 1
-    fi
   done
-  rm -rf /usr/local/go
-  if ! tar -C /usr/local -xzf /tmp/go.tar.gz; then
-    err "解压 Go 失败"
-    rm -f /tmp/go.tar.gz
+
+  # 方式 2: 系统包管理器（网络受限场景兜底）
+  if [[ "$INSTALLED" -eq 0 ]]; then
+    log "  Go 官方二进制下载失败，尝试系统包管理器 ..."
+    case "$PKG" in
+      apt)
+        apt-get update -qq && apt-get install -y -qq golang-go && INSTALLED=1
+        ;;
+      dnf)
+        dnf install -y golang && INSTALLED=1
+        ;;
+      yum)
+        yum install -y golang && INSTALLED=1
+        ;;
+    esac
+  fi
+
+  if [[ "$INSTALLED" -eq 0 ]]; then
+    err "Go 安装失败：官方源与系统包均不可用（请检查网络/代理/镜像）"
     exit 1
   fi
-  rm -f /tmp/go.tar.gz
 
-  export PATH="/usr/local/go/bin:$PATH"
-  grep -q '/usr/local/go/bin' /etc/profile 2>/dev/null || \
-    echo 'export PATH="/usr/local/go/bin:$PATH"' >> /etc/profile
+  if [[ -d /usr/local/go/bin ]]; then
+    export PATH="/usr/local/go/bin:$PATH"
+    grep -q '/usr/local/go/bin' /etc/profile 2>/dev/null || \
+      echo 'export PATH="/usr/local/go/bin:$PATH"' >> /etc/profile
+  fi
 
-  ok "Go $(go version | awk '{print $3}') 安装完成"
+  if command -v go >/dev/null 2>&1; then
+    ok "Go $(go version | awk '{print $3}') 安装完成"
+  else
+    err "Go 安装步骤完成但未检测到 go 命令，请检查 PATH"
+    exit 1
+  fi
 }
 
 install_node() {
