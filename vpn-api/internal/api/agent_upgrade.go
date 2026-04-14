@@ -88,12 +88,12 @@ func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
 	baseLAN := strings.TrimRight(h.externalURLLAN, "/")
 
 	makeURLs := func(arch string) (string, string) {
-		ver := h.effectiveLatestAgentVersion()
-		artifact := DefaultAgentDownloadPackage + "+" + ver
-		pubURL := base + "/api/downloads/vpn-agent/" + arch + "/" + artifact
+		// Use legacy stable download endpoint by default for better compatibility
+		// across mixed control-plane versions and reverse-proxy setups.
+		pubURL := base + "/api/downloads/vpn-agent-linux-" + arch
 		lanURL := ""
 		if baseLAN != "" {
-			lanURL = baseLAN + "/api/downloads/vpn-agent/" + arch + "/" + artifact
+			lanURL = baseLAN + "/api/downloads/vpn-agent-linux-" + arch
 		}
 		return pubURL, lanURL
 	}
@@ -404,12 +404,13 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 		}
 	}
 	if canary == nil {
-		finish := time.Now()
+		// All candidates may fail at precheck stage. Reuse finalize logic so
+		// success/failed counters are populated consistently for the UI.
 		h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
 			"status":        "failed",
-			"error_summary": "missing canary node",
-			"finished_at":   &finish,
+			"error_summary": "canary precheck failed or unavailable",
 		})
+		h.finalizeUpgradeTask(taskID)
 		return
 	}
 

@@ -757,7 +757,9 @@ func precheckDownloadURLs(urls []string) (bool, string, error) {
 		if u == "" {
 			continue
 		}
-		cmd := exec.Command("bash", "-lc", fmt.Sprintf("curl -m 5 -fsSI %q >/dev/null || wget -T 5 --spider -q %q", u, u))
+		// Some CDNs / reverse proxies reject HEAD while GET works.
+		// Treat HEAD probe as preferred fast path and fall back to a tiny ranged GET.
+		cmd := exec.Command("bash", "-lc", fmt.Sprintf("curl -m 5 -fsSI %q >/dev/null || curl -m 8 -fsS --range 0-0 %q -o /dev/null || wget -T 8 --spider -q %q", u, u, u))
 		if out, err := cmd.CombinedOutput(); err == nil {
 			return true, u, nil
 		} else {
