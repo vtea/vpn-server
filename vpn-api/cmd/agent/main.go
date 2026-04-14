@@ -1250,6 +1250,74 @@ type wgRefreshPayload struct {
 	Tunnels    []wgRefreshTunnel `json:"tunnels"`
 }
 
+type failoverTunnel struct {
+	PeerNodeID string `json:"peer_node_id"`
+	PeerIP     string `json:"peer_ip"`
+	PeerPubKey string `json:"peer_pubkey"`
+}
+
+func parseFailoverTunnelsFromConfigJSON(data []byte) []failoverTunnel {
+	var parseInner func(raw []byte) []failoverTunnel
+	parseInner = func(raw []byte) []failoverTunnel {
+		if len(raw) == 0 {
+			return nil
+		}
+		var asList []failoverTunnel
+		if json.Unmarshal(raw, &asList) == nil && len(asList) > 0 {
+			return asList
+		}
+		var asObj struct {
+			Tunnels []failoverTunnel `json:"tunnels"`
+		}
+		if json.Unmarshal(raw, &asObj) == nil && len(asObj.Tunnels) > 0 {
+			return asObj.Tunnels
+		}
+		var asStr string
+		if json.Unmarshal(raw, &asStr) == nil && strings.TrimSpace(asStr) != "" {
+			return parseInner([]byte(asStr))
+		}
+		return nil
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return nil
+	}
+	if raw, ok := root["tunnels"]; ok {
+		if list := parseInner(raw); len(list) > 0 {
+			return list
+		}
+	}
+	if raw, ok := root["config"]; ok {
+		if list := parseInner(raw); len(list) > 0 {
+			return list
+		}
+	}
+	return nil
+}
+
+func failoverTunnelsFromLocalConfig() []failoverTunnel {
+	for _, path := range []string{"/etc/vpn-agent/last-config.json", "/etc/vpn-agent/bootstrap-node.json"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if list := parseFailoverTunnelsFromConfigJSON(data); len(list) > 0 {
+			return list
+		}
+	}
+	return nil
+}
+
+func shouldLogFailoverEvent(last map[string]time.Time, key string, now time.Time) bool {
+	const logInterval = 2 * time.Minute
+	prev, ok := last[key]
+	if !ok || now.Sub(prev) >= logInterval {
+		last[key] = now
+		return true
+	}
+	return false
+}
+
 func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 	priv, err := os.ReadFile("/etc/wireguard/privatekey")
 	if err != nil {
@@ -1711,31 +1779,69 @@ func generateDnsmasqConfig(rules []exceptionRule) {
 func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg *Config) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	lastLogAt := map[string]time.Time{}
 
 	for range ticker.C {
-		data, err := os.ReadFile("/etc/vpn-agent/bootstrap-node.json")
-		if err != nil {
-			continue
-		}
-		var bootstrap struct {
-			Tunnels []struct {
-				PeerNodeID string `json:"peer_node_id"`
-				PeerIP     string `json:"peer_ip"`
-				PeerPubKey string `json:"peer_pubkey"`
-			} `json:"tunnels"`
-		}
-		if json.Unmarshal(data, &bootstrap) != nil {
+		tunnels := failoverTunnelsFromLocalConfig()
+		if len(tunnels) == 0 {
 			continue
 		}
 
-		for _, t := range bootstrap.Tunnels {
+		for _, t := range tunnels {
 			if strings.TrimSpace(t.PeerPubKey) == "" {
-				log.Printf("failover: skip tunnel to %s due to missing peer public key", t.PeerNodeID)
+				now := time.Now()
+				logKey := "missing-pubkey:" + t.PeerNodeID
+				if shouldLogFailoverEvent(lastLogAt, logKey, now) {
+					log.Printf("failover: skip tunnel to %s due to missing peer public key", t.PeerNodeID)
+				}
 				continue
 			}
-			if _, ierr := isWGInterfaceUp("wg-" + t.PeerNodeID); ierr != nil {
-				log.Printf("failover: skip tunnel to %s due to missing interface: %v", t.PeerNodeID, ierr)
-				continue
+			iface := "wg-" + t.PeerNodeID
+			unit := "wg-quick@" + iface
+			var ifaceErr error
+			ifaceUp := false
+			for attempt := 0; attempt < 3; attempt++ {
+				ifaceUp, ifaceErr = isWGInterfaceUp(iface)
+				if isWGNoSuchDeviceError(ifaceErr) && attempt < 2 {
+					time.Sleep(250 * time.Millisecond)
+					continue
+				}
+				break
+			}
+			if ifaceErr != nil {
+				if isWGNoSuchDeviceError(ifaceErr) {
+					// 接口缺失时尝试自愈拉起 wg-quick，而不是每轮直接跳过。
+					if out, serr := exec.Command("systemctl", "start", unit).CombinedOutput(); serr != nil {
+						now := time.Now()
+						logKey := "start-failed:" + t.PeerNodeID
+						if shouldLogFailoverEvent(lastLogAt, logKey, now) {
+							log.Printf("failover: start %s failed for %s: %v %s", unit, t.PeerNodeID, serr, strings.TrimSpace(string(out)))
+						}
+						continue
+					}
+					time.Sleep(1 * time.Second)
+					ifaceUp, ifaceErr = isWGInterfaceUp(iface)
+					if ifaceErr != nil || !ifaceUp {
+						now := time.Now()
+						logKey := "iface-still-missing:" + t.PeerNodeID
+						if shouldLogFailoverEvent(lastLogAt, logKey, now) {
+							if ifaceErr != nil {
+								log.Printf("failover: %s still unavailable after start for %s: %v", iface, t.PeerNodeID, ifaceErr)
+							} else {
+								log.Printf("failover: %s still down after start for %s", iface, t.PeerNodeID)
+							}
+						}
+						continue
+					}
+					log.Printf("failover: recovered missing interface %s via %s", iface, unit)
+				} else {
+					now := time.Now()
+					logKey := "iface-error:" + t.PeerNodeID
+					if shouldLogFailoverEvent(lastLogAt, logKey, now) {
+						log.Printf("failover: skip tunnel to %s due to interface check error: %v", t.PeerNodeID, ifaceErr)
+					}
+					continue
+				}
 			}
 			_, err := exec.Command("ping", "-c", "1", "-W", "2", t.PeerIP).Output()
 			if err != nil {
