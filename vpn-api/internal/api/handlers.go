@@ -1959,7 +1959,7 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 		return
 	}
 	var instances []model.Instance
-	_ = h.db.Where("node_id = ?", node.ID).Find(&instances).Error
+	_ = h.db.Where("node_id = ? AND enabled = ?", node.ID, true).Find(&instances).Error
 
 	now := time.Now()
 	bt.Used = true

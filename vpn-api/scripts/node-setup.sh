@@ -257,6 +257,21 @@ is_enabled_value() {
   esac
 }
 
+count_enabled_instances_from_json() {
+  local json="$1"
+  [[ -z "$json" ]] && { echo "0"; return 0; }
+  local ic i inst_en cnt
+  cnt=0
+  ic="$(echo "$json" | jq '.instances | length')"
+  for i in $(seq 0 $((ic - 1))); do
+    inst_en="$(echo "$json" | jq -r ".instances[$i].enabled // true")"
+    if is_enabled_value "$inst_en"; then
+      cnt=$((cnt + 1))
+    fi
+  done
+  echo "$cnt"
+}
+
 # 清理可能与本脚本生成实例冲突的历史 OpenVPN 单元（例如 openvpn-server@server）
 cleanup_legacy_openvpn_units() {
   local touched=0
@@ -846,6 +861,11 @@ prompt_openvpn_proto_interactive() {
   log "OpenVPN 传输协议（以下为控制面当前下发）"
   local i m p
   for i in $(seq 0 $((ic - 1))); do
+    local inst_en
+    inst_en="$(echo "$NODE_JSON" | jq -r ".instances[$i].enabled // true")"
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
     m="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
     p="$(echo "$NODE_JSON" | jq -r ".instances[$i].proto // \"udp\"")"
     printf '  • %s → %s\n' "$m" "$(echo "$p" | tr '[:lower:]' '[:upper:]')"
@@ -1200,13 +1220,19 @@ NODE_ID="$(echo "$NODE_JSON" | jq -r '.node_id')"
 NODE_NUMBER="$(echo "$NODE_JSON" | jq -r '.node_number')"
 PUBLIC_IP="$(echo "$NODE_JSON" | jq -r '.public_ip')"
 INSTANCE_COUNT="$(echo "$NODE_JSON" | jq '.instances | length')"
+ENABLED_INSTANCE_COUNT="$(count_enabled_instances_from_json "$NODE_JSON")"
 TUNNEL_COUNT="$(echo "$NODE_JSON" | jq '.tunnels | length')"
 
 log "  Node ID:     $NODE_ID"
 log "  Node Number: $NODE_NUMBER"
 log "  Public IP:   $PUBLIC_IP"
-log "  Instances:   $INSTANCE_COUNT"
+log "  Instances:   $ENABLED_INSTANCE_COUNT (enabled) / $INSTANCE_COUNT (total)"
 log "  Tunnels:     $TUNNEL_COUNT"
+
+if [[ "$ENABLED_INSTANCE_COUNT" -le 0 ]]; then
+  fail "控制面未下发任何已启用实例（enabled=true），中止部署。"
+  exit 1
+fi
 
 prompt_openvpn_proto_interactive
 apply_openvpn_proto_override_to_node_json
