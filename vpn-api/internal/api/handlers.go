@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -44,6 +45,7 @@ type Handler struct {
 	dbPath             string // sqlite: used with dbDriver to find …/bin next to …/data/vpn.db
 	dbDriver           string
 	ipListDualEnabled  bool
+	wgRefreshLocks     sync.Map
 }
 
 func NewHandler(db *gorm.DB, jwtSecret string, hub *WSHub, ca *service.CentralCA, externalURL, externalURLLAN, agentLatestVersion, caDir, dbPath, dbDriver string, ipListDualEnabled bool) *Handler {
@@ -67,6 +69,21 @@ func (h *Handler) audit(c *gin.Context, action, target, detail string) {
 		Detail:    detail,
 	}
 	_ = h.db.Create(&log).Error
+}
+
+func (h *Handler) nodeRefreshLock(nodeID string) *sync.Mutex {
+	if v, ok := h.wgRefreshLocks.Load(nodeID); ok {
+		if mu, ok2 := v.(*sync.Mutex); ok2 {
+			return mu
+		}
+	}
+	mu := &sync.Mutex{}
+	actual, _ := h.wgRefreshLocks.LoadOrStore(nodeID, mu)
+	out, _ := actual.(*sync.Mutex)
+	if out == nil {
+		return mu
+	}
+	return out
 }
 
 type loginReq struct {
@@ -1727,6 +1744,63 @@ func (h *Handler) GetNodeStatus(c *gin.Context) {
 		"online_users":  node.OnlineUsers,
 		"agent_version": node.AgentVersion,
 		"tunnels":       tunnels,
+	})
+}
+
+func (h *Handler) RefreshNodeWG(c *gin.Context) {
+	nodeID := strings.TrimSpace(c.Param("id"))
+	if nodeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing node id"})
+		return
+	}
+	if !nodeSupportsCapability(h.db, nodeID, "wg_refresh_v1") {
+		c.JSON(http.StatusPreconditionFailed, gin.H{"error": "agent does not support wg_refresh_v1"})
+		return
+	}
+	if h.hub == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "ws hub unavailable"})
+		return
+	}
+
+	lock := h.nodeRefreshLock(nodeID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	var node model.Node
+	if err := h.db.Where("id = ?", nodeID).First(&node).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	tunnelConfigs, _ := service.BuildTunnelConfigsForNode(h.db, nodeID)
+	if tunnelConfigs == nil {
+		tunnelConfigs = []service.TunnelPeerConfig{}
+	}
+	listenPort := 0
+	invalid := 0
+	for _, tc := range tunnelConfigs {
+		if tc.ConfigValid && strings.TrimSpace(tc.PeerPubKey) != "" && tc.WGPort > 0 {
+			listenPort = tc.WGPort
+			break
+		}
+		if !tc.ConfigValid {
+			invalid++
+		}
+	}
+	payload, _ := json.Marshal(gin.H{
+		"node_id":     nodeID,
+		"listen_port": listenPort,
+		"tunnels":     tunnelConfigs,
+	})
+	if err := h.hub.SendToNode(nodeID, WSMessage{Type: "update_wg_config", Payload: payload}); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "node offline or ws send failed"})
+		return
+	}
+	h.audit(c, "wg_refresh", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("total=%d invalid=%d", len(tunnelConfigs), invalid))
+	c.JSON(http.StatusAccepted, gin.H{
+		"ok":           true,
+		"node_id":      nodeID,
+		"total_tunnel": len(tunnelConfigs),
+		"invalid":      invalid,
 	})
 }
 

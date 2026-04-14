@@ -181,7 +181,7 @@ func sendReport(conn *websocket.Conn, cfg *Config) {
 		"agent_version": agentVersion(),
 		"agent_arch":    runtime.GOARCH,
 		"wg_pubkey":     wgKey,
-		"capabilities":  []string{"upgrade_agent_v2", "upgrade_precheck"},
+		"capabilities":  []string{"upgrade_agent_v2", "upgrade_precheck", "wg_refresh_v1"},
 	})
 	msg := WSMessage{Type: "report", Payload: payload}
 	data, _ := json.Marshal(msg)
@@ -408,6 +408,18 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		log.Printf("config saved to /etc/vpn-agent/last-config.json")
 		applyOpenVPNServerFromInstancesPayload(msg.Payload)
+	case "update_wg_config":
+		log.Printf("received wg config update, applying...")
+		var req wgRefreshPayload
+		if err := json.Unmarshal(msg.Payload, &req); err != nil {
+			sendResult(conn, "wg_refresh_result", map[string]any{
+				"success": false,
+				"error":   "invalid payload: " + err.Error(),
+			})
+			return
+		}
+		result := applyWGConfigRefresh(req)
+		sendResult(conn, "wg_refresh_result", result)
 
 	case "update_exceptions":
 		log.Printf("applying exception rules...")
@@ -869,8 +881,8 @@ type tunnelHealthItem struct {
 	PeerPubKeyPresent     bool    `json:"peer_pubkey_present"`
 	IfaceUp               bool    `json:"iface_up"`
 	LatestHandshakeAgeSec int64   `json:"latest_handshake_age_sec"`
-	RxBytesDelta          int64   `json:"rx_bytes_delta"`
-	TxBytesDelta          int64   `json:"tx_bytes_delta"`
+	RxBytesTotal          int64   `json:"rx_bytes_total"`
+	TxBytesTotal          int64   `json:"tx_bytes_total"`
 	Error                 string  `json:"error,omitempty"`
 }
 
@@ -911,8 +923,8 @@ func collectTunnelHealth() []tunnelHealthItem {
 			item.Error = appendTunnelError(item.Error, hsErr.Error())
 		}
 		if rx, tx, txErr := queryWGTransfer("wg-" + t.PeerNodeID); txErr == nil {
-			item.RxBytesDelta = rx
-			item.TxBytesDelta = tx
+			item.RxBytesTotal = rx
+			item.TxBytesTotal = tx
 		} else {
 			item.Error = appendTunnelError(item.Error, txErr.Error())
 		}
@@ -939,6 +951,119 @@ func appendTunnelError(base, extra string) string {
 		return extra
 	}
 	return base + "; " + extra
+}
+
+type wgRefreshTunnel struct {
+	PeerNodeID   string `json:"peer_node_id"`
+	PeerEndpoint string `json:"peer_endpoint"`
+	PeerPubKey   string `json:"peer_pubkey"`
+	LocalIP      string `json:"local_ip"`
+	PeerIP       string `json:"peer_ip"`
+	WGPort       int    `json:"wg_port"`
+	AllowedIPs   string `json:"allowed_ips"`
+	ConfigValid  bool   `json:"config_valid"`
+	ConfigError  string `json:"config_error"`
+}
+
+type wgRefreshPayload struct {
+	NodeID     string            `json:"node_id"`
+	ListenPort int               `json:"listen_port"`
+	Tunnels    []wgRefreshTunnel `json:"tunnels"`
+}
+
+func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
+	priv, err := os.ReadFile("/etc/wireguard/privatekey")
+	if err != nil {
+		return map[string]any{
+			"success": false,
+			"error":   "missing local wireguard private key: " + err.Error(),
+		}
+	}
+	localPrivKey := strings.TrimSpace(string(priv))
+	type peerResult struct {
+		PeerNodeID string `json:"peer_node_id"`
+		Success    bool   `json:"success"`
+		Changed    bool   `json:"changed"`
+		Error      string `json:"error,omitempty"`
+	}
+	results := make([]peerResult, 0, len(req.Tunnels))
+	changedUnits := make(map[string]struct{}, len(req.Tunnels))
+	listenAttached := false
+	for _, t := range req.Tunnels {
+		r := peerResult{PeerNodeID: t.PeerNodeID}
+		configErr := strings.TrimSpace(t.ConfigError)
+		if configErr != "" || !t.ConfigValid || strings.TrimSpace(t.PeerPubKey) == "" {
+			if configErr == "" {
+				configErr = "missing peer wg public key"
+			}
+			r.Error = configErr
+			results = append(results, r)
+			continue
+		}
+		listenLine := "# ListenPort auto (wg-refresh)"
+		if !listenAttached && req.ListenPort > 0 {
+			listenLine = fmt.Sprintf("ListenPort = %d", req.ListenPort)
+			listenAttached = true
+		}
+		conf := strings.TrimSpace(fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s/30
+%s
+Table = off
+
+[Peer]
+PublicKey = %s
+Endpoint = %s:%d
+AllowedIPs = %s
+PersistentKeepalive = 25
+`, localPrivKey, strings.TrimSpace(t.LocalIP), listenLine, strings.TrimSpace(t.PeerPubKey), strings.TrimSpace(t.PeerEndpoint), t.WGPort, strings.TrimSpace(t.AllowedIPs))) + "\n"
+		confPath := filepath.Join("/etc/wireguard", "wg-"+strings.TrimSpace(t.PeerNodeID)+".conf")
+		old, _ := os.ReadFile(confPath)
+		if string(old) != conf {
+			tmpPath := confPath + ".tmp"
+			if werr := os.WriteFile(tmpPath, []byte(conf), 0600); werr != nil {
+				r.Error = "write tmp config failed: " + werr.Error()
+				results = append(results, r)
+				continue
+			}
+			if rerr := os.Rename(tmpPath, confPath); rerr != nil {
+				_ = os.Remove(tmpPath)
+				r.Error = "replace config failed: " + rerr.Error()
+				results = append(results, r)
+				continue
+			}
+			r.Changed = true
+		}
+		unit := "wg-quick@wg-" + strings.TrimSpace(t.PeerNodeID)
+		changedUnits[unit] = struct{}{}
+		r.Success = true
+		results = append(results, r)
+	}
+
+	restartErrors := make([]string, 0)
+	for unit := range changedUnits {
+		out, rerr := exec.Command("systemctl", "restart", unit).CombinedOutput()
+		if rerr != nil {
+			restartErrors = append(restartErrors, fmt.Sprintf("%s: %v %s", unit, rerr, strings.TrimSpace(string(out))))
+		}
+	}
+	okCount := 0
+	for _, r := range results {
+		if r.Success {
+			okCount++
+		}
+	}
+	resp := map[string]any{
+		"success":        len(restartErrors) == 0,
+		"node_id":        req.NodeID,
+		"total_peers":    len(results),
+		"success_peers":  okCount,
+		"results":        results,
+	}
+	if len(restartErrors) > 0 {
+		resp["error"] = strings.Join(restartErrors, "; ")
+	}
+	return resp
 }
 
 func isWGInterfaceUp(iface string) (bool, error) {
@@ -1311,6 +1436,7 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 			Tunnels []struct {
 				PeerNodeID string `json:"peer_node_id"`
 				PeerIP     string `json:"peer_ip"`
+				PeerPubKey string `json:"peer_pubkey"`
 			} `json:"tunnels"`
 		}
 		if json.Unmarshal(data, &bootstrap) != nil {
@@ -1318,6 +1444,14 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 		}
 
 		for _, t := range bootstrap.Tunnels {
+			if strings.TrimSpace(t.PeerPubKey) == "" {
+				log.Printf("failover: skip tunnel to %s due to missing peer public key", t.PeerNodeID)
+				continue
+			}
+			if _, ierr := isWGInterfaceUp("wg-" + t.PeerNodeID); ierr != nil {
+				log.Printf("failover: skip tunnel to %s due to missing interface: %v", t.PeerNodeID, ierr)
+				continue
+			}
 			_, err := exec.Command("ping", "-c", "1", "-W", "2", t.PeerIP).Output()
 			if err != nil {
 				log.Printf("failover: tunnel to %s DOWN, attempting restart", t.PeerNodeID)

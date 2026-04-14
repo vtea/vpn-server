@@ -138,6 +138,21 @@ if [[ "$ROLE" == "node" ]]; then
     warn "no /etc/wireguard/wg-*.conf found"
   fi
 
+  if [[ -f /etc/vpn-agent/bootstrap-node.json ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      missing_peers="$(jq -r '.tunnels[]? | select((.peer_pubkey // "") == "") | .peer_node_id' /etc/vpn-agent/bootstrap-node.json 2>/dev/null || true)"
+      if [[ -n "${missing_peers// }" ]]; then
+        warn "bootstrap has invalid WG peers (missing peer_pubkey): $(echo "$missing_peers" | tr '\n' ',' | sed 's/,$//')"
+      else
+        ok "bootstrap WG peers have peer_pubkey"
+      fi
+    else
+      warn "jq not installed; cannot validate bootstrap peer_pubkey"
+    fi
+  else
+    warn "bootstrap missing: /etc/vpn-agent/bootstrap-node.json"
+  fi
+
   if [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
     if [[ -s /etc/vpn-agent/cn-ip-list.txt ]]; then
       ok "cn-ip-list exists and non-empty"

@@ -79,8 +79,11 @@
             <el-text v-if="!enabledInstances(row.instances).length" type="info" size="small">暂无</el-text>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170" align="center" class-name="op-col">
+        <el-table-column label="操作" width="260" align="center" class-name="op-col">
           <template #default="{ row }">
+            <el-button size="small" plain @click="refreshWG(row.node)">
+              刷新WG
+            </el-button>
             <el-button size="small" type="primary" plain @click="$router.push(`/nodes/${row.node.id}`)">
               <el-icon><EditPen /></el-icon> 编辑
             </el-button>
@@ -365,6 +368,17 @@ const confirmDelete = async () => {
     // http.js 已统一处理
   } finally {
     deleteLoading.value = false
+  }
+}
+
+const refreshWG = async (node) => {
+  if (!node?.id) return
+  try {
+    const res = await http.post(`/api/nodes/${node.id}/wg-refresh`)
+    const invalid = res.data?.invalid || 0
+    ElMessage.success(`已下发WG刷新任务（无效peer: ${invalid}）`)
+  } catch {
+    // http.js 已统一处理
   }
 }
 

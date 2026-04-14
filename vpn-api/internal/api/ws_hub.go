@@ -90,6 +90,34 @@ type tunnelStatusEval struct {
 	LastHealthyAt       *time.Time
 }
 
+func canonicalTunnelStatus(s string) string {
+	switch strings.TrimSpace(strings.ToLower(s)) {
+	case "ok":
+		return tunnelStatusHealthy
+	case "":
+		return tunnelStatusUnknown
+	default:
+		return strings.TrimSpace(strings.ToLower(s))
+	}
+}
+
+func tunnelStatusSeverity(s string) int {
+	switch canonicalTunnelStatus(s) {
+	case tunnelStatusHealthy:
+		return 1
+	case tunnelStatusDegraded:
+		return 2
+	case tunnelStatusUnknown:
+		return 3
+	case tunnelStatusDown:
+		return 4
+	case tunnelStatusInvalid:
+		return 5
+	default:
+		return 3
+	}
+}
+
 func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnelItem) tunnelStatusEval {
 	failures := current.ConsecutiveFailures
 	if failures < 0 {
@@ -160,8 +188,10 @@ type healthTunnelItem struct {
 	PeerPubKeyPresent     *bool   `json:"peer_pubkey_present,omitempty"`
 	IfaceUp               *bool   `json:"iface_up,omitempty"`
 	LatestHandshakeAgeSec *int64  `json:"latest_handshake_age_sec,omitempty"`
-	RxBytesDelta          *int64  `json:"rx_bytes_delta,omitempty"`
-	TxBytesDelta          *int64  `json:"tx_bytes_delta,omitempty"`
+	RxBytesTotal          *int64  `json:"rx_bytes_total,omitempty"`
+	TxBytesTotal          *int64  `json:"tx_bytes_total,omitempty"`
+	RxBytesDelta          *int64  `json:"rx_bytes_delta,omitempty"` // 兼容旧 agent
+	TxBytesDelta          *int64  `json:"tx_bytes_delta,omitempty"` // 兼容旧 agent
 	Error                 string  `json:"error,omitempty"`
 }
 
@@ -419,6 +449,18 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					if strings.TrimSpace(t.Error) != "" {
 						reason = reason + ": " + singleLine(t.Error)
 					}
+					currentStatus := canonicalTunnelStatus(tunnel.Status)
+					reporterIsPrimary := ac.NodeID == tunnel.NodeA
+					// 双端都上报时，非主端仅允许把状态“变差”，避免 A/B 交替覆盖导致抖动。
+					if !reporterIsPrimary && tunnelStatusSeverity(eval.Status) < tunnelStatusSeverity(currentStatus) {
+						eval.Status = currentStatus
+						eval.Reason = strings.TrimSpace(tunnel.StatusReason)
+						eval.ConsecutiveFailures = tunnel.ConsecutiveFailures
+						eval.LastHealthyAt = tunnel.LastHealthyAt
+						if eval.Reason == "" {
+							eval.Reason = "secondary reporter skipped status downgrade"
+						}
+					}
 					hub.db.Model(&model.Tunnel{}).
 						Where("id = ?", tunnel.ID).
 						Updates(map[string]any{
@@ -478,6 +520,48 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					})
 				}
 				log.Printf("iplist_result applied: node=%s scope=%s version=%s entries=%d", ac.NodeID, scope, strings.TrimSpace(res.Version), res.EntryCount)
+			}
+		case "wg_refresh_result":
+			var res struct {
+				Success bool   `json:"success"`
+				Error   string `json:"error"`
+				Results []struct {
+					PeerNodeID string `json:"peer_node_id"`
+					Success    bool   `json:"success"`
+					Changed    bool   `json:"changed"`
+					Error      string `json:"error"`
+				} `json:"results"`
+			}
+			if json.Unmarshal(msg.Payload, &res) == nil {
+				now := time.Now()
+				okPeers := 0
+				for _, it := range res.Results {
+					if it.Success {
+						okPeers++
+						continue
+					}
+					reason := strings.TrimSpace(it.Error)
+					if reason == "" {
+						reason = "wg refresh failed"
+					}
+					hub.db.Model(&model.Tunnel{}).
+						Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",
+							ac.NodeID, it.PeerNodeID, it.PeerNodeID, ac.NodeID).
+						Updates(map[string]any{
+							"status":               tunnelStatusInvalid,
+							"status_reason":        singleLine(reason),
+							"status_updated_at":    now,
+							"consecutive_failures": gorm.Expr("COALESCE(consecutive_failures, 0) + 1"),
+						})
+				}
+				detail := fmt.Sprintf("success=%t ok_peers=%d total_peers=%d error=%s", res.Success, okPeers, len(res.Results), singleLine(res.Error))
+				hub.db.Create(&model.AuditLog{
+					AdminUser: "system",
+					Action:    "wg_refresh_result",
+					Target:    "node:" + ac.NodeID,
+					Detail:    detail,
+				})
+				log.Printf("wg_refresh_result: node=%s %s", ac.NodeID, detail)
 			}
 		case "upgrade_result":
 			var res struct {

@@ -113,6 +113,7 @@ func main() {
 	nodes.POST("/nodes", h.CreateNode)
 	nodes.POST("/nodes/:id/delete", h.DeleteNodeWithPassword)
 	nodes.POST("/nodes/:id/rotate-bootstrap-token", h.RotateNodeBootstrapToken)
+	nodes.POST("/nodes/:id/wg-refresh", h.RefreshNodeWG)
 	nodes.GET("/nodes/:id/status", h.GetNodeStatus)
 	nodes.GET("/nodes/:id/instances", h.ListNodeInstances)
 	nodes.POST("/nodes/:id/instances", h.CreateInstance)

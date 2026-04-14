@@ -265,3 +265,97 @@ systemctl start vpn-api
 - 节点在线状态仅由 WS 建连/心跳驱动（`/api/agent/ws`）。
 
 因此，未部署或未连上 WS 的节点应显示 `offline`。
+
+---
+
+## 13. WG-only 刷新灰度与回滚 SOP（不影响 OpenVPN）
+
+适用场景：仅需要刷新 WireGuard 隧道配置（如某 peer 公钥修复、隧道地址修复），并要求 OpenVPN 业务无感。
+
+### 13.1 前置条件
+
+1. 节点 agent 版本已包含 `wg_refresh_v1` capability。
+2. 管理账号具备节点管理权限。
+3. 先备份节点 ` /etc/wireguard `：
+
+```bash
+TS="$(date +%F-%H%M%S)"; BK="/root/wg-backup-$TS"
+mkdir -p "$BK" && cp -a /etc/wireguard "$BK"/
+echo "[INFO] backup => $BK"
+```
+
+### 13.2 灰度执行（10% 节点）
+
+控制面 API（示例）：
+
+```bash
+API_URL="http://127.0.0.1:56700"
+JWT="<admin-jwt>"
+NODE_ID="<node-id>"
+curl -sS -X POST "$API_URL/api/nodes/$NODE_ID/wg-refresh" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json"
+```
+
+若返回 `agent does not support wg_refresh_v1`，先升级该节点 agent 再继续。
+
+### 13.3 门禁验收（重点：OpenVPN 不受影响）
+
+在目标节点执行：
+
+```bash
+echo "[1] OpenVPN PID before"
+systemctl show -p MainPID openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global
+
+echo "[2] WG status"
+wg show
+systemctl --no-pager -l status 'wg-quick@wg-*' | sed -n '1,120p'
+
+echo "[3] OpenVPN PID after (compare with before)"
+systemctl show -p MainPID openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global
+```
+
+通过标准：
+
+- `wg-quick@wg-*` 启动正常，且不再出现空 `PublicKey=` 解析错误；
+- 若存在空公钥 peer，仅该 peer 对应隧道标记 `invalid_config`，其他隧道不连坐；
+- `openvpn-*` 的 `MainPID` 在刷新前后保持不变（允许个别实例原本未启用/无 PID）。
+
+### 13.4 快速回滚
+
+在节点执行：
+
+```bash
+# 1) 回滚配置
+cp -a /root/wg-backup-<timestamp>/wireguard/* /etc/wireguard/
+
+# 2) 仅重启 WG
+systemctl restart 'wg-quick@wg-*'
+
+# 3) 验证
+wg show
+systemctl --no-pager -l status 'wg-quick@wg-*' | sed -n '1,120p'
+```
+
+说明：本回滚流程只涉及 WireGuard，不触发 OpenVPN 配置改写或重启。
+
+### 13.5 一键门禁脚本（推荐）
+
+仓库脚本：`vpn-api/scripts/wg-gate-check.sh`
+
+示例：
+
+```bash
+bash /opt/vpn-api/scripts/wg-gate-check.sh \
+  --api-url "http://127.0.0.1:56700" \
+  --jwt "<admin-jwt>" \
+  --node-id "node-50" \
+  --expect-invalid-peer "node-10" \
+  --wait-sec 10
+```
+
+脚本将自动完成：
+
+1. 触发 `POST /api/nodes/:id/wg-refresh`；
+2. 对比刷新前后 `openvpn-*` `MainPID`（确认未受影响）；
+3. 校验 `invalid_config` 是否仅落在预期异常 peer（可选）。
