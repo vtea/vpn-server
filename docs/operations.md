@@ -95,6 +95,29 @@
 3. `journalctl -u vpn-agent -f`：观察是否出现 `health: management ... returned zero CLIENT_LIST rows`、`health: no instances found`、`unknown instance mode` 等诊断日志。
 4. 若 `status 3` 有 `CLIENT_LIST` 但 API 仍为 0，优先怀疑节点还在跑旧版二进制（未替换或未重启）。
 
+### 3.5 OpenVPN 服务启动循环（常见于端口被历史服务抢占）
+
+**现象**：某个实例（不止 `local-only`，也可能是 `hk-smart-split` / `hk-global` / `us-global`）持续 `auto-restart`，客户端反复重连失败。
+
+**典型根因**：节点上残留系统默认服务 `openvpn-server@server`（或 `openvpn@server`）占用了实例 `server.conf` 配置的监听端口（如 1194/udp）。
+
+**排查步骤**：
+1. 查看实例与历史服务状态：
+   - `systemctl status openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global --no-pager -l`
+   - `systemctl status openvpn-server@server --no-pager -l`
+2. 查看端口占用：
+   - `ss -ulnp | grep -E '1194|1195|1196|1197|openvpn'`
+3. 确认实例配置端口/协议：
+   - `grep -E '^(port|proto)' /etc/openvpn/server/<mode>/server.conf`
+4. 若确认为历史服务抢占，执行：
+   - `systemctl stop openvpn-server@server`
+   - `systemctl disable openvpn-server@server`
+   - `systemctl restart openvpn-<mode>`
+5. 再次确认实例进入 `active (running)`：
+   - `systemctl status openvpn-<mode> --no-pager -l`
+
+**说明**：新版 `node-setup.sh` 在部署 Step 8 会自动清理上述历史冲突单元，并对每个启用实例执行端口冲突与健康检查；若仍失败，脚本会直接打印对应实例的近 30 行日志。
+
 ## 4. 智能分流不生效
 
 **现象**：所有流量都走本地或都走海外。

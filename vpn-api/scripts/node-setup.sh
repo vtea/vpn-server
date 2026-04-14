@@ -70,6 +70,10 @@ warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
 fail() { echo -e "  ${RED}✗${NC} $*"; }
 
 TOTAL_STEPS=9
+LEGACY_OPENVPN_UNITS=(
+  "openvpn-server@server.service"
+  "openvpn@server.service"
+)
 
 # 预检：是否运行 ufw / firewalld（仅提示，不修改规则）
 detect_host_firewall_precheck() {
@@ -137,6 +141,123 @@ check_instance_ports_from_bootstrap_json() {
       fi
     fi
   fi
+}
+
+# 清理可能与本脚本生成实例冲突的历史 OpenVPN 单元（例如 openvpn-server@server）
+cleanup_legacy_openvpn_units() {
+  local touched=0
+  for unit in "${LEGACY_OPENVPN_UNITS[@]}"; do
+    if ! systemctl list-unit-files --type=service --all --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$unit"; then
+      continue
+    fi
+    touched=1
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      log "  Stopping legacy OpenVPN unit: $unit"
+      systemctl stop "$unit" 2>/dev/null || warn "stop $unit failed (ignored)"
+    fi
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+      log "  Disabling legacy OpenVPN unit: $unit"
+      systemctl disable "$unit" 2>/dev/null || warn "disable $unit failed (ignored)"
+    fi
+  done
+  if [[ "$touched" -eq 1 ]]; then
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+}
+
+extract_openvpn_conf_port_proto() {
+  local conf="$1"
+  local port proto
+  port="$(awk '/^[[:space:]]*port[[:space:]]+/ {print $2; exit}' "$conf" 2>/dev/null || true)"
+  proto="$(awk '/^[[:space:]]*proto[[:space:]]+/ {print tolower($2); exit}' "$conf" 2>/dev/null || true)"
+  [[ -z "$proto" ]] && proto="udp"
+  if [[ "$proto" != tcp* ]]; then
+    proto="udp"
+  else
+    proto="tcp"
+  fi
+  echo "${port}|${proto}"
+}
+
+check_openvpn_port_conflict_for_mode() {
+  local mode="$1"
+  local conf="/etc/openvpn/server/${mode}/server.conf"
+  if [[ ! -f "$conf" ]]; then
+    warn "  Missing server.conf for mode=${mode}, skip conflict check"
+    return 0
+  fi
+  local pp port proto
+  pp="$(extract_openvpn_conf_port_proto "$conf")"
+  port="${pp%%|*}"
+  proto="${pp##*|}"
+  if [[ -z "$port" ]]; then
+    warn "  mode=${mode} has no port in server.conf, skip conflict check"
+    return 0
+  fi
+
+  local listeners pid args line conflicts
+  if [[ "$proto" == "tcp" ]]; then
+    listeners="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print}')"
+  else
+    listeners="$(ss -ulnp 2>/dev/null | awk -v p=":${port}" '$5 ~ p {print}')"
+  fi
+  [[ -z "$listeners" ]] && return 0
+
+  conflicts=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1)"
+    if [[ -z "$pid" ]]; then
+      conflicts+="${line}"$'\n'
+      continue
+    fi
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$args" == *"--config ${conf}"* ]]; then
+      continue
+    fi
+    conflicts+="${line}"$'\n'
+  done <<< "$listeners"
+
+  if [[ -n "$conflicts" ]]; then
+    fail "  Port conflict for mode=${mode}: ${proto}/${port} already in use"
+    while IFS= read -r c; do
+      [[ -n "$c" ]] && echo "    $c"
+    done <<< "$conflicts"
+    return 1
+  fi
+  ok "  Port check passed for mode=${mode}: ${proto}/${port}"
+  return 0
+}
+
+start_openvpn_mode_with_health_check() {
+  local mode="$1"
+  local unit="openvpn-${mode}.service"
+  local conf="/etc/openvpn/server/${mode}/server.conf"
+  if [[ ! -f "$conf" ]]; then
+    fail "  Missing config: $conf"
+    return 1
+  fi
+  if ! check_openvpn_port_conflict_for_mode "$mode"; then
+    return 1
+  fi
+  systemctl enable "$unit"
+  if ! systemctl restart "$unit"; then
+    fail "  Failed to restart $unit"
+    journalctl -u "$unit" -n 30 --no-pager -o cat | sed 's/^/    /'
+    return 1
+  fi
+  local tries=0
+  while [[ "$tries" -lt 3 ]]; do
+    if systemctl is-active --quiet "$unit"; then
+      ok "  Service $unit is active"
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 1
+  done
+  fail "  Service $unit failed health check"
+  journalctl -u "$unit" -n 30 --no-pager -o cat | sed 's/^/    /'
+  return 1
 }
 
 # 在 ufw / firewalld / iptables 上放行 bootstrap JSON 中的监听端口（需 root）
@@ -327,6 +448,7 @@ do_uninstall() {
     systemctl disable "openvpn-${m}.service" 2>/dev/null || true
     rm -f "/etc/systemd/system/openvpn-${m}.service"
   done
+  cleanup_legacy_openvpn_units
   if [[ -d /etc/wireguard ]]; then
     shopt -s nullglob
     for cf in /etc/wireguard/wg-*.conf; do
@@ -1172,6 +1294,9 @@ log "  NAT rules configured"
 # ── Step 8: Systemd service units ────────────────────────────────────────────
 
 log "Step 8/${TOTAL_STEPS}: Creating systemd services ..."
+cleanup_legacy_openvpn_units
+
+FAILED_OPENVPN_MODES=()
 
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
@@ -1200,10 +1325,18 @@ WantedBy=multi-user.target
 UNIT
 
   systemctl daemon-reload
-  systemctl enable "openvpn-${MODE}.service"
-  systemctl start "openvpn-${MODE}.service" || log "  WARNING: openvpn-${MODE} failed to start"
-  log "  Service openvpn-${MODE} enabled"
+  if start_openvpn_mode_with_health_check "$MODE"; then
+    log "  Service openvpn-${MODE} enabled"
+  else
+    FAILED_OPENVPN_MODES+=("$MODE")
+  fi
 done
+
+if [[ "${#FAILED_OPENVPN_MODES[@]}" -gt 0 ]]; then
+  fail "OpenVPN services failed for mode(s): ${FAILED_OPENVPN_MODES[*]}"
+  echo "请先处理上方冲突/日志错误后重试 node-setup.sh --apply" >&2
+  exit 1
+fi
 
 cat > /etc/systemd/system/vpn-routing.service <<'UNIT'
 [Unit]
