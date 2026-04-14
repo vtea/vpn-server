@@ -8,8 +8,8 @@
         </el-button>
       </div>
       <el-text type="info" size="small" style="display:block;margin-bottom:12px;">
-        网段 ID 由系统自动生成。地址第二段仅在<strong>新建</strong>时可填；OpenVPN 监听起始端口由系统在 56714 以上随机分配（UDP/TCP
-        共用端口）。新建节点在该网段下生成实例时，默认使用「默认协议」。若要让<strong>已有</strong>接入实例一并改协议，请点「编辑」修改默认协议并勾选「同步到已有实例」；否则库中
+        网段 ID 由系统自动生成。地址第二段仅在<strong>新建</strong>时可填；监听起始端口支持随机分配或手动指定（UDP/TCP 共用端口，连续占用 4
+        个端口）。新建节点在该网段下生成实例时，默认使用「默认协议」。若要让<strong>已有</strong>接入实例一并改协议，请点「编辑」修改默认协议并勾选「同步到已有实例」；否则库中
         <code>instances.proto</code> 不变，签发与用户 .ovpn 仍为旧协议。
       </el-text>
       <el-table :data="rows" v-loading="loading" stripe>
@@ -62,9 +62,23 @@
           </el-text>
         </el-form-item>
         <el-form-item label="监听端口">
-          <el-input :model-value="portHint" readonly />
+          <div style="display:flex;flex-direction:column;gap:8px;width:100%;">
+            <el-radio-group v-model="form.port_mode">
+              <el-radio label="random">随机分配</el-radio>
+              <el-radio label="manual">手动指定</el-radio>
+            </el-radio-group>
+            <el-input-number
+              v-if="form.port_mode === 'manual'"
+              v-model="form.port_base"
+              :min="1"
+              :max="65531"
+              controls-position="right"
+              style="width: 220px"
+            />
+            <el-input v-else :model-value="portHint" readonly />
+          </div>
           <el-text type="info" size="small" style="display:block;margin-top:4px;">
-            创建时在 {{ PORT_MIN }}–65531 内随机选取连续 4 个端口（UDP/TCP 共用）；下方为预览，实际以保存成功后的值为准。
+            {{ portHelpText }}
           </el-text>
         </el-form-item>
         <el-form-item label="说明">
@@ -149,7 +163,9 @@ const form = reactive({
   name: '',
   second_octet: 1,
   description: '',
-  default_ovpn_proto: 'udp'
+  default_ovpn_proto: 'udp',
+  port_mode: 'random',
+  port_base: 56714
 })
 
 const portHint = computed(() => {
@@ -157,6 +173,13 @@ const portHint = computed(() => {
     return `预览约 ${previewPortBase.value}–${previewPortBase.value + 3}（保存时重新随机）`
   }
   return `创建时随机（≥${PORT_MIN}，保证不冲突）`
+})
+
+const portHelpText = computed(() => {
+  if (form.port_mode === 'manual') {
+    return '手动输入监听起始端口（1–65531），系统会占用连续 4 个端口并校验与已有网段不冲突；低位端口可能需要节点系统权限。'
+  }
+  return `创建时在 ${PORT_MIN}–65531 内随机选取连续 4 个端口（UDP/TCP 共用）；下方为预览，实际以保存成功后的值为准。`
 })
 
 const protoLabel = (p) => ((p || 'udp').toLowerCase() === 'tcp' ? 'TCP' : 'UDP')
@@ -192,7 +215,14 @@ const loadNextValues = async () => {
 }
 
 const onDialogOpen = () => {
-  Object.assign(form, { name: '', second_octet: 1, description: '', default_ovpn_proto: 'udp' })
+  Object.assign(form, {
+    name: '',
+    second_octet: 1,
+    description: '',
+    default_ovpn_proto: 'udp',
+    port_mode: 'random',
+    port_base: PORT_MIN
+  })
   previewPortBase.value = null
   loadNextValues()
 }
@@ -250,14 +280,24 @@ const submit = async () => {
     ElMessage.warning('第二段须为 1–254')
     return
   }
+  if (form.port_mode === 'manual') {
+    if (!Number.isInteger(form.port_base) || form.port_base < 1 || form.port_base > 65531) {
+      ElMessage.warning('监听端口须为 1–65531 的整数')
+      return
+    }
+  }
   saving.value = true
   try {
-    const res = await http.post('/api/network-segments', {
+    const body = {
       name: form.name.trim(),
       second_octet: form.second_octet,
       description: form.description || '',
       default_ovpn_proto: form.default_ovpn_proto === 'tcp' ? 'tcp' : 'udp'
-    })
+    }
+    if (form.port_mode === 'manual') {
+      body.port_base = form.port_base
+    }
+    const res = await http.post('/api/network-segments', body)
     const seg = res.data.segment
     const pr = seg ? `${protoLabel(seg.default_ovpn_proto)} ${seg.port_base}–${seg.port_base + 3}` : ''
     ElMessage.success(seg ? `已创建，ID: ${seg.id}，${pr}` : '已创建')

@@ -63,7 +63,8 @@ type createSegmentReq struct {
 	Name               string `json:"name" binding:"required"`
 	Description        string `json:"description"`
 	SecondOctet        *uint8 `json:"second_octet"` // 省略则使用 SuggestNextSecondOctet
-	DefaultOvpnProto string `json:"default_ovpn_proto"` // 可选 udp|tcp；空则 udp
+	PortBase           *int   `json:"port_base"`          // 可选；为空时随机分配
+	DefaultOvpnProto   string `json:"default_ovpn_proto"` // 可选 udp|tcp；空则 udp
 }
 
 func (h *Handler) CreateNetworkSegment(c *gin.Context) {
@@ -93,10 +94,20 @@ func (h *Handler) CreateNetworkSegment(c *gin.Context) {
 		}
 	}
 
-	portBase, err := service.PickRandomPortBase(h.db)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	var portBase int
+	if req.PortBase != nil {
+		if err := service.ValidatePortBaseNoOverlap(h.db, *req.PortBase, ""); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		portBase = *req.PortBase
+	} else {
+		var err error
+		portBase, err = service.PickRandomPortBase(h.db)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	id, err := service.GenerateNetworkSegmentID(h.db)
