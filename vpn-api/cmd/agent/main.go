@@ -793,6 +793,18 @@ func tailText(s string, max int) string {
 	return "..." + s[len(s)-max:]
 }
 
+func resolveSelfBinaryPath() string {
+	// Prefer replacing the currently running executable path so agents installed
+	// outside /usr/local/bin still upgrade in place.
+	if exe, err := os.Executable(); err == nil {
+		exe = strings.TrimSpace(exe)
+		if exe != "" {
+			return exe
+		}
+	}
+	return "/usr/local/bin/vpn-agent"
+}
+
 func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 string, restartService bool) upgradeExecResult {
 	result := upgradeExecResult{Step: "validate"}
 	version = strings.TrimSpace(version)
@@ -853,9 +865,17 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 		return result
 	}
 	result.Step = "replace"
-	if err := os.WriteFile("/usr/local/bin/vpn-agent", data, 0755); err != nil {
+	targetPath := resolveSelfBinaryPath()
+	tmpTarget := targetPath + ".new"
+	if err := os.WriteFile(tmpTarget, data, 0755); err != nil {
 		result.ErrorCode = "replace_failed"
-		result.Error = fmt.Sprintf("replace binary: %v", err)
+		result.Error = fmt.Sprintf("write new binary %s: %v", tmpTarget, err)
+		return result
+	}
+	if err := os.Rename(tmpTarget, targetPath); err != nil {
+		_ = os.Remove(tmpTarget)
+		result.ErrorCode = "replace_failed"
+		result.Error = fmt.Sprintf("replace binary %s: %v", targetPath, err)
 		return result
 	}
 	_ = os.Remove(tmpPath)

@@ -554,7 +554,7 @@ const upgradeStatusTagType = (status) => {
   if (status === 'failed' || status === 'timeout') return 'danger'
   if (status === 'running' || status === 'prechecking' || status === 'verifying') return 'warning'
   if (status === 'skipped') return 'info'
-  return ''
+  return 'info'
 }
 
 const parseVersion = (v) => {
