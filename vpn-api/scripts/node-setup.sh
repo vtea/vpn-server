@@ -207,11 +207,11 @@ check_instance_ports_from_bootstrap_json() {
   tc="$(echo "$json" | jq '.tunnels | length')"
   if [[ "$tc" -gt 0 ]]; then
     local wgport
-    wgport="$(echo "$json" | jq -r '.tunnels[0].wg_port')"
-    if [[ -n "$wgport" && "$wgport" != "null" ]]; then
+    wgport="$(echo "$json" | jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty')"
+    if [[ -n "$wgport" ]]; then
       conflicts="$(collect_port_conflicts_by_proto_port "udp" "$wgport" || true)"
       if [[ -z "$conflicts" ]]; then
-        ok "UDP :${wgport} 可用（WireGuard 首隧道监听）"
+        ok "UDP :${wgport} 可用（WireGuard 监听）"
       else
         warn "UDP 端口 ${wgport} 已被占用（WireGuard 监听）"
         while IFS= read -r c; do
@@ -554,8 +554,8 @@ collect_required_ports_from_bootstrap_file() {
   done
   tc="$(jq '.tunnels | length' "$f")"
   if [[ "$tc" -gt 0 ]]; then
-    wgport="$(jq -r '.tunnels[0].wg_port' "$f")"
-    if [[ -n "$wgport" && "$wgport" != "null" ]]; then
+    wgport="$(jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty' "$f")"
+    if [[ -n "$wgport" ]]; then
       echo "wireguard|first-tunnel|udp|${wgport}"
     fi
   fi
@@ -767,9 +767,9 @@ print_external_firewall_reminder() {
   local tc wgport
   tc="$(echo "$json" | jq '.tunnels | length')"
   if [[ "$tc" -gt 0 ]]; then
-    wgport="$(echo "$json" | jq -r '.tunnels[0].wg_port')"
-    if [[ -n "$wgport" && "$wgport" != "null" ]]; then
-      log "  - WireGuard 首隧道监听  UDP ${wgport}"
+    wgport="$(echo "$json" | jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty')"
+    if [[ -n "$wgport" ]]; then
+      log "  - WireGuard 监听  UDP ${wgport}（首个有效 peer）"
     fi
   fi
   log "若客户端仍无法连接：检查云厂商安全组、机房边界 ACL、家用路由器端口映射是否包含上述项。"
@@ -1369,6 +1369,8 @@ if [[ ! -f "$WG_PRIVKEY" ]]; then
 fi
 
 LOCAL_PRIVKEY="$(cat "$WG_PRIVKEY")"
+WG_LISTEN_PORT="$(echo "$NODE_JSON" | jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty')"
+WG_LISTEN_ATTACHED=0
 
 for i in $(seq 0 $((TUNNEL_COUNT - 1))); do
   PEER_ID="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].peer_node_id")"
@@ -1381,8 +1383,14 @@ for i in $(seq 0 $((TUNNEL_COUNT - 1))); do
 
   WG_CONF="/etc/wireguard/wg-${PEER_ID}.conf"
 
-  if [[ "$i" -eq 0 ]]; then
-    LISTEN_LINE="ListenPort = ${WG_PORT}"
+  if [[ -z "$PEER_PUBKEY" || "$PEER_PUBKEY" == "null" ]]; then
+    log "  WARNING: skip wg-${PEER_ID}: missing peer public key from control plane"
+    continue
+  fi
+
+  if [[ "$WG_LISTEN_ATTACHED" -eq 0 && -n "$WG_LISTEN_PORT" ]]; then
+    LISTEN_LINE="ListenPort = ${WG_LISTEN_PORT}"
+    WG_LISTEN_ATTACHED=1
   else
     LISTEN_LINE="# ListenPort auto (avoid conflict with first tunnel)"
   fi

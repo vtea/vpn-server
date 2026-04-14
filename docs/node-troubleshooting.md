@@ -113,3 +113,19 @@ journalctl -u openvpn-local-only.service -n 30 --no-pager -o cat
 ```
 
 若任一项失败，节点视为“不可访问”，禁止对外宣告上线成功。
+
+## 七、隧道状态全红时优先检查
+
+当管理台隧道显示 `中断/配置无效`，优先执行：
+
+```bash
+jq '.tunnels[] | {peer_node_id, peer_endpoint, peer_ip, wg_port, peer_pubkey}' /etc/vpn-agent/bootstrap-node.json
+wg show
+systemctl --no-pager -l status 'wg-quick@wg-*'
+```
+
+判读要点：
+
+- `peer_pubkey` 为空：属于配置问题，控制面会标记 `invalid_config`；
+- `wg-quick` 报 `PublicKey=` 解析错误：通常由空公钥下发引起；
+- `transfer` 持续为 0 且无 `latest handshake`：多为端口/路由/对端不可达。

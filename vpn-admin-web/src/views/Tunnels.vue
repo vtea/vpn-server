@@ -80,6 +80,11 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column prop="status_reason" label="状态原因" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.status_reason || '-' }}
+          </template>
+        </el-table-column>
         <el-table-column prop="latency_ms" label="延迟(ms)" width="100" align="center">
           <template #default="{ row }">
             {{ Number.isFinite(row.latency_ms) ? Number(row.latency_ms).toFixed(1) : '-' }}
@@ -113,8 +118,9 @@ let pollTimer = null
 const POLL_INTERVAL_MS = 10000
 
 const linkColor = (status) => {
-  if (status === 'ok') return 'var(--color-success)'
-  if (status === 'down') return 'var(--color-danger)'
+  if (status === 'ok' || status === 'healthy') return 'var(--color-success)'
+  if (status === 'degraded' || status === 'pending') return 'var(--color-warning)'
+  if (status === 'down' || status === 'invalid_config') return 'var(--color-danger)'
   return 'var(--border-light)'
 }
 

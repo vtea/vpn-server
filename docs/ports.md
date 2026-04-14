@@ -42,6 +42,8 @@
 
 隧道默认监听 **56720**（模型字段 `wg_port`，可按隧道调整）。
 
+注意：当控制面下发某条隧道缺失 `peer_pubkey` 时，`node-setup.sh` 会跳过该 peer 的 WireGuard 配置，避免生成无效 `PublicKey=` 导致 `wg-quick` 启动失败。
+
 ## 防火墙备忘
 
 - 控制面：向公网暴露 **56700/tcp**（或经反向代理时的 **443/tcp** 等）。
@@ -64,6 +66,16 @@ tcpdump -ni any udp port 1194
 ```
 
 完整排障流程见：`docs/node-troubleshooting.md`。
+
+## 隧道健康判定（控制面）
+
+控制面隧道状态由节点 agent 的 `health.tunnels[]` 上报融合判定，优先使用 WireGuard 指标（handshake/interface），`ping` 仅作为辅助：
+
+- `healthy`：最近握手新鲜；
+- `degraded`：握手老化或仅 ping 可达；
+- `down`：连续失败达到阈值；
+- `invalid_config`：配置无效（如缺失 peer 公钥）；
+- `unknown`：观测不足或数据过期。
 
 ## 升级说明
 

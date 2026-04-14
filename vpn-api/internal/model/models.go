@@ -178,17 +178,21 @@ type User struct {
 }
 
 type Tunnel struct {
-	ID        uint      `json:"id" gorm:"primaryKey"`
-	NodeA     string    `json:"node_a" gorm:"index;not null"`
-	NodeB     string    `json:"node_b" gorm:"index;not null"`
-	Subnet    string    `json:"subnet" gorm:"uniqueIndex;not null"` // /30 组网子网全局唯一
-	IPA       string    `json:"ip_a" gorm:"not null"`
-	IPB       string    `json:"ip_b" gorm:"not null"`
-	WGPort    int       `json:"wg_port" gorm:"default:56720"`
-	Status    string    `json:"status" gorm:"default:unknown"`
-	LatencyMs float64   `json:"latency_ms"`
-	LossPct   float64   `json:"loss_pct"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                  uint       `json:"id" gorm:"primaryKey"`
+	NodeA               string     `json:"node_a" gorm:"index;not null"`
+	NodeB               string     `json:"node_b" gorm:"index;not null"`
+	Subnet              string     `json:"subnet" gorm:"uniqueIndex;not null"` // /30 组网子网全局唯一
+	IPA                 string     `json:"ip_a" gorm:"not null"`
+	IPB                 string     `json:"ip_b" gorm:"not null"`
+	WGPort              int        `json:"wg_port" gorm:"default:56720"`
+	Status              string     `json:"status" gorm:"default:unknown"`
+	StatusReason        string     `json:"status_reason"`
+	StatusUpdatedAt     *time.Time `json:"status_updated_at"`
+	LastHealthyAt       *time.Time `json:"last_healthy_at"`
+	ConsecutiveFailures int        `json:"consecutive_failures" gorm:"default:0"`
+	LatencyMs           float64    `json:"latency_ms"`
+	LossPct             float64    `json:"loss_pct"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 type AuditLog struct {

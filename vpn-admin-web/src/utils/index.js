@@ -43,8 +43,12 @@ const certStatusMap = {
 }
 
 const tunnelStatusMap = {
+  healthy: { label: '正常', type: 'success' },
+  degraded: { label: '降级', type: 'warning' },
   ok: { label: '正常', type: 'success' },
   down: { label: '中断', type: 'danger' },
+  invalid_config: { label: '配置无效', type: 'danger' },
+  unknown: { label: '未知', type: 'info' },
   pending: { label: '等待', type: 'warning' },
 }
 

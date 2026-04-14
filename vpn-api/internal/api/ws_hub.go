@@ -71,6 +71,100 @@ func singleLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+const (
+	tunnelStatusHealthy  = "healthy"
+	tunnelStatusDegraded = "degraded"
+	tunnelStatusDown     = "down"
+	tunnelStatusUnknown  = "unknown"
+	tunnelStatusInvalid  = "invalid_config"
+
+	tunnelFailureThreshold  = 3
+	tunnelHandshakeFreshSec = 90
+	tunnelHandshakeStaleSec = 300
+)
+
+type tunnelStatusEval struct {
+	Status              string
+	Reason              string
+	ConsecutiveFailures int
+	LastHealthyAt       *time.Time
+}
+
+func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnelItem) tunnelStatusEval {
+	failures := current.ConsecutiveFailures
+	if failures < 0 {
+		failures = 0
+	}
+	out := tunnelStatusEval{
+		Status:              tunnelStatusUnknown,
+		Reason:              "insufficient tunnel telemetry",
+		ConsecutiveFailures: failures,
+		LastHealthyAt:       current.LastHealthyAt,
+	}
+
+	if item.PeerPubKeyPresent != nil && !*item.PeerPubKeyPresent {
+		out.ConsecutiveFailures = failures + 1
+		out.Status = tunnelStatusInvalid
+		out.Reason = "missing peer wg public key"
+		return out
+	}
+
+	if item.IfaceUp != nil && !*item.IfaceUp {
+		out.ConsecutiveFailures = failures + 1
+		out.Status = tunnelStatusDown
+		out.Reason = "wireguard interface is down"
+		return out
+	}
+
+	if item.LatestHandshakeAgeSec != nil {
+		age := *item.LatestHandshakeAgeSec
+		if age >= 0 && age <= tunnelHandshakeFreshSec {
+			out.Status = tunnelStatusHealthy
+			out.Reason = "recent wireguard handshake"
+			out.ConsecutiveFailures = 0
+			out.LastHealthyAt = &now
+			return out
+		}
+		if age > tunnelHandshakeFreshSec && age <= tunnelHandshakeStaleSec {
+			out.Status = tunnelStatusDegraded
+			out.Reason = "wireguard handshake is stale"
+			out.ConsecutiveFailures = 0
+			return out
+		}
+	}
+
+	if item.Reachable {
+		out.Status = tunnelStatusDegraded
+		out.Reason = "ping reachable but wireguard handshake missing"
+		out.ConsecutiveFailures = failures + 1
+		return out
+	}
+
+	failures++
+	out.ConsecutiveFailures = failures
+	out.Reason = "ping unreachable"
+	if failures >= tunnelFailureThreshold {
+		out.Status = tunnelStatusDown
+	} else {
+		out.Status = tunnelStatusDegraded
+		out.Reason = "probe failed pending threshold"
+	}
+	return out
+}
+
+type healthTunnelItem struct {
+	PeerNodeID            string  `json:"peer_node_id"`
+	LatencyMs             float64 `json:"latency_ms"`
+	LossPct               float64 `json:"loss_pct"`
+	Reachable             bool    `json:"reachable"`
+	PeerPubKeyPresent     *bool   `json:"peer_pubkey_present,omitempty"`
+	IfaceUp               *bool   `json:"iface_up,omitempty"`
+	LatestHandshakeAgeSec *int64  `json:"latest_handshake_age_sec,omitempty"`
+	RxBytesDelta          *int64  `json:"rx_bytes_delta,omitempty"`
+	TxBytesDelta          *int64  `json:"tx_bytes_delta,omitempty"`
+	Error                 string  `json:"error,omitempty"`
+}
+
 func (hub *WSHub) SendToNode(nodeID string, msg WSMessage) error {
 	hub.mu.RLock()
 	ac, ok := hub.conns[nodeID]
@@ -295,14 +389,9 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 			}
 		case "health":
 			var h struct {
-				OnlineUsers int    `json:"online_users"`
-				WGPublicKey string `json:"wg_pubkey"`
-				Tunnels     []struct {
-					PeerNodeID string  `json:"peer_node_id"`
-					LatencyMs  float64 `json:"latency_ms"`
-					LossPct    float64 `json:"loss_pct"`
-					Reachable  bool    `json:"reachable"`
-				} `json:"tunnels"`
+				OnlineUsers int                `json:"online_users"`
+				WGPublicKey string             `json:"wg_pubkey"`
+				Tunnels     []healthTunnelItem `json:"tunnels"`
 			}
 			if json.Unmarshal(msg.Payload, &h) == nil {
 				updates := map[string]any{
@@ -316,18 +405,30 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					updates["wg_public_key"] = h.WGPublicKey
 				}
 				hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates)
+				now := time.Now()
 				for _, t := range h.Tunnels {
-					status := "ok"
-					if !t.Reachable {
-						status = "down"
-					}
-					hub.db.Model(&model.Tunnel{}).
+					var tunnel model.Tunnel
+					if err := hub.db.
 						Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",
 							ac.NodeID, t.PeerNodeID, t.PeerNodeID, ac.NodeID).
+						First(&tunnel).Error; err != nil {
+						continue
+					}
+					eval := evaluateTunnelHealth(now, tunnel, t)
+					reason := eval.Reason
+					if strings.TrimSpace(t.Error) != "" {
+						reason = reason + ": " + singleLine(t.Error)
+					}
+					hub.db.Model(&model.Tunnel{}).
+						Where("id = ?", tunnel.ID).
 						Updates(map[string]any{
-							"latency_ms": t.LatencyMs,
-							"loss_pct":   t.LossPct,
-							"status":     status,
+							"latency_ms":           t.LatencyMs,
+							"loss_pct":             t.LossPct,
+							"status":               eval.Status,
+							"status_reason":        reason,
+							"status_updated_at":    now,
+							"consecutive_failures": eval.ConsecutiveFailures,
+							"last_healthy_at":      eval.LastHealthyAt,
 						})
 					if tid := hub.findTunnelID(ac.NodeID, t.PeerNodeID); tid != 0 {
 						hub.db.Create(&model.TunnelMetric{

@@ -93,6 +93,8 @@ type TunnelPeerConfig struct {
 	PeerNodeID   string `json:"peer_node_id"`
 	PeerEndpoint string `json:"peer_endpoint"`
 	PeerPubKey   string `json:"peer_pubkey"`
+	ConfigValid  bool   `json:"config_valid"`
+	ConfigError  string `json:"config_error,omitempty"`
 	LocalIP      string `json:"local_ip"`
 	PeerIP       string `json:"peer_ip"`
 	Subnet       string `json:"subnet"`
@@ -135,6 +137,8 @@ func BuildTunnelConfigsForNode(db *gorm.DB, nodeID string) ([]TunnelPeerConfig, 
 			PeerNodeID:   peerNodeID,
 			PeerEndpoint: peerNode.PublicIP,
 			PeerPubKey:   peerNode.WGPublicKey,
+			ConfigValid:  strings.TrimSpace(peerNode.WGPublicKey) != "",
+			ConfigError:  map[bool]string{true: "", false: "missing peer wg public key"}[strings.TrimSpace(peerNode.WGPublicKey) != ""],
 			LocalIP:      localIP,
 			PeerIP:       peerIP,
 			Subnet:       t.Subnet,

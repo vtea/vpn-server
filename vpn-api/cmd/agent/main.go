@@ -862,10 +862,16 @@ func cronHealthReport(activeConn **websocket.Conn, connMu *sync.Mutex, cfg *Conf
 }
 
 type tunnelHealthItem struct {
-	PeerNodeID string  `json:"peer_node_id"`
-	LatencyMs  float64 `json:"latency_ms"`
-	LossPct    float64 `json:"loss_pct"`
-	Reachable  bool    `json:"reachable"`
+	PeerNodeID            string  `json:"peer_node_id"`
+	LatencyMs             float64 `json:"latency_ms"`
+	LossPct               float64 `json:"loss_pct"`
+	Reachable             bool    `json:"reachable"`
+	PeerPubKeyPresent     bool    `json:"peer_pubkey_present"`
+	IfaceUp               bool    `json:"iface_up"`
+	LatestHandshakeAgeSec int64   `json:"latest_handshake_age_sec"`
+	RxBytesDelta          int64   `json:"rx_bytes_delta"`
+	TxBytesDelta          int64   `json:"tx_bytes_delta"`
+	Error                 string  `json:"error,omitempty"`
 }
 
 func collectTunnelHealth() []tunnelHealthItem {
@@ -877,6 +883,7 @@ func collectTunnelHealth() []tunnelHealthItem {
 		Tunnels []struct {
 			PeerNodeID string `json:"peer_node_id"`
 			PeerIP     string `json:"peer_ip"`
+			PeerPubKey string `json:"peer_pubkey"`
 		} `json:"tunnels"`
 	}
 	if json.Unmarshal(data, &bootstrap) != nil {
@@ -885,7 +892,30 @@ func collectTunnelHealth() []tunnelHealthItem {
 
 	results := make([]tunnelHealthItem, 0, len(bootstrap.Tunnels))
 	for _, t := range bootstrap.Tunnels {
-		item := tunnelHealthItem{PeerNodeID: t.PeerNodeID}
+		item := tunnelHealthItem{
+			PeerNodeID:            t.PeerNodeID,
+			LatestHandshakeAgeSec: -1,
+			PeerPubKeyPresent:     strings.TrimSpace(t.PeerPubKey) != "",
+		}
+		if !item.PeerPubKeyPresent {
+			item.Error = "missing peer wg public key in bootstrap config"
+		}
+		if ok, ierr := isWGInterfaceUp("wg-" + t.PeerNodeID); ierr == nil {
+			item.IfaceUp = ok
+		} else {
+			item.Error = appendTunnelError(item.Error, ierr.Error())
+		}
+		if hsAge, hsErr := queryWGHandshakeAgeSec("wg-" + t.PeerNodeID); hsErr == nil {
+			item.LatestHandshakeAgeSec = hsAge
+		} else {
+			item.Error = appendTunnelError(item.Error, hsErr.Error())
+		}
+		if rx, tx, txErr := queryWGTransfer("wg-" + t.PeerNodeID); txErr == nil {
+			item.RxBytesDelta = rx
+			item.TxBytesDelta = tx
+		} else {
+			item.Error = appendTunnelError(item.Error, txErr.Error())
+		}
 		out, err := exec.Command("ping", "-c", "3", "-W", "3", t.PeerIP).CombinedOutput()
 		if err != nil {
 			item.Reachable = false
@@ -898,6 +928,66 @@ func collectTunnelHealth() []tunnelHealthItem {
 		results = append(results, item)
 	}
 	return results
+}
+
+func appendTunnelError(base, extra string) string {
+	extra = strings.TrimSpace(extra)
+	if extra == "" {
+		return base
+	}
+	if strings.TrimSpace(base) == "" {
+		return extra
+	}
+	return base + "; " + extra
+}
+
+func isWGInterfaceUp(iface string) (bool, error) {
+	out, err := exec.Command("ip", "link", "show", "dev", iface).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("ip link %s: %v %s", iface, err, strings.TrimSpace(string(out)))
+	}
+	text := strings.ToUpper(string(out))
+	return strings.Contains(text, "UP"), nil
+}
+
+func queryWGHandshakeAgeSec(iface string) (int64, error) {
+	out, err := exec.Command("wg", "show", iface, "latest-handshakes").CombinedOutput()
+	if err != nil {
+		return -1, fmt.Errorf("wg handshake %s: %v %s", iface, err, strings.TrimSpace(string(out)))
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 2 {
+		return -1, fmt.Errorf("wg handshake %s: empty output", iface)
+	}
+	sec, perr := strconv.ParseInt(fields[len(fields)-1], 10, 64)
+	if perr != nil {
+		return -1, fmt.Errorf("wg handshake %s parse: %v", iface, perr)
+	}
+	if sec <= 0 {
+		return -1, nil
+	}
+	age := time.Now().Unix() - sec
+	if age < 0 {
+		age = 0
+	}
+	return age, nil
+}
+
+func queryWGTransfer(iface string) (int64, int64, error) {
+	out, err := exec.Command("wg", "show", iface, "transfer").CombinedOutput()
+	if err != nil {
+		return 0, 0, fmt.Errorf("wg transfer %s: %v %s", iface, err, strings.TrimSpace(string(out)))
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 3 {
+		return 0, 0, fmt.Errorf("wg transfer %s: empty output", iface)
+	}
+	rx, errRx := strconv.ParseInt(fields[len(fields)-2], 10, 64)
+	tx, errTx := strconv.ParseInt(fields[len(fields)-1], 10, 64)
+	if errRx != nil || errTx != nil {
+		return 0, 0, fmt.Errorf("wg transfer %s parse failed", iface)
+	}
+	return rx, tx, nil
 }
 
 func extractAvgLatency(output string) float64 {

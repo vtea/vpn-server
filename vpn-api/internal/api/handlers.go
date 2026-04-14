@@ -1867,6 +1867,20 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 	if tunnelConfigs == nil {
 		tunnelConfigs = []service.TunnelPeerConfig{}
 	}
+	for _, tc := range tunnelConfigs {
+		if tc.ConfigValid {
+			continue
+		}
+		_ = h.db.Model(&model.Tunnel{}).
+			Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",
+				node.ID, tc.PeerNodeID, tc.PeerNodeID, node.ID).
+			Updates(map[string]any{
+				"status":               "invalid_config",
+				"status_reason":        tc.ConfigError,
+				"status_updated_at":    time.Now(),
+				"consecutive_failures": gorm.Expr("COALESCE(consecutive_failures, 0) + 1"),
+			}).Error
+	}
 
 	resp := gin.H{
 		"node_id":      node.ID,
