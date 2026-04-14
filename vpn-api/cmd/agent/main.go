@@ -1250,10 +1250,21 @@ type wgRefreshPayload struct {
 	Tunnels    []wgRefreshTunnel `json:"tunnels"`
 }
 
+const (
+	defaultWGListenOwnerIface = "wg-node-10"
+	failoverRestartThreshold  = 2
+	failoverCooldownDuration  = 5 * time.Minute
+)
+
 type failoverTunnel struct {
 	PeerNodeID string `json:"peer_node_id"`
 	PeerIP     string `json:"peer_ip"`
 	PeerPubKey string `json:"peer_pubkey"`
+}
+
+type failoverPeerState struct {
+	ConsecutiveFailures int
+	CooldownUntil       time.Time
 }
 
 func parseFailoverTunnelsFromConfigJSON(data []byte) []failoverTunnel {
@@ -1318,6 +1329,98 @@ func shouldLogFailoverEvent(last map[string]time.Time, key string, now time.Time
 	return false
 }
 
+func preferredWGListenOwnerIface() string {
+	if v := strings.TrimSpace(os.Getenv("WG_LISTEN_OWNER_IFACE")); v != "" {
+		return v
+	}
+	return defaultWGListenOwnerIface
+}
+
+func buildWGListenLine(iface string, reqListenPort int, ownerIface string) string {
+	if reqListenPort <= 0 {
+		return "# ListenPort auto (wg-refresh)"
+	}
+	if strings.TrimSpace(ownerIface) != "" && strings.TrimSpace(iface) == strings.TrimSpace(ownerIface) {
+		return fmt.Sprintf("ListenPort = %d", reqListenPort)
+	}
+	return "# ListenPort auto (wg-refresh)"
+}
+
+func classifyWGStartError(msg string) string {
+	s := strings.ToLower(strings.TrimSpace(msg))
+	switch {
+	case strings.Contains(s, "address already in use"):
+		return "port_conflict"
+	case strings.Contains(s, "name or service not known"), strings.Contains(s, "configuration parsing error"):
+		return "endpoint_parse_error"
+	case strings.Contains(s, "no such device"), strings.Contains(s, "does not exist"):
+		return "missing_interface"
+	default:
+		return "unknown"
+	}
+}
+
+func sanitizeWGConfigListenPorts(ownerIface string, reqListenPort int) ([]string, error) {
+	paths, err := filepath.Glob("/etc/wireguard/wg-*.conf")
+	if err != nil {
+		return nil, err
+	}
+	changedUnits := make(map[string]struct{})
+	for _, confPath := range paths {
+		raw, err := os.ReadFile(confPath)
+		if err != nil {
+			return nil, err
+		}
+		iface := strings.TrimSuffix(filepath.Base(confPath), ".conf")
+		wantListen := reqListenPort > 0 && strings.TrimSpace(iface) == strings.TrimSpace(ownerIface)
+		lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+		out := make([]string, 0, len(lines)+1)
+		listenSet := false
+		for _, line := range lines {
+			t := strings.TrimSpace(line)
+			if strings.HasPrefix(t, "ListenPort") {
+				if wantListen && !listenSet {
+					out = append(out, fmt.Sprintf("ListenPort = %d", reqListenPort))
+					listenSet = true
+				}
+				continue
+			}
+			out = append(out, line)
+		}
+		if wantListen && !listenSet {
+			inserted := false
+			for i, line := range out {
+				if strings.TrimSpace(line) == "[Interface]" {
+					head := append([]string{}, out[:i+1]...)
+					tail := append([]string{}, out[i+1:]...)
+					out = append(head, fmt.Sprintf("ListenPort = %d", reqListenPort))
+					out = append(out, tail...)
+					inserted = true
+					break
+				}
+			}
+			if !inserted {
+				out = append([]string{"[Interface]", fmt.Sprintf("ListenPort = %d", reqListenPort)}, out...)
+			}
+		}
+		newContent := strings.Join(out, "\n")
+		if !strings.HasSuffix(newContent, "\n") {
+			newContent += "\n"
+		}
+		if newContent != string(raw) {
+			if err := os.WriteFile(confPath, []byte(newContent), 0600); err != nil {
+				return nil, err
+			}
+			changedUnits["wg-quick@"+iface] = struct{}{}
+		}
+	}
+	units := make([]string, 0, len(changedUnits))
+	for unit := range changedUnits {
+		units = append(units, unit)
+	}
+	return units, nil
+}
+
 func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 	priv, err := os.ReadFile("/etc/wireguard/privatekey")
 	if err != nil {
@@ -1335,7 +1438,7 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 	}
 	results := make([]peerResult, 0, len(req.Tunnels))
 	changedUnits := make(map[string]struct{}, len(req.Tunnels))
-	listenAttached := false
+	ownerIface := preferredWGListenOwnerIface()
 	for _, t := range req.Tunnels {
 		r := peerResult{PeerNodeID: t.PeerNodeID}
 		configErr := strings.TrimSpace(t.ConfigError)
@@ -1347,11 +1450,8 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 			results = append(results, r)
 			continue
 		}
-		listenLine := "# ListenPort auto (wg-refresh)"
-		if !listenAttached && req.ListenPort > 0 {
-			listenLine = fmt.Sprintf("ListenPort = %d", req.ListenPort)
-			listenAttached = true
-		}
+		iface := "wg-" + strings.TrimSpace(t.PeerNodeID)
+		listenLine := buildWGListenLine(iface, req.ListenPort, ownerIface)
 		conf := strings.TrimSpace(fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s/30
@@ -1381,10 +1481,23 @@ PersistentKeepalive = 25
 			}
 			r.Changed = true
 		}
-		unit := "wg-quick@wg-" + strings.TrimSpace(t.PeerNodeID)
+		unit := "wg-quick@" + iface
 		changedUnits[unit] = struct{}{}
 		r.Success = true
 		results = append(results, r)
+	}
+
+	if sanitizeUnits, serr := sanitizeWGConfigListenPorts(ownerIface, req.ListenPort); serr != nil {
+		return map[string]any{
+			"success": false,
+			"node_id": req.NodeID,
+			"error":   "sanitize wg listen ports failed: " + serr.Error(),
+			"results": results,
+		}
+	} else {
+		for _, unit := range sanitizeUnits {
+			changedUnits[unit] = struct{}{}
+		}
 	}
 
 	restartErrors := make([]string, 0)
@@ -1780,6 +1893,7 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	lastLogAt := map[string]time.Time{}
+	peerStates := map[string]*failoverPeerState{}
 
 	for range ticker.C {
 		tunnels := failoverTunnelsFromLocalConfig()
@@ -1788,8 +1902,20 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 		}
 
 		for _, t := range tunnels {
+			state := peerStates[t.PeerNodeID]
+			if state == nil {
+				state = &failoverPeerState{}
+				peerStates[t.PeerNodeID] = state
+			}
+			now := time.Now()
+			if now.Before(state.CooldownUntil) {
+				logKey := "cooldown:" + t.PeerNodeID
+				if shouldLogFailoverEvent(lastLogAt, logKey, now) {
+					log.Printf("failover: tunnel to %s in cooldown until %s", t.PeerNodeID, state.CooldownUntil.Format(time.RFC3339))
+				}
+				continue
+			}
 			if strings.TrimSpace(t.PeerPubKey) == "" {
-				now := time.Now()
 				logKey := "missing-pubkey:" + t.PeerNodeID
 				if shouldLogFailoverEvent(lastLogAt, logKey, now) {
 					log.Printf("failover: skip tunnel to %s due to missing peer public key", t.PeerNodeID)
@@ -1812,17 +1938,21 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 				if isWGNoSuchDeviceError(ifaceErr) {
 					// 接口缺失时尝试自愈拉起 wg-quick，而不是每轮直接跳过。
 					if out, serr := exec.Command("systemctl", "start", unit).CombinedOutput(); serr != nil {
-						now := time.Now()
 						logKey := "start-failed:" + t.PeerNodeID
+						reason := classifyWGStartError(strings.TrimSpace(string(out)) + " " + serr.Error())
 						if shouldLogFailoverEvent(lastLogAt, logKey, now) {
-							log.Printf("failover: start %s failed for %s: %v %s", unit, t.PeerNodeID, serr, strings.TrimSpace(string(out)))
+							log.Printf("failover: start %s failed for %s (reason=%s): %v %s", unit, t.PeerNodeID, reason, serr, strings.TrimSpace(string(out)))
+						}
+						state.ConsecutiveFailures++
+						if state.ConsecutiveFailures >= failoverRestartThreshold {
+							state.CooldownUntil = now.Add(failoverCooldownDuration)
+							state.ConsecutiveFailures = 0
 						}
 						continue
 					}
 					time.Sleep(1 * time.Second)
 					ifaceUp, ifaceErr = isWGInterfaceUp(iface)
 					if ifaceErr != nil || !ifaceUp {
-						now := time.Now()
 						logKey := "iface-still-missing:" + t.PeerNodeID
 						if shouldLogFailoverEvent(lastLogAt, logKey, now) {
 							if ifaceErr != nil {
@@ -1831,11 +1961,17 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 								log.Printf("failover: %s still down after start for %s", iface, t.PeerNodeID)
 							}
 						}
+						state.ConsecutiveFailures++
+						if state.ConsecutiveFailures >= failoverRestartThreshold {
+							state.CooldownUntil = now.Add(failoverCooldownDuration)
+							state.ConsecutiveFailures = 0
+						}
 						continue
 					}
+					state.ConsecutiveFailures = 0
+					state.CooldownUntil = time.Time{}
 					log.Printf("failover: recovered missing interface %s via %s", iface, unit)
 				} else {
-					now := time.Now()
 					logKey := "iface-error:" + t.PeerNodeID
 					if shouldLogFailoverEvent(lastLogAt, logKey, now) {
 						log.Printf("failover: skip tunnel to %s due to interface check error: %v", t.PeerNodeID, ifaceErr)
@@ -1845,14 +1981,29 @@ func monitorTunnelFailover(activeConn **websocket.Conn, connMu *sync.Mutex, cfg 
 			}
 			_, err := exec.Command("ping", "-c", "1", "-W", "2", t.PeerIP).Output()
 			if err != nil {
-				log.Printf("failover: tunnel to %s DOWN, attempting restart", t.PeerNodeID)
+				state.ConsecutiveFailures++
+				if state.ConsecutiveFailures < failoverRestartThreshold {
+					logKey := "probe-failed-threshold:" + t.PeerNodeID
+					if shouldLogFailoverEvent(lastLogAt, logKey, now) {
+						log.Printf("failover: tunnel to %s probe failed (%d/%d), waiting before restart", t.PeerNodeID, state.ConsecutiveFailures, failoverRestartThreshold)
+					}
+					continue
+				}
+				log.Printf("failover: tunnel to %s DOWN, attempting restart (reason=probe_failed)", t.PeerNodeID)
 				exec.Command("systemctl", "restart", "wg-quick@wg-"+t.PeerNodeID).Run()
 				time.Sleep(3 * time.Second)
 				if _, err2 := exec.Command("ping", "-c", "1", "-W", "2", t.PeerIP).Output(); err2 != nil {
 					log.Printf("failover: tunnel to %s still DOWN after restart", t.PeerNodeID)
+					state.CooldownUntil = now.Add(failoverCooldownDuration)
+					state.ConsecutiveFailures = 0
 				} else {
 					log.Printf("failover: tunnel to %s recovered", t.PeerNodeID)
+					state.ConsecutiveFailures = 0
+					state.CooldownUntil = time.Time{}
 				}
+			} else {
+				state.ConsecutiveFailures = 0
+				state.CooldownUntil = time.Time{}
 			}
 		}
 	}

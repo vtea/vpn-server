@@ -78,3 +78,29 @@ func TestParseOpenVPNClientListCount(t *testing.T) {
 		t.Fatalf("want 2, got %d", got)
 	}
 }
+
+func TestBuildWGListenLine(t *testing.T) {
+	if got := buildWGListenLine("wg-node-10", 51820, "wg-node-10"); got != "ListenPort = 51820" {
+		t.Fatalf("unexpected listen line: %s", got)
+	}
+	if got := buildWGListenLine("wg-node-20", 51820, "wg-node-10"); strings.Contains(got, "ListenPort =") {
+		t.Fatalf("non-owner interface should not keep fixed listen port: %s", got)
+	}
+	if got := buildWGListenLine("wg-node-10", 0, "wg-node-10"); strings.Contains(got, "ListenPort =") {
+		t.Fatalf("zero req listen port should not render fixed line: %s", got)
+	}
+}
+
+func TestClassifyWGStartError(t *testing.T) {
+	cases := map[string]string{
+		"RTNETLINK answers: Address already in use":             "port_conflict",
+		"Name or service not known: <NODE20_IP>:51820":          "endpoint_parse_error",
+		"ip link wg-node-20: Device does not exist":             "missing_interface",
+		"unexpected control process exited with unknown reason": "unknown",
+	}
+	for input, want := range cases {
+		if got := classifyWGStartError(input); got != want {
+			t.Fatalf("classifyWGStartError(%q)=%q want=%q", input, got, want)
+		}
+	}
+}
