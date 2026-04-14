@@ -90,6 +90,11 @@ func main() {
 	r.GET("/api/downloads/vpn-agent-linux-amd64", h.ServeVPNAgentLinuxAMD64)
 	r.GET("/api/downloads/vpn-agent-linux-arm64", h.ServeVPNAgentLinuxARM64)
 	r.GET("/api/downloads/vpn-agent/:seg1/:seg2", h.ServeVPNAgentVersionedDownload)
+	// Some probes (curl -I / health checks / proxies) use HEAD.
+	// Register explicit HEAD routes to avoid false 404 on download endpoints.
+	r.HEAD("/api/downloads/vpn-agent-linux-amd64", h.ServeVPNAgentLinuxAMD64)
+	r.HEAD("/api/downloads/vpn-agent-linux-arm64", h.ServeVPNAgentLinuxARM64)
+	r.HEAD("/api/downloads/vpn-agent/:seg1/:seg2", h.ServeVPNAgentVersionedDownload)
 	r.GET("/api/ip-lists/download/:scope", h.DownloadIPList)
 
 	secured := r.Group("/api", middleware.JWT(cfg.JWTSecret))
