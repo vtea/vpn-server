@@ -10,10 +10,9 @@ Created symlink /etc/systemd/system/multi-user.target.wants/vpn-agent.service â†
 [20:23:40]   Public IP:   42.48.123.124
 [20:23:40] 
 [20:23:40] OpenVPN instances:
-[20:23:40]   openvpn-local-only -> :56710/udp
-[20:23:40]   openvpn-hk-smart-split -> :56711/udp
-[20:23:40]   openvpn-hk-global -> :56712/udp
-[20:23:40]   openvpn-us-global -> :56713/udp
+[20:23:40]   openvpn-node-direct -> :56710/udp
+[20:23:40]   openvpn-cn-split -> :56711/udp
+[20:23:40]   openvpn-global -> :56712/udp
 [20:23:40] 
 [20:23:40] WireGuard tunnels:
 [20:23:40]   wg-shanghai: 172.16.0.1 <-> 172.16.0.2

@@ -18,7 +18,7 @@
 
 ### 组网网段（升级说明）
 
-控制面会为每个**组网网段**维护地址第二段、OpenVPN **监听端口基址**（UDP 与 TCP 共用端口号）以及 **默认传输协议** `default_ovpn_proto`（`udp`/`tcp`）；**新建节点时必须至少选择一个网段**（可多选），在该网段下生成的四套接入实例默认使用该协议。内置 `default` 网段：`10.{节点号}.{模式序号}.0/24`，监听 **56710–56713**（默认 UDP，见 `docs/ports.md`）。在管理台「新建组网网段」时，**网段 ID 与起始端口由系统自动分配**（自 **56714** 起随机并避免与已有网段重叠）；地址第二段默认按库内空闲值预填，也可自定义并由服务端校验冲突。同一节点挂多个网段时，各网段端口区间仍须互不重叠；不同网段可选用不同默认协议以实现 UDP/TCP 并存。已有数据库在首次启动新版 API 时会自动补全 `default` 网段与节点绑定。
+控制面会为每个**组网网段**维护地址第二段、OpenVPN **监听端口基址**（UDP 与 TCP 共用端口号）以及 **默认传输协议** `default_ovpn_proto`（`udp`/`tcp`）；**新建节点时必须至少选择一个网段**（可多选），在该网段下生成的三套接入实例默认使用该协议。内置 `default` 网段：`10.{节点号}.{模式序号}.0/24`，监听 **56710–56712**（默认 UDP，见 `docs/ports.md`）。在管理台「新建组网网段」时，**网段 ID 与起始端口由系统自动分配**（自 **56713** 起随机并避免与已有网段重叠）；地址第二段默认按库内空闲值预填，也可自定义并由服务端校验冲突。同一节点挂多个网段时，各网段端口区间仍须互不重叠；不同网段可选用不同默认协议以实现 UDP/TCP 并存。已有数据库在首次启动新版 API 时会自动补全 `default` 网段与节点绑定。
 
 ---
 
@@ -243,7 +243,7 @@ bash install.sh --domain vpn.company.com --yes
 |------|------|
 | 操作系统 | 同控制面 |
 | 内存 | >= 512MB |
-| 网络 | 公网 IP，UDP 端口 56710–56713 和 **56720**（WireGuard）可用 |
+| 网络 | 公网 IP，UDP 端口 56710–56712 和 **56720**（WireGuard）可用 |
 | 权限 | root |
 
 ### 2.3 安装命令
@@ -304,7 +304,6 @@ export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
   ✓ UDP :56710 可用
   ✓ UDP :56711 可用
   ✓ UDP :56712 可用
-  ✓ UDP :56713 可用
   ✓ UDP :56720 可用
 
 ═══════════════════════════════════════════════════════════════
@@ -322,7 +321,7 @@ export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
 | 3 | 初始化 PKI | 初始化 easy-rsa，签发服务端证书，生成 DH 参数和 TLS 密钥 |
 | 4 | 渲染 OpenVPN 配置 | 为每个实例生成 server.conf（含 management port 用于在线用户采集） |
 | 5 | 部署 WireGuard 隧道 | 生成密钥对，为每个 peer 创建 wg conf 并启动 |
-| 6 | 配置策略路由 | 创建路由表，smart-split 模式注入中国 IP 路由 |
+| 6 | 配置策略路由 | 创建路由表，cn-split 模式注入中国 IP 路由 |
 | 7 | 配置 NAT 规则 | 下载 china-ip-list，配置 ipset + iptables SNAT/MASQUERADE |
 | 8 | 创建 systemd 服务 | 每个 OpenVPN 实例一个服务 + NAT 规则服务 |
 | 9 | 安装 Agent | 写入配置，创建 systemd 服务，连接控制面 WebSocket |
@@ -336,14 +335,12 @@ export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
 /etc/openvpn/server/
 ├── easy-rsa/              # PKI（证书签发）
 │   └── pki/
-├── local-only/
-│   └── server.conf        # 仅本地模式
-├── hk-smart-split/
-│   └── server.conf        # 香港智能分流
-├── hk-global/
-│   └── server.conf        # 香港全局代理
-└── us-global/
-    └── server.conf        # 美国全局代理
+├── node-direct/
+│   └── server.conf        # 节点直连
+├── cn-split/
+│   └── server.conf        # 国内分流
+└── global/
+    └── server.conf        # 全局模式
 
 /etc/wireguard/
 ├── privatekey
@@ -363,8 +360,8 @@ export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
 └── vpn-exceptions.conf    # 域名分流配置（自动生成）
 
 /var/log/openvpn/
-├── local-only.log
-├── hk-smart-split.log
+├── node-direct.log
+├── cn-split.log
 └── ...
 ```
 
@@ -431,8 +428,8 @@ journalctl -u vpn-api -f          # 实时日志
 # 若已自行安装 Nginx：systemctl status nginx
 
 # 节点
-systemctl status openvpn-local-only       # OpenVPN 实例
-systemctl status openvpn-hk-smart-split
+systemctl status openvpn-node-direct       # OpenVPN 实例
+systemctl status openvpn-cn-split
 systemctl status vpn-agent                # Agent
 systemctl status wg-quick@wg-hongkong     # WireGuard 隧道
 journalctl -u vpn-agent -f               # Agent 日志

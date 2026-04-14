@@ -176,7 +176,7 @@ Agent 接口：
 | 4 | **隧道拓扑图升级** | Tunnels.vue 支持节点拖拽、丢包标注、在线人数显示、状态发光效果 |
 | 5 | **域名例外规则** | Agent `generateDnsmasqConfig()` 生成 `/etc/dnsmasq.d/vpn-exceptions.conf`，域名解析结果注入 ipset |
 | 6 | **隧道自动故障切换** | Agent `monitorTunnelFailover()` 每 30s 检测隧道，断开时自动 restart wg-quick |
-| 7 | **出境节点负载均衡** | 通过多实例（hk-global/us-global/sg-global）+ 管理员按用户分配实现策略级均衡 |
+| 7 | **出境节点负载均衡** | 通过多实例（global/sg-global）+ 管理员按用户分配实现策略级均衡 |
 | 8 | **员工自助门户** | `SelfService.vue` 用户输入用户名查看/下载自己的 .ovpn，无需管理员介入 |
 | 9 | **短期证书自动轮换** | Agent `cronCertRenewal()` 每天检查证书到期时间，≤30 天自动续签 |
 | 10 | **Prometheus 指标** | `GET /api/metrics` 暴露 nodes/users/tunnels/grants/online_users 指标 |

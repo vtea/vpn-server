@@ -58,11 +58,11 @@
 
 | # | 任务 | 产出 | 验收标准 |
 |---|------|------|----------|
-| 2.1 | 在上海测试机部署 local-only 实例 | server.conf + systemd + NAT | 客户端连接后可上网，IP 为上海公网 |
-| 2.2 | 部署 hk-global 实例 | server.conf + 路由表 102 | 客户端连接后所有流量走香港出口 |
-| 2.3 | 部署 hk-smart-split 实例 | server.conf + ipset + 路由表 101 | 访问百度走上海，访问 Google 走香港 |
+| 2.1 | 在上海测试机部署 node-direct（节点直连）实例 | server.conf + systemd + NAT | 客户端连接后可上网，IP 为上海公网 |
+| 2.2 | 部署 global（全局）实例 | server.conf + 路由表 102 | 客户端连接后所有流量走指定出口 |
+| 2.3 | 部署 cn-split（国内分流）实例 | server.conf + ipset + 路由表 101 | 访问百度走本地，访问 Google 走出口 |
 | 2.4 | 在香港测试机配置出境 MASQUERADE | iptables 规则 | 从上海转发来的流量能正确 NAT 出去 |
-| 2.5 | 验证证书隔离（不同实例的证书不能互连） | 测试报告 | hk-split 的证书连不上 local-only |
+| 2.5 | 验证证书隔离（不同实例的证书不能互连） | 测试报告 | cn-split 的证书连不上 node-direct |
 
 ### P2.2 Node Agent 第一版（第 4 周）
 

@@ -36,7 +36,7 @@
 2. 查看 OpenVPN 日志：`tail -f /var/log/openvpn/<mode>.log`
 3. 确认证书未被吊销：Web 端查看用户授权状态
 4. 确认客户端使用正确的 .ovpn 文件
-5. 确认防火墙放行对应 OpenVPN 端口：**UDP 与 TCP 以该实例 `instances.proto` 为准**（默认网段常见 **56710–56713**，以节点详情为准）。
+5. 确认防火墙放行对应 OpenVPN 端口：**UDP 与 TCP 以该实例 `instances.proto` 为准**（默认网段常见 **56710–56712**，以节点详情为准）。
 
 ### 3.1 Web 显示 TCP 与用户 .ovpn 仍是 UDP；或 remote 端口与 proto 不一致
 
@@ -66,9 +66,9 @@
 
 ### 3.2 出口节点（`instances.exit_node`）
 
-**`local-only`**：默认**留空**表示客户端全局流量经**本入口节点**公网出口（NAT 到本机 WAN）；脚本会推送 **`redirect-gateway`**。若填写 **对端节点 ID**（须与本节点「相关隧道」一致），则该实例流量经 **WireGuard 到对端**再出网；**无** `hongkong`/`usa` 等内置名回退。
+**`node-direct`（节点直连）**：默认**留空**表示客户端全局流量经**本入口节点**公网出口（NAT 到本机 WAN）；脚本会推送 **`redirect-gateway`**。若填写 **对端节点 ID**（须与本节点「相关隧道」一致），则该实例流量经 **WireGuard 到对端**再出网。
 
-**`hk-smart-split` / `hk-global` / `us-global`**：可在 **`instances.exit_node`** 中填写对端节点 ID。节点上 **`policy-routing.sh`**（由 `node-setup.sh` 生成）用该 ID 在 **`bootstrap-node.json` 的 `tunnels`** 里解析对端 WG 内网 IP；**留空**时仍尝试旧版内置名（HK：`hongkong`/`hong-kong`；US：`usa`/`us`）。
+**`cn-split`（国内分流）/ `global`（全局）**：可在 **`instances.exit_node`** 中填写对端节点 ID。节点上 **`policy-routing.sh`**（由 `node-setup.sh` 生成）用该 ID 在 **`bootstrap-node.json` 的 `tunnels`** 里解析对端 WG 内网 IP；**留空**时仍尝试旧版内置名（`hongkong`/`hong-kong`）。
 
 **配置步骤**：
 
@@ -78,15 +78,15 @@
 
 ### 3.3 新建节点默认启用与存量升级
 
-**新建节点（当前版本）**：控制面仍为每个节点创建四套实例，但 **`enabled` 仅 `local-only` 为 true**；`hk-smart-split` / `hk-global` / `us-global` 默认关闭。管理员在 Web **组网接入** 中勾选启用其它模式并保存后，须在节点上 **重新执行 `node-setup.sh`（或等价部署流程）**，以便生成对应 **`server.conf`**、systemd 单元及路由/NAT；仅在线 Agent 同步 **不会**为仍禁用的模式创建监听。
+**新建节点（当前版本）**：控制面为每个节点创建三套实例，但 **`enabled` 仅 `node-direct` 为 true**；`cn-split` / `global` 默认关闭。管理员在 Web **组网接入** 中勾选启用其它模式并保存后，须在节点上 **重新执行 `node-setup.sh`（或等价部署流程）**，以便生成对应 **`server.conf`**、systemd 单元及路由/NAT；仅在线 Agent 同步 **不会**为仍禁用的模式创建监听。
 
-**存量节点升级**：若节点上的 `local-only` **`server.conf` 仍为旧版（无 `push redirect-gateway`）**，用户即使连上也可能与预期不符。升级 `node-setup.sh` 后请在节点上 **重跑安装脚本** 中生成 OpenVPN 与路由的步骤。行为变化：**新语义下 `local-only` 会拉全局流量进隧道**；若业务仍需要「仅 VPN 子网、公网走用户本机」，应使用其它产品设计（例如不授权 `local-only` 或单独文档约定），而非依赖旧脚本行为。
+**存量节点升级**：若节点上的 `node-direct` **`server.conf` 仍为旧版（无 `push redirect-gateway`）**，用户即使连上也可能与预期不符。升级 `node-setup.sh` 后请在节点上 **重跑安装脚本** 中生成 OpenVPN 与路由的步骤。行为变化：**新语义下 `node-direct` 会拉全局流量进隧道**；若业务仍需要「仅 VPN 子网、公网走用户本机」，应使用其它产品设计（例如不授权 `node-direct` 或单独文档约定），而非依赖旧脚本行为。
 
-### 3.4 local-only 已连接但客户端「上不了网」；节点「在线用户」长期为 0
+### 3.4 node-direct 已连接但客户端「上不了网」；节点「在线用户」长期为 0
 
-**上不了网**：在**新语义**下，`local-only` 应已推送默认路由；若仍异常，查 **`server.conf` 是否含 `redirect-gateway`**、节点 **NAT/转发**、以及客户端 **Kill Switch**（部分客户端在 DNS 或分路上仍会拦截）。若 `local-only` 配置了 **`exit_node`**，确认策略路由与隧道正常（`ip rule` / `ip route show table`）。
+**上不了网**：在**新语义**下，`node-direct` 应已推送默认路由；若仍异常，查 **`server.conf` 是否含 `redirect-gateway`**、节点 **NAT/转发**、以及客户端 **Kill Switch**（部分客户端在 DNS 或分路上仍会拦截）。若 `node-direct` 配置了 **`exit_node`**，确认策略路由与隧道正常（`ip rule` / `ip route show table`）。
 
-**在线用户为 0**：Web 上人数由 **vpn-agent** 通过本机 OpenVPN **management**（`127.0.0.1:56730`–`56733`，按 **mode** 固定：`local-only`→56730，`hk-smart-split`→56731，`hk-global`→56732，`us-global`→56733）查询后上报。若长期为 0：检查 **`systemctl status openvpn-<mode>`**（仅 **已启用** 的实例应有服务）、Agent 日志、以及 **`server.conf`** 中 `management` 端口是否与上表一致。
+**在线用户为 0**：Web 上人数由 **vpn-agent** 通过本机 OpenVPN **management**（`127.0.0.1:56730`–`56732`，按 **mode** 固定：`node-direct`→56730，`cn-split`→56731，`global`→56732）查询后上报。若长期为 0：检查 **`systemctl status openvpn-<mode>`**（仅 **已启用** 的实例应有服务）、Agent 日志、以及 **`server.conf`** 中 `management` 端口是否与上表一致。
 
 建议按以下顺序快速确认：
 
@@ -97,13 +97,13 @@
 
 ### 3.5 OpenVPN 服务启动循环（常见于端口被历史服务抢占）
 
-**现象**：某个实例（不止 `local-only`，也可能是 `hk-smart-split` / `hk-global` / `us-global`）持续 `auto-restart`，客户端反复重连失败。
+**现象**：某个实例（不止 `node-direct`，也可能是 `cn-split` / `global`）持续 `auto-restart`，客户端反复重连失败。
 
 **典型根因**：节点上残留系统默认服务 `openvpn-server@server`（或 `openvpn@server`）占用了实例 `server.conf` 配置的监听端口（如 1194/udp）。
 
 **排查步骤**：
 1. 查看实例与历史服务状态：
-   - `systemctl status openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global --no-pager -l`
+   - `systemctl status openvpn-node-direct openvpn-cn-split openvpn-global --no-pager -l`
    - `systemctl status openvpn-server@server --no-pager -l`
 2. 查看端口占用：
    - `ss -ulnp | grep -E '1194|1195|1196|1197|openvpn'`
@@ -227,7 +227,7 @@ systemctl start vpn-api
 ### 12.2 节点服务健康
 
 1. `systemctl status vpn-agent vpn-routing.service --no-pager -l`
-2. `systemctl status openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global --no-pager -l`
+2. `systemctl status openvpn-node-direct openvpn-cn-split openvpn-global --no-pager -l`
 3. `systemctl status wg-quick@wg-node-10 wg-quick@wg-node-30 wg-quick@wg-node-40 --no-pager -l`
 4. `systemctl status dnsmasq --no-pager -l`
 5. `journalctl -u vpn-agent -n 200 --no-pager`
@@ -305,14 +305,14 @@ curl -sS -X POST "$API_URL/api/nodes/$NODE_ID/wg-refresh" \
 
 ```bash
 echo "[1] OpenVPN PID before"
-systemctl show -p MainPID openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global
+systemctl show -p MainPID openvpn-node-direct openvpn-cn-split openvpn-global
 
 echo "[2] WG status"
 wg show
 systemctl --no-pager -l status 'wg-quick@wg-*' | sed -n '1,120p'
 
 echo "[3] OpenVPN PID after (compare with before)"
-systemctl show -p MainPID openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global
+systemctl show -p MainPID openvpn-node-direct openvpn-cn-split openvpn-global
 ```
 
 通过标准：

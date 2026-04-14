@@ -38,22 +38,20 @@
   70~250 = 预留给未来节点
 
 实例号固定：
-  0 = local-only        (端口 56710)
-  1 = hk-smart-split    (端口 56711)
-  2 = hk-global         (端口 56712)
-  3 = us-global         (端口 56713)
+  0 = node-direct       (端口 56710)
+  1 = cn-split          (端口 56711)
+  2 = global            (端口 56712)
   4~9 = 预留给未来出境节点
 
 示例 - 上海节点(10)：
-  local-only:      server 10.10.0.0 255.255.255.0  (port 56710)
-  hk-smart-split:  server 10.10.1.0 255.255.255.0  (port 56711)
-  hk-global:       server 10.10.2.0 255.255.255.0  (port 56712)
-  us-global:       server 10.10.3.0 255.255.255.0  (port 56713)
+  node-direct:     server 10.10.0.0 255.255.255.0  (port 56710)
+  cn-split:        server 10.10.1.0 255.255.255.0  (port 56711)
+  global:          server 10.10.2.0 255.255.255.0  (port 56712)
 
 示例 - 香港节点(40)：
-  local-only:      server 10.40.0.0 255.255.255.0  (port 56710)
-  （香港节点通常不需要 hk-split/hk-global，因为本身就在香港）
-  us-global:       server 10.40.3.0 255.255.255.0  (port 56713)
+  node-direct:     server 10.40.0.0 255.255.255.0  (port 56710)
+  （香港节点通常不需要 cn-split/global，因为本身就在香港）
+  global:          server 10.40.2.0 255.255.255.0  (port 56712)
 ```
 
 ### 1.2 WireGuard 骨干隧道地址
@@ -97,23 +95,22 @@ WireGuard 监听端口：56720（所有节点统一，见 docs/ports.md）
 │   │   ├── dh.pem                       # DH 参数
 │   │   ├── tc.key                       # tls-crypt 密钥
 │   │   └── crl.pem                      # 证书吊销列表
-│   ├── local-only/
+│   ├── node-direct/
 │   │   ├── server.conf
 │   │   ├── server.crt
 │   │   ├── server.key
 │   │   └── ipp.txt
-│   ├── hk-split/
+│   ├── cn-split/
 │   │   ├── server.conf
 │   │   ├── server.crt
 │   │   ├── server.key
 │   │   └── ipp.txt
-│   ├── hk-global/
+│   ├── global/
 │   │   └── ...
-│   └── us-global/
-│       └── ...
+│   └── ...
 ├── client-configs/                      # 生成的 .ovpn 文件暂存
-│   ├── zhangsan-local-only.ovpn
-│   ├── zhangsan-hk-split.ovpn
+│   ├── zhangsan-node-direct.ovpn
+│   ├── zhangsan-cn-split.ovpn
 │   └── ...
 
 /etc/wireguard/
@@ -128,31 +125,30 @@ WireGuard 监听端口：56720（所有节点统一，见 docs/ports.md）
 └── cn-ip-list.ipset                     # ipset restore 格式
 
 /etc/nftables.d/                         # 或 /etc/iptables.d/（按 OS）
-├── 10-local-only.rules
-├── 20-hk-split.rules
-├── 30-hk-global.rules
-└── 40-us-global.rules
+├── 10-node-direct.rules
+├── 20-cn-split.rules
+└── 30-global.rules
 ```
 
 ### 2.2 各实例 server.conf 详细配置
 
-**local-only 实例**（最基础，等同原始脚本）：
+**node-direct 实例**（最基础，等同原始脚本）：
 
 ```ini
-# /etc/openvpn/server/local-only/server.conf
+# /etc/openvpn/server/node-direct/server.conf
 local 0.0.0.0
 port 56710
 proto udp
 dev tun-local
 ca /etc/openvpn/server/shared/ca.crt
-cert /etc/openvpn/server/local-only/server.crt
-key /etc/openvpn/server/local-only/server.key
+cert /etc/openvpn/server/node-direct/server.crt
+key /etc/openvpn/server/node-direct/server.key
 dh /etc/openvpn/server/shared/dh.pem
 auth SHA512
 tls-crypt /etc/openvpn/server/shared/tc.key
 topology subnet
 server 10.10.0.0 255.255.255.0
-ifconfig-pool-persist /etc/openvpn/server/local-only/ipp.txt
+ifconfig-pool-persist /etc/openvpn/server/node-direct/ipp.txt
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 8.8.8.8"
 push "dhcp-option DNS 8.8.4.4"
@@ -175,23 +171,23 @@ iptables -I FORWARD -s 10.10.0.0/24 -j ACCEPT
 iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 ```
 
-**hk-global 实例**（所有流量走香港）：
+**global 实例**（所有流量走指定出口）：
 
 ```ini
-# /etc/openvpn/server/hk-global/server.conf
+# /etc/openvpn/server/global/server.conf
 local 0.0.0.0
 port 56712
 proto udp
 dev tun-hkglobal
 ca /etc/openvpn/server/shared/ca.crt
-cert /etc/openvpn/server/hk-global/server.crt
-key /etc/openvpn/server/hk-global/server.key
+cert /etc/openvpn/server/global/server.crt
+key /etc/openvpn/server/global/server.key
 dh /etc/openvpn/server/shared/dh.pem
 auth SHA512
 tls-crypt /etc/openvpn/server/shared/tc.key
 topology subnet
 server 10.10.2.0 255.255.255.0
-ifconfig-pool-persist /etc/openvpn/server/hk-global/ipp.txt
+ifconfig-pool-persist /etc/openvpn/server/global/ipp.txt
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 8.8.8.8"
 push "dhcp-option DNS 8.8.4.4"
@@ -222,23 +218,23 @@ iptables -I FORWARD -s 10.10.2.0/24 -j ACCEPT
 iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 ```
 
-**hk-smart-split 实例**（核心：国内走本地，境外走香港）：
+**cn-split 实例**（核心：国内走本地，境外走出口）：
 
 ```ini
-# /etc/openvpn/server/hk-split/server.conf
+# /etc/openvpn/server/cn-split/server.conf
 local 0.0.0.0
 port 56711
 proto udp
 dev tun-hksplit
 ca /etc/openvpn/server/shared/ca.crt
-cert /etc/openvpn/server/hk-split/server.crt
-key /etc/openvpn/server/hk-split/server.key
+cert /etc/openvpn/server/cn-split/server.crt
+key /etc/openvpn/server/cn-split/server.key
 dh /etc/openvpn/server/shared/dh.pem
 auth SHA512
 tls-crypt /etc/openvpn/server/shared/tc.key
 topology subnet
 server 10.10.1.0 255.255.255.0
-ifconfig-pool-persist /etc/openvpn/server/hk-split/ipp.txt
+ifconfig-pool-persist /etc/openvpn/server/cn-split/ipp.txt
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 119.29.29.29"
 push "dhcp-option DNS 8.8.8.8"
@@ -260,7 +256,7 @@ NAT/路由规则（关键）：
 ipset create cn_net hash:net maxelem 65536
 ipset restore < /etc/vpn-agent/cn-ip-list.ipset
 
-# 2. 默认路由走香港隧道（路由表 101）
+# 2. 默认路由走出口隧道（路由表 101）
 ip route add default via 172.16.0.10 dev wg-hongkong table 101
 ip rule add from 10.10.1.0/24 lookup 101 prio 100
 
@@ -326,7 +322,7 @@ PersistentKeepalive = 25
 
 每个 OpenVPN 实例一个服务：
 ```ini
-# /etc/systemd/system/openvpn-local-only.service
+# /etc/systemd/system/openvpn-node-direct.service
 [Unit]
 Description=OpenVPN Local Only Instance
 After=network-online.target
@@ -334,7 +330,7 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server/local-only/server.conf
+ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server/node-direct/server.conf
 Restart=always
 RestartSec=5
 
@@ -344,16 +340,16 @@ WantedBy=multi-user.target
 
 NAT 规则服务（每个实例一个）：
 ```ini
-# /etc/systemd/system/vpn-nat-hk-split.service
+# /etc/systemd/system/vpn-nat-cn-split.service
 [Unit]
-Description=NAT rules for hk-split OpenVPN instance
-After=network-online.target openvpn-hk-split.service
+Description=NAT rules for cn-split OpenVPN instance
+After=network-online.target openvpn-cn-split.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/etc/nftables.d/20-hk-split.rules start
-ExecStop=/etc/nftables.d/20-hk-split.rules stop
+ExecStart=/etc/nftables.d/20-cn-split.rules start
+ExecStop=/etc/nftables.d/20-cn-split.rules stop
 
 [Install]
 WantedBy=multi-user.target
@@ -589,7 +585,7 @@ Agent 接口（WebSocket + REST）：
 ### 4.3 核心业务流程：授权用户访问某实例
 
 ```
-管理员在 Web 上操作：给张三授权「上海节点 - 香港智能分流」
+管理员在 Web 上操作：给张三授权「上海节点 - 国内分流」
 
 1. Web 调 POST /api/users/zhangsan/grants
    body: { instance_id: 5 }
@@ -601,7 +597,7 @@ Agent 接口（WebSocket + REST）：
    c. Agent 在上海节点执行：
       cd /etc/openvpn/server/easy-rsa/
       ./easyrsa --batch --days=3650 build-client-full "zhangsan-sh-hksplit" nopass
-   d. Agent 生成 .ovpn 文件（用 hk-split 实例的 client-common.txt 模板 + 证书内联）
+   d. Agent 生成 .ovpn 文件（用 cn-split 实例的 client-common.txt 模板 + 证书内联）
    e. Agent 将 .ovpn 内容上传回 API
    f. API 存入 user_grants.ovpn_file
 
@@ -658,8 +654,8 @@ Agent 接口（WebSocket + REST）：
 │  └──────┴────────┴────────┴──────┴────────┘              │
 │                                                          │
 │  最近操作                                                 │
-│  • admin 授权 李四 访问 上海-香港智能分流     2分钟前        │
-│  • admin 吊销 王五 的 上海-美国全局 证书      1小时前        │
+│  • admin 授权 李四 访问 上海-国内分流         2分钟前        │
+│  • admin 吊销 王五 的 上海-全局 证书          1小时前        │
 │  • 系统 更新国内IP库至 2026-04-12 版本       3小时前        │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -678,10 +674,9 @@ Agent 接口（WebSocket + REST）：
 │  │ 状态: 在线   │  Agent: v1.2.0  │  配置版本: v15     │ │
 │  │                                                     │ │
 │  │ 实例:                                               │ │
-│  │  local-only     :56710  10.10.0.0/24   3人在线       │ │
-│  │  hk-smart-split :56711  10.10.1.0/24   2人在线       │ │
-│  │  hk-global      :56712  10.10.2.0/24   0人在线       │ │
-│  │  us-global      :56713  10.10.3.0/24   0人在线       │ │
+│  │  node-direct    :56710  10.10.0.0/24   3人在线       │ │
+│  │  cn-split       :56711  10.10.1.0/24   2人在线       │ │
+│  │  global         :56712  10.10.2.0/24   0人在线       │ │
 │  │                                                     │ │
 │  │ 隧道:                                               │ │
 │  │  → 香港  35ms  0%丢包  │  → 美国  180ms  0.1%丢包  │ │
@@ -701,10 +696,9 @@ Agent 接口（WebSocket + REST）：
 │  公网 IP:   [________________]           │
 │                                         │
 │  需要的实例:                             │
-│  [x] 仅本地 (local-only)                │
-│  [x] 香港智能分流 (hk-split)             │
-│  [x] 香港全局 (hk-global)               │
-│  [x] 美国全局 (us-global)               │
+│  [x] 节点直连 (node-direct)             │
+│  [x] 国内分流 (cn-split)                │
+│  [x] 全局 (global)                      │
 │  [ ] 新加坡全局 (sg-global)              │
 │                                         │
 │  ─── 自动分配结果（预览）───              │
@@ -755,12 +749,12 @@ Agent 接口（WebSocket + REST）：
 │  │ 实例                       │ 状态   │ 操作          │ │
 │  ├────────────────────────────┼────────┼───────────────┤ │
 │  │ 上海 → 仅本地              │ 有效   │ [下载] [吊销] │ │
-│  │ 上海 → 香港智能分流         │ 有效   │ [下载] [吊销] │ │
+│  │ 上海 → 国内分流             │ 有效   │ [下载] [吊销] │ │
 │  └────────────────────────────┴────────┴───────────────┘ │
 │                                                          │
 │  添加新授权:                                             │
 │  接入节点: [上海 ▾]                                      │
-│  流量模式: [香港全局代理 ▾]                               │
+│  流量模式: [全局代理 ▾]                                   │
 │                                                          │
 │  说明: 授权后将自动签发证书并生成 .ovpn 配置文件。         │
 │  管理员下载后发给用户即可使用。                            │
@@ -1079,9 +1073,9 @@ vpn-api/
 │   ├── server.conf.tmpl
 │   ├── client-common.txt.tmpl
 │   ├── wg-peer.conf.tmpl
-│   ├── nat-local-only.sh.tmpl
+│   ├── nat-node-direct.sh.tmpl
 │   ├── nat-global.sh.tmpl
-│   ├── nat-smart-split.sh.tmpl
+│   ├── nat-cn-split.sh.tmpl
 │   └── systemd-openvpn.service.tmpl
 ├── scripts/
 │   └── node-setup.sh
