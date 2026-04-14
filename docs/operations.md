@@ -205,3 +205,63 @@ systemctl start vpn-api
 3. 恢复数据库
 4. 更新 DNS 指向新机器
 5. 所有节点 Agent 会自动重连（通过 DNS 解析到新地址）
+
+## 12. 节点与控制面完整巡检
+
+适用场景：节点显示异常（如“未部署却在线”）、IP 库状态长期未更新、怀疑 agent 与 API 通信异常。
+
+可选一键检查脚本（仓库内）：
+
+- 控制面：`bash /opt/vpn-api/scripts/health-check.sh --role control-plane --api-url http://127.0.0.1:56700`
+- 节点：`bash /opt/vpn-api/scripts/health-check.sh --role node --api-url http://<控制面地址>:56700`
+- 控制面（含状态一致性校验）：`bash /opt/vpn-api/scripts/health-check.sh --role control-plane --api-url http://127.0.0.1:56700 --jwt <管理端JWT> --expect-consistent`
+
+### 12.1 控制面健康
+
+1. `systemctl status vpn-api --no-pager -l`
+2. `curl -sf http://127.0.0.1:56700/api/health`
+3. `curl -sfSL -o /tmp/.probe http://127.0.0.1:56700/api/downloads/vpn-agent-linux-amd64 && ls -lh /tmp/.probe`
+
+判定：以上命令全部成功，且下载探测文件非空。
+
+### 12.2 节点服务健康
+
+1. `systemctl status vpn-agent vpn-routing.service --no-pager -l`
+2. `systemctl status openvpn-local-only openvpn-hk-smart-split openvpn-hk-global openvpn-us-global --no-pager -l`
+3. `systemctl status wg-quick@wg-node-10 wg-quick@wg-node-30 wg-quick@wg-node-40 --no-pager -l`
+4. `systemctl status dnsmasq --no-pager -l`
+5. `journalctl -u vpn-agent -n 200 --no-pager`
+
+判定：关键服务为 `active (running)`；agent 日志中能看到 WS 连接、心跳或业务处理日志。
+
+### 12.3 WS 在线状态一致性
+
+使用管理端 JWT 调用：
+
+- `GET /api/nodes/state-consistency`
+
+返回字段说明：
+
+- `db_status`：数据库中的节点状态；
+- `ws_online`：当前是否存在 WS 连接；
+- `inconsistent=true`：数据库状态与 WS 真实连接不一致。
+
+判定：`mismatch=0` 为通过；若 `mismatch>0`，优先检查该节点是否真实部署并连接到了 `/api/agent/ws`。
+
+### 12.4 IP 库端到端检查
+
+1. 控制台触发“更新 IP 库”（或调用 `POST /api/ip-list/update`）。
+2. API 日志确认收到并处理 `iplist_result`。
+3. 节点侧确认：
+   - `ls -lh /etc/vpn-agent/cn-ip-list.txt`
+   - `ipset list china-ip | head`
+4. 控制台节点详情确认 `IP 库版本` 不再为“未更新”。
+
+### 12.5 “未部署却在线”修复说明
+
+当前逻辑已调整为：
+
+- `AgentRegister` 不再将节点直接置为 `online`；
+- 节点在线状态仅由 WS 建连/心跳驱动（`/api/agent/ws`）。
+
+因此，未部署或未连上 WS 的节点应显示 `offline`。

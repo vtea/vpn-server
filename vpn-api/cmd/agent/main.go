@@ -44,6 +44,7 @@ const defaultAgentVersion = "0.2.1"
 
 // buildVersion can be injected by -ldflags "-X main.buildVersion=vX.Y.Z".
 var buildVersion string
+var startupIPListReportOnce sync.Once
 
 func agentVersion() string {
 	if strings.TrimSpace(buildVersion) != "" {
@@ -138,6 +139,7 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 	log.Printf("connected, node=%s", cfg.NodeID)
 
 	sendReport(conn, cfg)
+	sendStartupIPListStatus(conn)
 
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
@@ -184,6 +186,34 @@ func sendReport(conn *websocket.Conn, cfg *Config) {
 	msg := WSMessage{Type: "report", Payload: payload}
 	data, _ := json.Marshal(msg)
 	conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func sendStartupIPListStatus(conn *websocket.Conn) {
+	startupIPListReportOnce.Do(func() {
+		for _, scope := range []string{"domestic", "overseas"} {
+			count := countIPListEntries(scope)
+			if count <= 0 {
+				continue
+			}
+			version := ipListLocalVersion(scope)
+			sendResult(conn, "iplist_result", map[string]any{
+				"success":     true,
+				"scope":       scope,
+				"version":     version,
+				"entry_count": count,
+			})
+			log.Printf("startup iplist status reported: scope=%s version=%s entries=%d", scope, version, count)
+		}
+	})
+}
+
+func ipListLocalVersion(scope string) string {
+	p := ipListLocalFile(scope)
+	fi, err := os.Stat(p)
+	if err != nil {
+		return time.Now().Format("20060102-150405")
+	}
+	return fi.ModTime().Format("20060102-150405")
 }
 
 const wgPublicKeyFile = "/etc/wireguard/publickey"

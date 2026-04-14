@@ -47,6 +47,24 @@
 - 控制面：向公网暴露 **56700/tcp**（或经反向代理时的 **443/tcp** 等）。
 - 节点：放行对应 OpenVPN **UDP**（如 56710–56713）及 WireGuard **UDP 56720**（以实例与隧道实际配置为准）。
 
+## 部署后验收清单
+
+以下命令用于快速确认“端口已监听 + 规则已生效”：
+
+```bash
+jq '.instances[] | {mode,port,proto,enabled}' /etc/vpn-agent/bootstrap-node.json
+ss -ulnp | grep -E ':(1194|1195|1196|1197|56710|56711|56712|56713|56720)\b' || true
+systemctl status openvpn-local-only.service --no-pager -l
+```
+
+若客户端仍卡在 `WAIT`，请优先按抓包判责：
+
+```bash
+tcpdump -ni any udp port 1194
+```
+
+完整排障流程见：`docs/node-troubleshooting.md`。
+
 ## 升级说明
 
 若已有数据库仍使用旧默认（如 API `9902`、OpenVPN `1194` 段），不会自动改写；需在本仓库新版本上**新装**或**手动**调整 `network_segments.port_base`、实例端口、防火墙与 `.ovpn` 后再迁移。

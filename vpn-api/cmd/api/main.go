@@ -107,6 +107,7 @@ func main() {
 	nodes.GET("/nodes", h.ListNodes)
 	// Register static route before param route to avoid matching "upgrade-status" as :id.
 	nodes.GET("/nodes/upgrade-status", h.ListNodeUpgradeStatus)
+	nodes.GET("/nodes/state-consistency", h.GetNodeStateConsistency)
 	nodes.GET("/nodes/:id", h.GetNode)
 	nodes.PATCH("/nodes/:id", h.PatchNode)
 	nodes.POST("/nodes", h.CreateNode)

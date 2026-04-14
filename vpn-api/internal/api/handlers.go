@@ -1730,6 +1730,43 @@ func (h *Handler) GetNodeStatus(c *gin.Context) {
 	})
 }
 
+func (h *Handler) GetNodeStateConsistency(c *gin.Context) {
+	var nodes []model.Node
+	if err := h.db.Find(&nodes).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	connected := map[string]bool{}
+	if h.hub != nil {
+		for _, id := range h.hub.ConnectedNodeIDs() {
+			connected[id] = true
+		}
+	}
+	items := make([]gin.H, 0, len(nodes))
+	mismatch := 0
+	for _, n := range nodes {
+		wsOnline := connected[n.ID]
+		dbOnline := strings.TrimSpace(strings.ToLower(n.Status)) == "online"
+		inconsistent := dbOnline != wsOnline
+		if inconsistent {
+			mismatch++
+		}
+		items = append(items, gin.H{
+			"node_id":       n.ID,
+			"db_status":     n.Status,
+			"ws_online":     wsOnline,
+			"inconsistent":  inconsistent,
+			"agent_version": n.AgentVersion,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total":      len(items),
+		"mismatch":   mismatch,
+		"consistent": mismatch == 0,
+		"items":      items,
+	})
+}
+
 func (h *Handler) GetTunnelMetrics(c *gin.Context) {
 	tunnelID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -1820,7 +1857,8 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 	bt.UsedAt = &now
 	_ = h.db.Save(&bt).Error
 
-	node.Status = "online"
+	// Do not set node.Status here. Real online/offline should be driven by
+	// websocket lifecycle (connect/heartbeat/disconnect) in ws_hub.
 	node.ConfigVersion++
 	node.AgentVersion = "bootstrap"
 	_ = h.db.Save(&node).Error

@@ -49,6 +49,16 @@ func (hub *WSHub) IsOnline(nodeID string) bool {
 	return ok
 }
 
+func (hub *WSHub) ConnectedNodeIDs() []string {
+	hub.mu.RLock()
+	defer hub.mu.RUnlock()
+	ids := make([]string, 0, len(hub.conns))
+	for id := range hub.conns {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 type WSMessage struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload,omitempty"`
@@ -185,6 +195,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					updates["agent_capabilities"] = strings.Join(rpt.Capabilities, ",")
 				}
 				hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates)
+				log.Printf("agent report: node=%s version=%s arch=%s capabilities=%d wg_pubkey=%t", ac.NodeID, strings.TrimSpace(rpt.AgentVersion), strings.TrimSpace(rpt.AgentArch), len(rpt.Capabilities), strings.TrimSpace(rpt.WGPublicKey) != "")
 			}
 		case "cert_result":
 			var res struct {
@@ -342,9 +353,13 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				EntryCount int    `json:"entry_count"`
 				Error      string `json:"error"`
 			}
-			if json.Unmarshal(msg.Payload, &res) == nil && res.Success {
-				now := time.Now()
+			if json.Unmarshal(msg.Payload, &res) == nil {
 				scope := strings.ToLower(strings.TrimSpace(res.Scope))
+				if !res.Success {
+					log.Printf("iplist_result failed: node=%s scope=%s error=%s", ac.NodeID, scope, singleLine(res.Error))
+					break
+				}
+				now := time.Now()
 				if scope == "" || scope == "domestic" {
 					hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
 						"ip_list_version":            res.Version,
@@ -361,6 +376,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 						"overseas_ip_list_update_at": &now,
 					})
 				}
+				log.Printf("iplist_result applied: node=%s scope=%s version=%s entries=%d", ac.NodeID, scope, strings.TrimSpace(res.Version), res.EntryCount)
 			}
 		case "upgrade_result":
 			var res struct {

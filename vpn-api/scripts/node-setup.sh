@@ -7,13 +7,19 @@ DRY_RUN=1
 NON_INTERACTIVE=0
 FORCE_REINSTALL=0
 OPEN_HOST_FIREWALL=0
+OPEN_HOST_FIREWALL_MODE="auto"
 # 空=完全按控制面 instances[].proto；udp/tcp=本机统一覆盖（并写入 bootstrap-node.json）
 OPENVPN_PROTO_OVERRIDE=""
+# 端口冲突策略：prompt(交互询问) / abort(直接中止) / cleanup(自动清理白名单进程)
+PORT_CONFLICT_POLICY=""
+FIREWALL_BACKEND="none"
+FIREWALL_ACTIVE=0
+SKIPPED_OPENVPN_MODES=()
 
 usage() {
   cat <<'EOF'
 Usage:
-  node-setup.sh --api-url <url> --token <node-token> [--apply] [--non-interactive] [--force-reinstall] [--open-host-firewall] [--openvpn-proto udp|tcp]
+  node-setup.sh --api-url <url> --token <node-token> [--apply] [--non-interactive] [--force-reinstall] [--open-host-firewall|--no-open-host-firewall] [--openvpn-proto udp|tcp] [--port-conflict-policy prompt|abort|cleanup]
 
 无参数或缺少 URL/Token 时，若在 TTY 下运行将显示交互菜单（查看信息 / 卸载 / 部署）。
 
@@ -30,9 +36,12 @@ This script:
 
 Default mode is dry-run. Use --apply to execute.
   --force-reinstall      若本机已有 /etc/vpn-agent，实际安装前会先卸载再装（需配合 --apply）
-  --open-host-firewall     注册成功后尝试在本机 ufw / firewalld / iptables 上放行 OpenVPN 与 WireGuard 监听端口（需 root）
+  --open-host-firewall     强制在本机防火墙放行 OpenVPN 与 WireGuard 监听端口（需 root）
+  --no-open-host-firewall  禁用本机防火墙自动放行（默认 auto：若检测到 ufw/firewalld 启用则自动放行）
   --openvpn-proto udp|tcp  注册成功后强制将所有 OpenVPN 实例统一为该协议（写入本机 bootstrap）；默认完全按控制面下发
                             交互式且未加本参数时，注册后会询问是否改为全 UDP / 全 TCP
+  --port-conflict-policy   端口冲突处理策略：prompt(询问管理员) / abort(直接中止) / cleanup(自动清理白名单进程)
+                            默认：交互模式 prompt；非交互模式 abort
 
 提示：curl … | bash 时 stdin 为管道；若需交互询问「是否重装」，脚本会从 /dev/tty 读取。
 无人值守或 CI 请使用 --force-reinstall。
@@ -46,9 +55,14 @@ while [[ $# -gt 0 ]]; do
     --apply)    DRY_RUN=0; shift ;;
     --non-interactive) NON_INTERACTIVE=1; shift ;;
     --force-reinstall) FORCE_REINSTALL=1; shift ;;
-    --open-host-firewall) OPEN_HOST_FIREWALL=1; shift ;;
+    --open-host-firewall) OPEN_HOST_FIREWALL=1; OPEN_HOST_FIREWALL_MODE="on"; shift ;;
+    --no-open-host-firewall) OPEN_HOST_FIREWALL_MODE="off"; shift ;;
     --openvpn-proto)
       OPENVPN_PROTO_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --port-conflict-policy)
+      PORT_CONFLICT_POLICY="${2:-}"
       shift 2
       ;;
     -h|--help)  usage; exit 0 ;;
@@ -60,6 +74,13 @@ if [[ -n "${OPENVPN_PROTO_OVERRIDE:-}" ]]; then
   case "${OPENVPN_PROTO_OVERRIDE,,}" in
     udp|tcp) ;;
     *) echo "错误: --openvpn-proto 仅支持 udp 或 tcp，当前: ${OPENVPN_PROTO_OVERRIDE}" >&2; exit 1 ;;
+  esac
+fi
+
+if [[ -n "${PORT_CONFLICT_POLICY:-}" ]]; then
+  case "${PORT_CONFLICT_POLICY,,}" in
+    prompt|abort|cleanup) ;;
+    *) echo "错误: --port-conflict-policy 仅支持 prompt / abort / cleanup，当前: ${PORT_CONFLICT_POLICY}" >&2; exit 1 ;;
   esac
 fi
 
@@ -76,9 +97,45 @@ LEGACY_OPENVPN_UNITS=(
 )
 
 # 预检：是否运行 ufw / firewalld（仅提示，不修改规则）
+detect_firewall_backend() {
+  FIREWALL_BACKEND="none"
+  FIREWALL_ACTIVE=0
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qiE 'Status:\s*active'; then
+    FIREWALL_BACKEND="ufw"
+    FIREWALL_ACTIVE=1
+    echo "$FIREWALL_BACKEND"
+    return 0
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -qi running; then
+    FIREWALL_BACKEND="firewalld"
+    FIREWALL_ACTIVE=1
+    echo "$FIREWALL_BACKEND"
+    return 0
+  fi
+  if command -v iptables >/dev/null 2>&1; then
+    FIREWALL_BACKEND="iptables"
+  fi
+  echo "$FIREWALL_BACKEND"
+}
+
+should_apply_host_firewall_open() {
+  case "$OPEN_HOST_FIREWALL_MODE" in
+    on) return 0 ;;
+    off) return 1 ;;
+  esac
+  detect_firewall_backend >/dev/null
+  [[ "$FIREWALL_ACTIVE" -eq 1 ]]
+}
+
 detect_host_firewall_precheck() {
   echo ""
   log "检查本机防火墙框架 ..."
+  detect_firewall_backend >/dev/null
+  case "$OPEN_HOST_FIREWALL_MODE" in
+    on) log "防火墙放行策略: 强制放行 (--open-host-firewall)" ;;
+    off) warn "防火墙放行策略: 已禁用 (--no-open-host-firewall)" ;;
+    *) log "防火墙放行策略: 自动（检测到启用中的 ufw/firewalld 时自动放行）" ;;
+  esac
   if command -v ufw >/dev/null 2>&1; then
     if ufw status 2>/dev/null | grep -qiE 'Status:\s*active'; then
       warn "ufw 已启用：若 VPN 连不上，请在 ufw 放行下方「外部放行清单」中的端口，或使用 --open-host-firewall"
@@ -103,7 +160,7 @@ detect_host_firewall_precheck() {
 check_instance_ports_from_bootstrap_json() {
   local json="$1"
   [[ -z "$json" ]] && return 0
-  local ic port p
+  local ic port p mode conflicts policy action
   ic="$(echo "$json" | jq '.instances | length')"
   [[ "$ic" -eq 0 ]] && return 0
   echo ""
@@ -111,22 +168,40 @@ check_instance_ports_from_bootstrap_json() {
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(echo "$json" | jq -r ".instances[$i].enabled // true")"
     [[ "$inst_en" == "false" ]] && continue
+    mode="$(echo "$json" | jq -r ".instances[$i].mode // \"unknown\"")"
     port="$(echo "$json" | jq -r ".instances[$i].port")"
     p="$(echo "$json" | jq -r ".instances[$i].proto // \"udp\"" | tr '[:upper:]' '[:lower:]')"
     [[ "$p" != "tcp" ]] && p="udp"
-    if [[ "$p" == "tcp" ]]; then
-      if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-        warn "TCP 端口 ${port} 已被占用（${p}）"
-      else
-        ok "TCP :${port} 可用（OpenVPN）"
-      fi
-    else
-      if ss -ulnp 2>/dev/null | grep -q ":${port} "; then
-        warn "UDP 端口 ${port} 已被占用（OpenVPN）"
-      else
-        ok "UDP :${port} 可用（OpenVPN）"
-      fi
+    conflicts="$(collect_port_conflicts_by_proto_port "$p" "$port" || true)"
+    if [[ -z "$conflicts" ]]; then
+      ok "$(echo "$p" | tr '[:lower:]' '[:upper:]') :${port} 可用（OpenVPN）"
+      continue
     fi
+    warn "$(echo "$p" | tr '[:lower:]' '[:upper:]') 端口 ${port} 已被占用（OpenVPN）"
+    while IFS= read -r c; do
+      [[ -z "$c" ]] && continue
+      echo "    ${c##*|}"
+    done <<< "$conflicts"
+
+    policy="$(effective_port_conflict_policy)"
+    case "$policy" in
+      cleanup)
+        log "  端口冲突策略: cleanup（自动清理白名单进程）"
+        cleanup_conflicting_processes "$mode" "" "$p" "$port" "$conflicts" || return 1
+        ;;
+      abort)
+        fail "  端口冲突策略: abort（中止部署）"
+        return 1
+        ;;
+      prompt|*)
+        action="$(prompt_admin_conflict_action "$mode" "$p" "$port")"
+        case "$action" in
+          cleanup) cleanup_conflicting_processes "$mode" "" "$p" "$port" "$conflicts" || return 1 ;;
+          skip) warn "  管理员选择暂不清理 mode=${mode}，后续启动前将再次检查" ;;
+          *) fail "  管理员选择中止部署"; return 1 ;;
+        esac
+        ;;
+    esac
   done
   local tc
   tc="$(echo "$json" | jq '.tunnels | length')"
@@ -134,10 +209,34 @@ check_instance_ports_from_bootstrap_json() {
     local wgport
     wgport="$(echo "$json" | jq -r '.tunnels[0].wg_port')"
     if [[ -n "$wgport" && "$wgport" != "null" ]]; then
-      if ss -ulnp 2>/dev/null | grep -q ":${wgport} "; then
-        warn "UDP 端口 ${wgport} 已被占用（WireGuard 监听）"
-      else
+      conflicts="$(collect_port_conflicts_by_proto_port "udp" "$wgport" || true)"
+      if [[ -z "$conflicts" ]]; then
         ok "UDP :${wgport} 可用（WireGuard 首隧道监听）"
+      else
+        warn "UDP 端口 ${wgport} 已被占用（WireGuard 监听）"
+        while IFS= read -r c; do
+          [[ -z "$c" ]] && continue
+          echo "    ${c##*|}"
+        done <<< "$conflicts"
+        policy="$(effective_port_conflict_policy)"
+        case "$policy" in
+          cleanup)
+            log "  端口冲突策略: cleanup（自动清理白名单进程）"
+            cleanup_conflicting_processes "wireguard-first-tunnel" "" "udp" "$wgport" "$conflicts" || return 1
+            ;;
+          abort)
+            fail "  端口冲突策略: abort（中止部署）"
+            return 1
+            ;;
+          prompt|*)
+            action="$(prompt_admin_conflict_action "wireguard-first-tunnel" "udp" "$wgport")"
+            case "$action" in
+              cleanup) cleanup_conflicting_processes "wireguard-first-tunnel" "" "udp" "$wgport" "$conflicts" || return 1 ;;
+              skip) warn "  管理员选择暂不清理 WireGuard 端口，后续流程继续" ;;
+              *) fail "  管理员选择中止部署"; return 1 ;;
+            esac
+            ;;
+        esac
       fi
     fi
   fi
@@ -179,6 +278,170 @@ extract_openvpn_conf_port_proto() {
   echo "${port}|${proto}"
 }
 
+effective_port_conflict_policy() {
+  local p="${PORT_CONFLICT_POLICY,,}"
+  if [[ -n "$p" ]]; then
+    echo "$p"
+    return 0
+  fi
+  if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+    echo "abort"
+  else
+    echo "prompt"
+  fi
+}
+
+collect_port_conflicts_for_mode() {
+  local mode="$1"
+  local conf="$2"
+  local proto="$3"
+  local port="$4"
+  local listeners line pid args
+
+  if [[ "$proto" == "tcp" ]]; then
+    listeners="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print}')"
+  else
+    listeners="$(ss -ulnp 2>/dev/null | awk -v p=":${port}" '$5 ~ p {print}')"
+  fi
+  [[ -z "$listeners" ]] && return 0
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1)"
+    if [[ -n "$pid" ]]; then
+      args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      if [[ "$args" == *"--config ${conf}"* ]]; then
+        continue
+      fi
+      echo "${pid}|${args}|${line}"
+    else
+      echo "|unknown|${line}"
+    fi
+  done <<< "$listeners"
+}
+
+collect_port_conflicts_by_proto_port() {
+  local proto="$1"
+  local port="$2"
+  local listeners line pid args
+  if [[ "$proto" == "tcp" ]]; then
+    listeners="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print}')"
+  else
+    listeners="$(ss -ulnp 2>/dev/null | awk -v p=":${port}" '$5 ~ p {print}')"
+  fi
+  [[ -z "$listeners" ]] && return 0
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1)"
+    if [[ -n "$pid" ]]; then
+      args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      echo "${pid}|${args}|${line}"
+    else
+      echo "|unknown|${line}"
+    fi
+  done <<< "$listeners"
+}
+
+is_cleanup_whitelisted_process() {
+  local args="$1"
+  [[ -z "$args" ]] && return 1
+  if [[ "$args" == *"openvpn"* && "$args" == *"--config /etc/openvpn/server/"* ]]; then
+    return 0
+  fi
+  if [[ "$args" == *"wg-quick"* && "$args" == *"wg-"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+prompt_admin_conflict_action() {
+  local mode="$1"
+  local proto="$2"
+  local port="$3"
+  local ans=""
+  local prompt="  mode=${mode} ${proto}/${port} 端口冲突：输入 [k]=清理并继续 [s]=跳过该实例 [a]=中止部署: "
+  if [[ -r /dev/tty ]]; then
+    printf '%s' "$prompt" >&2
+    read -r ans < /dev/tty || true
+  else
+    echo "abort"
+    return 0
+  fi
+  ans="$(echo "$ans" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$ans" in
+    k|cleanup) echo "cleanup" ;;
+    s|skip) echo "skip" ;;
+    a|abort|'') echo "abort" ;;
+    *) echo "abort" ;;
+  esac
+}
+
+cleanup_conflicting_processes() {
+  local mode="$1"
+  local conf="$2"
+  local proto="$3"
+  local port="$4"
+  local records="$5"
+  local line pid args raw
+  local unsafe=0
+  declare -a kill_pids=()
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    pid="${line%%|*}"
+    raw="${line#*|}"
+    args="${raw%%|*}"
+    if [[ -z "$pid" ]]; then
+      warn "  无法解析 PID，拒绝自动清理：${line##*|}"
+      unsafe=1
+      continue
+    fi
+    if ! is_cleanup_whitelisted_process "$args"; then
+      warn "  非白名单进程，拒绝自动清理: pid=${pid} cmd=${args:-unknown}"
+      unsafe=1
+      continue
+    fi
+    kill_pids+=("$pid")
+  done <<< "$records"
+
+  if [[ "$unsafe" -ne 0 ]]; then
+    fail "  检测到非白名单/不可识别占用，请管理员手动处理后重试"
+    return 1
+  fi
+
+  local p
+  for p in "${kill_pids[@]}"; do
+    log "  清理冲突进程 pid=${p}"
+    kill "$p" 2>/dev/null || true
+  done
+  sleep 1
+  for p in "${kill_pids[@]}"; do
+    if kill -0 "$p" 2>/dev/null; then
+      warn "  pid=${p} 仍在运行，尝试强制结束"
+      kill -9 "$p" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+
+  local remained
+  if [[ -n "$conf" ]]; then
+    remained="$(collect_port_conflicts_for_mode "$mode" "$conf" "$proto" "$port" || true)"
+  else
+    remained="$(collect_port_conflicts_by_proto_port "$proto" "$port" || true)"
+  fi
+  if [[ -n "$remained" ]]; then
+    fail "  清理后端口仍有冲突: ${proto}/${port}"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      echo "    ${line##*|}"
+    done <<< "$remained"
+    return 1
+  fi
+  ok "  端口已释放: ${proto}/${port}"
+  return 0
+}
+
 check_openvpn_port_conflict_for_mode() {
   local mode="$1"
   local conf="/etc/openvpn/server/${mode}/server.conf"
@@ -195,38 +458,48 @@ check_openvpn_port_conflict_for_mode() {
     return 0
   fi
 
-  local listeners pid args line conflicts
-  if [[ "$proto" == "tcp" ]]; then
-    listeners="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print}')"
-  else
-    listeners="$(ss -ulnp 2>/dev/null | awk -v p=":${port}" '$5 ~ p {print}')"
+  local conflicts policy action c
+  conflicts="$(collect_port_conflicts_for_mode "$mode" "$conf" "$proto" "$port" || true)"
+  if [[ -z "$conflicts" ]]; then
+    ok "  Port check passed for mode=${mode}: ${proto}/${port}"
+    return 0
   fi
-  [[ -z "$listeners" ]] && return 0
 
-  conflicts=""
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n1)"
-    if [[ -z "$pid" ]]; then
-      conflicts+="${line}"$'\n'
-      continue
-    fi
-    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if [[ "$args" == *"--config ${conf}"* ]]; then
-      continue
-    fi
-    conflicts+="${line}"$'\n'
-  done <<< "$listeners"
+  fail "  Port conflict for mode=${mode}: ${proto}/${port} already in use"
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    echo "    ${c##*|}"
+  done <<< "$conflicts"
 
-  if [[ -n "$conflicts" ]]; then
-    fail "  Port conflict for mode=${mode}: ${proto}/${port} already in use"
-    while IFS= read -r c; do
-      [[ -n "$c" ]] && echo "    $c"
-    done <<< "$conflicts"
-    return 1
-  fi
-  ok "  Port check passed for mode=${mode}: ${proto}/${port}"
-  return 0
+  policy="$(effective_port_conflict_policy)"
+  case "$policy" in
+    cleanup)
+      log "  端口冲突策略: cleanup（自动清理白名单进程）"
+      cleanup_conflicting_processes "$mode" "$conf" "$proto" "$port" "$conflicts"
+      return $?
+      ;;
+    abort)
+      fail "  端口冲突策略: abort（中止部署）"
+      return 1
+      ;;
+    prompt|*)
+      action="$(prompt_admin_conflict_action "$mode" "$proto" "$port")"
+      case "$action" in
+        cleanup)
+          cleanup_conflicting_processes "$mode" "$conf" "$proto" "$port" "$conflicts"
+          return $?
+          ;;
+        skip)
+          warn "  管理员选择跳过实例 mode=${mode}"
+          return 2
+          ;;
+        *)
+          fail "  管理员选择中止部署"
+          return 1
+          ;;
+      esac
+      ;;
+  esac
 }
 
 start_openvpn_mode_with_health_check() {
@@ -237,7 +510,12 @@ start_openvpn_mode_with_health_check() {
     fail "  Missing config: $conf"
     return 1
   fi
-  if ! check_openvpn_port_conflict_for_mode "$mode"; then
+  check_openvpn_port_conflict_for_mode "$mode"
+  local rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    return 2
+  fi
+  if [[ "$rc" -ne 0 ]]; then
     return 1
   fi
   systemctl enable "$unit"
@@ -260,72 +538,211 @@ start_openvpn_mode_with_health_check() {
   return 1
 }
 
+collect_required_ports_from_bootstrap_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  local ic i inst_en mode port p tc wgport
+  ic="$(jq '.instances | length' "$f")"
+  for i in $(seq 0 $((ic - 1))); do
+    inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
+    [[ "$inst_en" == "false" ]] && continue
+    mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
+    port="$(jq -r ".instances[$i].port" "$f")"
+    p="$(jq -r ".instances[$i].proto // \"udp\"" "$f" | tr '[:upper:]' '[:lower:]')"
+    [[ "$p" != "tcp" ]] && p="udp"
+    echo "openvpn|${mode}|${p}|${port}"
+  done
+  tc="$(jq '.tunnels | length' "$f")"
+  if [[ "$tc" -gt 0 ]]; then
+    wgport="$(jq -r '.tunnels[0].wg_port' "$f")"
+    if [[ -n "$wgport" && "$wgport" != "null" ]]; then
+      echo "wireguard|first-tunnel|udp|${wgport}"
+    fi
+  fi
+}
+
 # 在 ufw / firewalld / iptables 上放行 bootstrap JSON 中的监听端口（需 root）
 apply_host_firewall_open() {
   local f="$1"
   [[ ! -f "$f" ]] && { warn "无 $f，跳过本机防火墙放行"; return 0; }
-  [[ "$(id -u)" -ne 0 ]] && { warn "非 root，跳过本机防火墙放行"; return 0; }
+  [[ "$(id -u)" -ne 0 ]] && { warn "非 root，跳过本机防火墙放行"; return 1; }
 
-  local ic i port p tc wgport
+  local backend proto port component mode
+  backend="$(detect_firewall_backend)"
+  if [[ "$backend" == "none" ]]; then
+    warn "未检测到可用防火墙后端，无法自动放行"
+    return 1
+  fi
+
+  log "尝试本机防火墙放行（backend=${backend}, mode=${OPEN_HOST_FIREWALL_MODE}）..."
+  while IFS='|' read -r component mode proto port; do
+    [[ -z "$port" ]] && continue
+    if [[ "$backend" == "ufw" ]]; then
+      if ufw allow "${port}/${proto}" 2>/dev/null; then
+        ok "ufw allow ${port}/${proto} (${component}:${mode})"
+      else
+        warn "ufw allow ${port}/${proto} 失败（${component}:${mode}）"
+      fi
+    elif [[ "$backend" == "firewalld" ]]; then
+      if firewall-cmd --permanent --add-port="${port}/${proto}" 2>/dev/null; then
+        ok "firewalld add-port ${port}/${proto} (${component}:${mode})"
+      else
+        warn "firewalld add-port ${port}/${proto} 失败（${component}:${mode}）"
+      fi
+    else
+      if ! iptables -C INPUT -p "$proto" --dport "$port" -m comment --comment "vpn-node-setup" -j ACCEPT 2>/dev/null; then
+        if iptables -I INPUT 1 -p "$proto" --dport "$port" -m comment --comment "vpn-node-setup" -j ACCEPT 2>/dev/null; then
+          ok "iptables INPUT 放行 ${proto} :${port} (${component}:${mode})"
+        else
+          warn "iptables 放行 ${proto} :${port} 失败（${component}:${mode}）"
+        fi
+      else
+        ok "iptables 已存在 ${proto} :${port}（${component}:${mode}）"
+      fi
+    fi
+  done < <(collect_required_ports_from_bootstrap_file "$f")
+
+  if [[ "$backend" == "firewalld" ]]; then
+    firewall-cmd --reload 2>/dev/null && ok "firewalld --reload 完成" || warn "firewalld reload 失败"
+  fi
+}
+
+verify_host_firewall_rules() {
+  local f="$1"
+  [[ ! -f "$f" ]] && { warn "无 $f，跳过本机防火墙规则验收"; return 1; }
+  [[ "$(id -u)" -ne 0 ]] && { warn "非 root，无法验证本机防火墙规则"; return 1; }
+  local backend proto port component mode errors
+  backend="$(detect_firewall_backend)"
+  errors=0
+  while IFS='|' read -r component mode proto port; do
+    [[ -z "$port" ]] && continue
+    if [[ "$backend" == "ufw" ]]; then
+      if ufw status 2>/dev/null | grep -qiE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)"; then
+        ok "规则验收通过: ufw ${port}/${proto} (${component}:${mode})"
+      else
+        fail "规则缺失: ufw ${port}/${proto} (${component}:${mode})"
+        errors=$((errors + 1))
+      fi
+    elif [[ "$backend" == "firewalld" ]]; then
+      if firewall-cmd --query-port="${port}/${proto}" 2>/dev/null | grep -qi "^yes$"; then
+        ok "规则验收通过: firewalld ${port}/${proto} (${component}:${mode})"
+      else
+        fail "规则缺失: firewalld ${port}/${proto} (${component}:${mode})"
+        errors=$((errors + 1))
+      fi
+    elif [[ "$backend" == "iptables" ]]; then
+      if iptables -C INPUT -p "$proto" --dport "$port" -m comment --comment "vpn-node-setup" -j ACCEPT 2>/dev/null || \
+         iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
+        ok "规则验收通过: iptables ${port}/${proto} (${component}:${mode})"
+      else
+        fail "规则缺失: iptables ${port}/${proto} (${component}:${mode})"
+        errors=$((errors + 1))
+      fi
+    else
+      fail "未识别防火墙后端，无法验收规则 (${port}/${proto})"
+      errors=$((errors + 1))
+    fi
+  done < <(collect_required_ports_from_bootstrap_file "$f")
+  [[ "$errors" -eq 0 ]]
+}
+
+is_mode_skipped() {
+  local mode="$1"
+  local m
+  for m in "${SKIPPED_OPENVPN_MODES[@]:-}"; do
+    [[ "$m" == "$mode" ]] && return 0
+  done
+  return 1
+}
+
+verify_required_ports_listening_file() {
+  local f="$1"
+  [[ ! -f "$f" ]] && { warn "无 $f，无法执行监听验收"; return 1; }
+  local proto port component mode listeners errors
+  errors=0
+  while IFS='|' read -r component mode proto port; do
+    [[ -z "$port" ]] && continue
+    if [[ "$component" == "openvpn" && "$mode" != "unknown" ]] && is_mode_skipped "$mode"; then
+      warn "监听验收跳过: ${component}:${mode}（管理员选择跳过）"
+      continue
+    fi
+    if [[ "$proto" == "tcp" ]]; then
+      listeners="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print}')"
+    else
+      listeners="$(ss -ulnp 2>/dev/null | awk -v p=":${port}" '$5 ~ p {print}')"
+    fi
+    if [[ -z "$listeners" ]]; then
+      fail "监听缺失: ${component}:${mode} ${proto}/${port}"
+      errors=$((errors + 1))
+      continue
+    fi
+    if [[ "$component" == "openvpn" ]] && ! echo "$listeners" | grep -qi "openvpn"; then
+      fail "监听进程异常: ${component}:${mode} ${proto}/${port} 非 openvpn"
+      echo "$listeners" | sed 's/^/    /'
+      errors=$((errors + 1))
+      continue
+    fi
+    ok "监听验收通过: ${component}:${mode} ${proto}/${port}"
+  done < <(collect_required_ports_from_bootstrap_file "$f")
+  [[ "$errors" -eq 0 ]]
+}
+
+post_deploy_health_check() {
+  local f="$1"
+  local errors mode inst_en ic i
+  errors=0
+  echo ""
+  log "部署后健康检查 ..."
+
+  if systemctl is-active --quiet vpn-agent.service; then
+    ok "服务健康: vpn-agent.service"
+  else
+    fail "服务异常: vpn-agent.service"
+    errors=$((errors + 1))
+  fi
+  if systemctl is-active --quiet vpn-routing.service; then
+    ok "服务健康: vpn-routing.service"
+  else
+    fail "服务异常: vpn-routing.service"
+    errors=$((errors + 1))
+  fi
+
   ic="$(jq '.instances | length' "$f")"
-  tc="$(jq '.tunnels | length' "$f")"
-
-  local use_ufw=0
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qiE 'Status:\s*active'; then
-    use_ufw=1
-  fi
-  local use_fw=0
-  if [[ "$use_ufw" -eq 0 ]] && command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -qi running; then
-    use_fw=1
-  fi
-
-  log "尝试本机防火墙放行（--open-host-firewall）..."
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
     [[ "$inst_en" == "false" ]] && continue
-    port="$(jq -r ".instances[$i].port" "$f")"
-    p="$(jq -r ".instances[$i].proto // \"udp\"" "$f" | tr '[:upper:]' '[:lower:]')"
-    [[ "$p" != "tcp" ]] && p="udp"
-    if [[ "$use_ufw" -eq 1 ]]; then
-      if ufw allow "${port}/${p}" 2>/dev/null; then
-        ok "ufw allow ${port}/${p}"
-      else
-        warn "ufw allow ${port}/${p} 失败（可手动执行）"
-      fi
-    elif [[ "$use_fw" -eq 1 ]]; then
-      if firewall-cmd --permanent --add-port="${port}/${p}" 2>/dev/null; then
-        ok "firewalld 已加入 ${port}/${p}（待 reload）"
-      else
-        warn "firewalld 加入 ${port}/${p} 失败"
-      fi
+    mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
+    if is_mode_skipped "$mode"; then
+      warn "服务健康跳过: openvpn-${mode}.service（管理员选择跳过）"
+      continue
+    fi
+    if systemctl is-active --quiet "openvpn-${mode}.service"; then
+      ok "服务健康: openvpn-${mode}.service"
     else
-      if ! iptables -C INPUT -p "$p" --dport "$port" -m comment --comment "vpn-node-setup" -j ACCEPT 2>/dev/null; then
-        iptables -I INPUT 1 -p "$p" --dport "$port" -m comment --comment "vpn-node-setup" -j ACCEPT 2>/dev/null && \
-          ok "iptables INPUT 放行 ${p} :${port}" || warn "iptables 放行 ${p} :${port} 失败"
-      else
-        ok "iptables 已存在 ${p} :${port}（vpn-node-setup）"
-      fi
+      fail "服务异常: openvpn-${mode}.service"
+      errors=$((errors + 1))
     fi
   done
 
-  if [[ "$tc" -gt 0 ]]; then
-    wgport="$(jq -r '.tunnels[0].wg_port' "$f")"
-    if [[ -n "$wgport" && "$wgport" != "null" ]]; then
-      if [[ "$use_ufw" -eq 1 ]]; then
-        ufw allow "${wgport}/udp" 2>/dev/null && ok "ufw allow ${wgport}/udp (WireGuard)" || warn "ufw WireGuard 端口失败"
-      elif [[ "$use_fw" -eq 1 ]]; then
-        firewall-cmd --permanent --add-port="${wgport}/udp" 2>/dev/null && ok "firewalld 已加入 ${wgport}/udp (WireGuard)（待 reload）" || true
-      else
-        if ! iptables -C INPUT -p udp --dport "$wgport" -m comment --comment "vpn-node-setup-wg" -j ACCEPT 2>/dev/null; then
-          iptables -I INPUT 1 -p udp --dport "$wgport" -m comment --comment "vpn-node-setup-wg" -j ACCEPT 2>/dev/null && \
-            ok "iptables INPUT 放行 udp :${wgport} (WireGuard)" || true
-        fi
-      fi
+  if ! verify_required_ports_listening_file "$f"; then
+    errors=$((errors + 1))
+  fi
+
+  if should_apply_host_firewall_open; then
+    if ! verify_host_firewall_rules "$f"; then
+      errors=$((errors + 1))
     fi
+  else
+    warn "未启用本机防火墙自动放行/验收（mode=${OPEN_HOST_FIREWALL_MODE}）"
   fi
-  if [[ "$use_fw" -eq 1 ]]; then
-    firewall-cmd --reload 2>/dev/null && ok "firewalld --reload 完成" || warn "firewalld reload 失败"
+
+  if [[ "$errors" -gt 0 ]]; then
+    fail "部署后健康检查失败（错误项: ${errors}），节点可能不可访问"
+    echo "请按上方缺失项执行修复后重试，或参考 docs/node-troubleshooting.md。" >&2
+    return 1
   fi
+  ok "部署后健康检查通过"
+  return 0
 }
 
 # 收尾：提醒云安全组 / 路由器需放行的端口（与脚本生成的监听一致）
@@ -634,7 +1051,7 @@ precheck_node() {
 
   # 端口：注册前无法获知控制面下发的监听端口；注册成功后将按 bootstrap JSON 再检一次
   echo ""
-  log "监听端口占用检查将在节点注册成功后，按控制面下发的实例端口执行。"
+  log "监听端口占用检查将在节点注册成功后，按控制面下发的实例端口执行（并在启动阶段按冲突策略处理）。"
 
   # IP 转发
   local fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null)"
@@ -738,9 +1155,21 @@ apply_openvpn_proto_override_to_node_json
 mkdir -p /etc/vpn-agent
 echo "$NODE_JSON" > /etc/vpn-agent/bootstrap-node.json
 
-check_instance_ports_from_bootstrap_json "$NODE_JSON"
-if [[ "$OPEN_HOST_FIREWALL" -eq 1 ]]; then
-  apply_host_firewall_open "/etc/vpn-agent/bootstrap-node.json"
+if ! check_instance_ports_from_bootstrap_json "$NODE_JSON"; then
+  fail "端口冲突处理未完成，已中止部署。请按提示清理后重试。"
+  exit 1
+fi
+if should_apply_host_firewall_open; then
+  if ! apply_host_firewall_open "/etc/vpn-agent/bootstrap-node.json"; then
+    fail "本机防火墙放行失败，已中止部署。"
+    exit 1
+  fi
+  if ! verify_host_firewall_rules "/etc/vpn-agent/bootstrap-node.json"; then
+    fail "本机防火墙规则验收失败，已中止部署。"
+    exit 1
+  fi
+else
+  warn "本机防火墙自动放行未启用（mode=${OPEN_HOST_FIREWALL_MODE}）；若防火墙已启用请手动放行。"
 fi
 
 # ── Step 2: Install packages ─────────────────────────────────────────────────
@@ -1297,6 +1726,7 @@ log "Step 8/${TOTAL_STEPS}: Creating systemd services ..."
 cleanup_legacy_openvpn_units
 
 FAILED_OPENVPN_MODES=()
+SKIPPED_OPENVPN_MODES=()
 
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
@@ -1328,7 +1758,14 @@ UNIT
   if start_openvpn_mode_with_health_check "$MODE"; then
     log "  Service openvpn-${MODE} enabled"
   else
-    FAILED_OPENVPN_MODES+=("$MODE")
+    rc="$?"
+    if [[ "$rc" -eq 2 ]]; then
+      systemctl disable --now "openvpn-${MODE}.service" 2>/dev/null || true
+      SKIPPED_OPENVPN_MODES+=("$MODE")
+      warn "  Service openvpn-${MODE} skipped by administrator decision"
+    else
+      FAILED_OPENVPN_MODES+=("$MODE")
+    fi
   fi
 done
 
@@ -1336,6 +1773,10 @@ if [[ "${#FAILED_OPENVPN_MODES[@]}" -gt 0 ]]; then
   fail "OpenVPN services failed for mode(s): ${FAILED_OPENVPN_MODES[*]}"
   echo "请先处理上方冲突/日志错误后重试 node-setup.sh --apply" >&2
   exit 1
+fi
+
+if [[ "${#SKIPPED_OPENVPN_MODES[@]}" -gt 0 ]]; then
+  warn "以下实例已按管理员选择跳过，不会监听对应端口: ${SKIPPED_OPENVPN_MODES[*]}"
 fi
 
 cat > /etc/systemd/system/vpn-routing.service <<'UNIT'
@@ -1407,6 +1848,10 @@ UNIT
 systemctl daemon-reload
 systemctl enable vpn-agent.service
 systemctl restart vpn-agent.service || log "  WARNING: vpn-agent failed to start/restart"
+
+if ! post_deploy_health_check "/etc/vpn-agent/bootstrap-node.json"; then
+  exit 1
+fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
