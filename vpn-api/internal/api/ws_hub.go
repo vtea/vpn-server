@@ -341,6 +341,20 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				var grant model.UserGrant
 				grantFound := hub.db.Where("cert_cn = ?", res.CertCN).First(&grant).Error == nil
 				if res.Success {
+					// revoke_cert 也复用 cert_result；其成功回执通常不携带 ovpn 内容，需标记为 revoked
+					if len(strings.TrimSpace(res.OVPN)) == 0 && len(strings.TrimSpace(res.OvpnTCP)) == 0 && len(strings.TrimSpace(res.OvpnUDP)) == 0 {
+						upd := hub.db.Model(&model.UserGrant{}).Where("cert_cn = ?", res.CertCN).Updates(map[string]any{
+							"cert_status": "revoked",
+						})
+						if upd.Error != nil {
+							log.Printf("revoke_result update failed: cert_cn=%s node=%s success=true err=%v", res.CertCN, ac.NodeID, upd.Error)
+						} else if grantFound {
+							log.Printf("revoke_result applied: grant=%d cert_cn=%s node=%s instance=%d status_before=%s status_after=revoked rows=%d", grant.ID, res.CertCN, ac.NodeID, grant.InstanceID, grant.CertStatus, upd.RowsAffected)
+						} else {
+							log.Printf("revoke_result applied without grant row: cert_cn=%s node=%s status_after=revoked rows=%d", res.CertCN, ac.NodeID, upd.RowsAffected)
+						}
+						break
+					}
 					tcpIn := []byte(res.OvpnTCP)
 					udpIn := []byte(res.OvpnUDP)
 					legacyIn := []byte(res.OVPN)

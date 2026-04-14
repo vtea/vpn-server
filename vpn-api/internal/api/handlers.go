@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1125,6 +1126,28 @@ func (h *Handler) finalizeUserGrantCert(grant *model.UserGrant, node model.Node,
 	log.Printf("issue_cert fallback placeholder: grant=%d cert_cn=%s node=%s instance=%d status_after=placeholder hub_online=false", grant.ID, certCN, node.ID, inst.ID)
 }
 
+var certCNNameRe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+func normalizeCertNamePart(s string) string {
+	v := strings.TrimSpace(s)
+	if v == "" {
+		return "unknown"
+	}
+	v = certCNNameRe.ReplaceAllString(v, "-")
+	v = strings.Trim(v, "-._")
+	if v == "" {
+		return "unknown"
+	}
+	return v
+}
+
+func buildGrantCertCN(nodeName, username string, now time.Time) string {
+	nodePart := normalizeCertNamePart(nodeName)
+	userPart := normalizeCertNamePart(username)
+	tsPart := now.Format("20060102150405")
+	return fmt.Sprintf("%s-%s-%s", nodePart, userPart, tsPart)
+}
+
 func (h *Handler) CreateUserGrant(c *gin.Context) {
 	userID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -1156,7 +1179,7 @@ func (h *Handler) CreateUserGrant(c *gin.Context) {
 		return
 	}
 
-	certCN := fmt.Sprintf("%s-%s-%s", user.Username, node.ID, inst.Mode)
+	certCN := buildGrantCertCN(node.Name, user.Username, time.Now())
 
 	var existing model.UserGrant
 	err = h.db.Where("user_id = ? AND instance_id = ?", user.ID, inst.ID).First(&existing).Error
@@ -1256,11 +1279,7 @@ func (h *Handler) DownloadGrantOVPN(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "配置未就绪或该协议暂无文件，请确认已签发成功"})
 		return
 	}
-	suffix := ""
-	if p := service.NormalizeDownloadProtoQuery(protoQ); p != "" {
-		suffix = "-" + p
-	}
-	filename := fmt.Sprintf("%s%s.ovpn", grant.CertCN, suffix)
+	filename := fmt.Sprintf("%s.ovpn", grant.CertCN)
 	c.Header("Content-Type", "application/x-openvpn-profile")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	c.Data(http.StatusOK, "application/x-openvpn-profile", service.SanitizeClientOVPNProfile(data))
@@ -1356,7 +1375,7 @@ func (h *Handler) RetryIssueGrant(c *gin.Context) {
 		return
 	}
 
-	certCN := fmt.Sprintf("%s-%s-%s", user.Username, node.ID, inst.Mode)
+	certCN := buildGrantCertCN(node.Name, user.Username, time.Now())
 	if grant.CertCN != certCN {
 		grant.CertCN = certCN
 	}
@@ -2288,11 +2307,7 @@ func (h *Handler) SelfServiceDownload(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "配置未就绪或该协议暂无文件，请确认已签发成功"})
 		return
 	}
-	suffix := ""
-	if p := service.NormalizeDownloadProtoQuery(protoQ); p != "" {
-		suffix = "-" + p
-	}
-	filename := fmt.Sprintf("%s%s.ovpn", grant.CertCN, suffix)
+	filename := fmt.Sprintf("%s.ovpn", grant.CertCN)
 	c.Header("Content-Type", "application/x-openvpn-profile")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	c.Data(http.StatusOK, "application/x-openvpn-profile", service.SanitizeClientOVPNProfile(data))

@@ -22,18 +22,10 @@
             </el-tag>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-            <el-button-group>
-              <el-button type="primary" size="small" @click="download(g.id, '')" :disabled="!['active','placeholder'].includes(g.cert_status)">
-                默认
-              </el-button>
-              <el-button type="primary" size="small" @click="download(g.id, 'tcp')" :disabled="!['active','placeholder'].includes(g.cert_status)">
-                TCP
-              </el-button>
-              <el-button type="primary" size="small" @click="download(g.id, 'udp')" :disabled="!['active','placeholder'].includes(g.cert_status)">
-                UDP
-              </el-button>
-            </el-button-group>
-            <el-text type="info" size="small">按节点实际监听协议选用；另一协议未监听则无法连通</el-text>
+            <el-button type="primary" size="small" @click="download(g.id)" :disabled="!['active','placeholder'].includes(g.cert_status)">
+              下载
+            </el-button>
+            <el-text type="info" size="small">下载将自动返回与节点实例协议一致的配置文件</el-text>
           </div>
         </div>
       </el-card>
@@ -70,11 +62,8 @@ const doLogin = async () => {
   }
 }
 
-const download = (grantId, proto) => {
-  let path = `/api/self-service/grants/${grantId}/download?username=${encodeURIComponent(username.value)}`
-  if (proto) {
-    path += `&proto=${encodeURIComponent(proto)}`
-  }
+const download = (grantId) => {
+  const path = `/api/self-service/grants/${grantId}/download?username=${encodeURIComponent(username.value)}`
   const root = getApiBaseURL()
   window.open(root ? `${root}${path}` : path, '_blank')
 }

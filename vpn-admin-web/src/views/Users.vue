@@ -151,7 +151,7 @@
               size="small"
               plain
               type="primary"
-              @click="downloadOVPN(row.id, '')"
+              @click="downloadOVPN(row.id)"
               :disabled="!['active','placeholder'].includes(row.cert_status)"
             >
               <el-icon><Download /></el-icon> 下载
@@ -159,27 +159,9 @@
             <el-button
               size="small"
               plain
-              type="primary"
-              @click="downloadOVPN(row.id, 'tcp')"
-              :disabled="!['active','placeholder'].includes(row.cert_status)"
-            >
-              TCP
-            </el-button>
-            <el-button
-              size="small"
-              plain
-              type="primary"
-              @click="downloadOVPN(row.id, 'udp')"
-              :disabled="!['active','placeholder'].includes(row.cert_status)"
-            >
-              UDP
-            </el-button>
-            <el-button
-              size="small"
-              plain
               type="danger"
               @click="revokeGrant(row.id)"
-              :disabled="row.cert_status === 'revoked'"
+              :disabled="['revoked','revoking'].includes(row.cert_status)"
             >
               <el-icon><CircleClose /></el-icon> 吊销
             </el-button>
@@ -196,7 +178,7 @@
         </el-table-column>
       </el-table>
       <el-text type="info" size="small" style="display: block; margin-top: 8px">
-        签发成功后会同时生成 TCP 与 UDP 两份配置；请按节点实际监听的协议选用（仅监听一种时另一份无法连通）。
+        下载将自动返回与节点实例协议一致的配置文件。
       </el-text>
 
       <el-divider>添加新授权</el-divider>
@@ -373,6 +355,21 @@ const refreshGrants = async () => {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const waitGrantStatus = async (grantId, expectedStatus, maxAttempts = 8, intervalMs = 1500) => {
+  const uid = grantUser.value?.id
+  if (!uid) return false
+  for (let i = 0; i < maxAttempts; i++) {
+    const { data } = await http.get(`/api/users/${uid}/grants`)
+    grants.value = data.items || []
+    const target = grants.value.find((g) => g.id === grantId)
+    if (target?.cert_status === expectedStatus) return true
+    await sleep(intervalMs)
+  }
+  return false
+}
+
 const doGrant = async () => {
   if (!newGrantInstanceId.value) return
   grantLoading.value = true
@@ -390,10 +387,9 @@ const doGrant = async () => {
   }
 }
 
-const downloadOVPN = async (id, proto) => {
+const downloadOVPN = async (id) => {
   try {
-    const qs = proto ? `?proto=${encodeURIComponent(proto)}` : ''
-    const res = await http.get(`/api/grants/${id}/download${qs}`, { responseType: 'blob' })
+    const res = await http.get(`/api/grants/${id}/download`, { responseType: 'blob' })
     const disposition = res.headers['content-disposition'] || ''
     const match = disposition.match(/filename="?(.+?)"?$/)
     const filename = match ? match[1] : `grant-${id}.ovpn`
@@ -409,8 +405,19 @@ const downloadOVPN = async (id, proto) => {
 const revokeGrant = async (id) => {
   try {
     await ElMessageBox.confirm('确定吊销？', '确认', { type: 'warning' })
-    await http.delete(`/api/grants/${id}`)
-    ElMessage.success('已吊销')
+    const { data } = await http.delete(`/api/grants/${id}`)
+    const status = data?.grant?.cert_status
+    if (status === 'revoked') {
+      ElMessage.success('已吊销')
+    } else {
+      ElMessage.success('已提交吊销请求，正在自动刷新状态...')
+      const done = await waitGrantStatus(id, 'revoked')
+      if (done) {
+        ElMessage.success('吊销已完成')
+      } else {
+        ElMessage.warning('吊销请求已提交，状态同步稍慢，请稍后手动刷新')
+      }
+    }
     grants.value = (await http.get(`/api/users/${grantUser.value.id}/grants`)).data.items || []
   } catch {
     // 用户取消或 http.js 已处理
