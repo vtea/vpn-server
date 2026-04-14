@@ -1168,17 +1168,40 @@ func collectTunnelHealth() []tunnelHealthItem {
 		if !item.PeerPubKeyPresent {
 			item.Error = "missing peer wg public key in bootstrap config"
 		}
-		if ok, ierr := isWGInterfaceUp("wg-" + t.PeerNodeID); ierr == nil {
-			item.IfaceUp = ok
+		iface := "wg-" + t.PeerNodeID
+		var (
+			ifaceUp bool
+			ierr    error
+			hsAge   int64
+			hsErr   error
+			rx      int64
+			tx      int64
+			txErr   error
+		)
+		// wg-refresh 重启窗口会短暂出现 no-such-device，做短重试避免瞬时误报 down。
+		for attempt := 0; attempt < 3; attempt++ {
+			ifaceUp, ierr = isWGInterfaceUp(iface)
+			hsAge, hsErr = queryWGHandshakeAgeSec(iface)
+			rx, tx, txErr = queryWGTransfer(iface)
+			if isWGNoSuchDeviceError(ierr) || isWGNoSuchDeviceError(hsErr) || isWGNoSuchDeviceError(txErr) {
+				if attempt < 2 {
+					time.Sleep(250 * time.Millisecond)
+					continue
+				}
+			}
+			break
+		}
+		if ierr == nil {
+			item.IfaceUp = ifaceUp
 		} else {
 			item.Error = appendTunnelError(item.Error, ierr.Error())
 		}
-		if hsAge, hsErr := queryWGHandshakeAgeSec("wg-" + t.PeerNodeID); hsErr == nil {
+		if hsErr == nil {
 			item.LatestHandshakeAgeSec = hsAge
 		} else {
 			item.Error = appendTunnelError(item.Error, hsErr.Error())
 		}
-		if rx, tx, txErr := queryWGTransfer("wg-" + t.PeerNodeID); txErr == nil {
+		if txErr == nil {
 			item.RxBytesTotal = rx
 			item.TxBytesTotal = tx
 		} else {
@@ -1369,6 +1392,14 @@ func queryWGTransfer(iface string) (int64, int64, error) {
 		return 0, 0, fmt.Errorf("wg transfer %s parse failed", iface)
 	}
 	return rx, tx, nil
+}
+
+func isWGNoSuchDeviceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such device") || strings.Contains(msg, "does not exist")
 }
 
 func extractAvgLatency(output string) float64 {
