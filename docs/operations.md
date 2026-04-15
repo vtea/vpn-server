@@ -58,7 +58,7 @@
 
 **常见现象**：Web 上已改为 TCP，但本机 `bootstrap-node.json` 里仍是 UDP；或 `server.conf` 未监听新端口。
 
-**日志关键字（vpn-agent）**：`received config update`、`config saved to /etc/vpn-agent/last-config.json`、`openvpn apply`、`try-restart openvpn-`。
+**日志关键字（vpn-agent）**：`received config update`、`config saved to /etc/vpn-agent/last-config.json`、`merged ... instance(s) into ... bootstrap-node.json`（新版）、`openvpn apply`、`try-restart openvpn-`。
 
 **日志关键字（vpn-api）**：`push instances config`（推送失败时会打错误）。
 
@@ -74,11 +74,11 @@
 
 1. 在 **节点详情 → 相关隧道** 中确认本节点与目标出口之间已有一条隧道（状态为已连接），并记下对端列展示的 **节点 ID**。
 2. 在 **组网接入** 对应模式的 **出口节点** 下拉中选择该 ID（或清空），保存。API 会校验非空 `exit_node` 须为本节点某隧道的对端。
-3. 在**入口节点**上 **重新执行** 安装脚本（或至少重新生成并执行 `policy-routing.sh` / `nat-rules.sh`），使与库内配置一致（参见上文第 4 节）。**注意**：仅依赖 Agent 的 `update_config` **不会**在 `server.conf` 中补写 `redirect-gateway`；从旧语义升级须在节点上重跑含 OpenVPN 配置生成的安装步骤。
+3. **在线节点**：保存后控制面会通过 WebSocket 下发 `update_config`；**vpn-agent（新版本）** 会把 **`instances` 合并进 `/etc/vpn-agent/bootstrap-node.json`** 并 **`systemctl restart vpn-routing.service`**（执行 `policy-routing.sh` 与 `nat-rules.sh`），使 **出口节点 / 子网 / 启用** 与 `last-config.json` 一致。**若节点仍为旧版 Agent**，则须在入口机上 **重新执行** 安装脚本（或至少手动执行 `policy-routing.sh` / `nat-rules.sh`）。**注意**：`update_config` **不会**在 `server.conf` 中补写 `redirect-gateway` 或新建 OpenVPN 实例目录；从旧语义升级或**首次启用**某模式仍须在节点上重跑含 OpenVPN 配置生成的 **node-setup.sh** 步骤。
 
 ### 3.3 新建节点默认启用与存量升级
 
-**新建节点（当前版本）**：控制面为每个节点创建三套实例，但 **`enabled` 仅 `node-direct` 为 true**；`cn-split` / `global` 默认关闭。管理员在 Web **组网接入** 中勾选启用其它模式并保存后，须在节点上 **重新执行 `node-setup.sh`（或等价部署流程）**，以便生成对应 **`server.conf`**、systemd 单元及路由/NAT；仅在线 Agent 同步 **不会**为仍禁用的模式创建监听。
+**新建节点（当前版本）**：控制面为每个节点创建三套实例，但 **`enabled` 仅 `node-direct` 为 true**；`cn-split` / `global` 默认关闭。管理员在 Web **组网接入** 中**首次勾选启用**其它模式并保存后，须在节点上 **重新执行 `node-setup.sh`**，以便生成对应 **`server.conf`**、systemd 单元及监听；**已部署节点**上若仅调整 **出口 / 子网 / 启用**（实例已存在），在线 **新版 Agent** 在收到 `update_config` 后会合并 `bootstrap` 并重跑 **vpn-routing**；**从未生成过该模式的 `server.conf`** 时仍须重跑安装脚本。
 
 **存量节点升级**：若节点上的 `node-direct` **`server.conf` 仍为旧版（无 `push redirect-gateway`）**，用户即使连上也可能与预期不符。升级 `node-setup.sh` 后请在节点上 **重跑安装脚本** 中生成 OpenVPN 与路由的步骤。行为变化：**新语义下 `node-direct` 会拉全局流量进隧道**；若业务仍需要「仅 VPN 子网、公网走用户本机」，应使用其它产品设计（例如不授权 `node-direct` 或单独文档约定），而非依赖旧脚本行为。
 

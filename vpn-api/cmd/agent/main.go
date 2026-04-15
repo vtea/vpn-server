@@ -354,6 +354,112 @@ func parseInstancesFromNodeConfigJSON(data []byte) []instanceRow {
 	return nil
 }
 
+// extractInstancesArrayRaw returns the JSON array under instances from control-plane payloads
+// (top-level instances, or nested config / config string). Preserves all per-instance fields
+// (subnet, exit_node, enabled, etc.) for merging into bootstrap-node.json.
+func extractInstancesArrayRaw(data []byte) json.RawMessage {
+	var unwrap func(raw json.RawMessage) json.RawMessage
+	unwrap = func(raw json.RawMessage) json.RawMessage {
+		raw = json.RawMessage(bytes.TrimSpace([]byte(raw)))
+		if len(raw) == 0 {
+			return nil
+		}
+		var asStr string
+		if json.Unmarshal(raw, &asStr) == nil && strings.TrimSpace(asStr) != "" {
+			return unwrap(json.RawMessage(asStr))
+		}
+		if raw[0] == '[' {
+			var elems []json.RawMessage
+			if json.Unmarshal(raw, &elems) != nil {
+				return nil
+			}
+			return raw
+		}
+		var asObj struct {
+			Instances json.RawMessage `json:"instances"`
+		}
+		if json.Unmarshal(raw, &asObj) != nil || len(bytes.TrimSpace([]byte(asObj.Instances))) == 0 {
+			return nil
+		}
+		return unwrap(asObj.Instances)
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return nil
+	}
+	if raw, ok := root["instances"]; ok {
+		if got := unwrap(raw); got != nil {
+			return got
+		}
+	}
+	if raw, ok := root["config"]; ok {
+		if got := unwrap(raw); got != nil {
+			return got
+		}
+	}
+	return nil
+}
+
+// mergeInstancesIntoBootstrapDoc replaces top-level "instances" in bootstrap JSON. instArray must be a non-empty JSON array.
+func mergeInstancesIntoBootstrapDoc(bootstrap []byte, instArray json.RawMessage) ([]byte, error) {
+	instArray = json.RawMessage(bytes.TrimSpace([]byte(instArray)))
+	if len(instArray) == 0 || instArray[0] != '[' {
+		return nil, fmt.Errorf("instances must be a JSON array")
+	}
+	var instElems []json.RawMessage
+	if err := json.Unmarshal(instArray, &instElems); err != nil {
+		return nil, fmt.Errorf("instances: %w", err)
+	}
+	if len(instElems) == 0 {
+		return nil, fmt.Errorf("instances array is empty")
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(bootstrap, &doc); err != nil {
+		return nil, fmt.Errorf("bootstrap: %w", err)
+	}
+	doc["instances"] = instArray
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// mergeBootstrapInstancesFromLastConfigPayload writes instances from the control-plane payload into
+// /etc/vpn-agent/bootstrap-node.json so policy-routing.sh / nat-rules.sh see the same rows as last-config,
+// then restarts vpn-routing.service (policy + NAT). No-op if payload has no instances, array is empty,
+// or bootstrap is missing.
+func mergeBootstrapInstancesFromLastConfigPayload(payload []byte) error {
+	instRaw := extractInstancesArrayRaw(payload)
+	if instRaw == nil {
+		return nil
+	}
+	var instElems []json.RawMessage
+	if err := json.Unmarshal(instRaw, &instElems); err != nil || len(instElems) == 0 {
+		log.Printf("config update: skip bootstrap merge (invalid or empty instances array)")
+		return nil
+	}
+	const path = "/etc/vpn-agent/bootstrap-node.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("config update: skip bootstrap merge (%s missing)", path)
+			return nil
+		}
+		return err
+	}
+	out, err := mergeInstancesIntoBootstrapDoc(data, instRaw)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, out, 0600); err != nil {
+		return err
+	}
+	log.Printf("config update: merged %d instance(s) into %s", len(instElems), path)
+	restartVpnRoutingAfterTunnelChange()
+	return nil
+}
+
 // protoFromLocalOVPNBootstrap returns instances[].proto for the given mode from last-config.json, then bootstrap-node.json.
 // last-config is written when the control plane pushes update_config (or rollback); bootstrap is node-setup ground truth.
 func protoFromLocalOVPNBootstrap(mode string) string {
@@ -467,6 +573,9 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			return
 		}
 		log.Printf("config saved to /etc/vpn-agent/last-config.json")
+		if err := mergeBootstrapInstancesFromLastConfigPayload(msg.Payload); err != nil {
+			log.Printf("config update: bootstrap instances merge: %v", err)
+		}
 		applyOpenVPNServerFromInstancesPayload(msg.Payload)
 	case "update_wg_config":
 		log.Printf("received wg config update, applying...")
@@ -1498,6 +1607,7 @@ func removeStaleWGPeerConfigs(want map[string]struct{}) []string {
 
 // mergeBootstrapTunnelsJSON 将控制面下发的 WG 隧道快照写回 bootstrap-node.json，
 // 使 policy-routing.sh / nat-rules.sh（仅读该文件）与当前 wg-quick 接口一致。
+// instances 由 mergeBootstrapInstancesFromLastConfigPayload（update_config）单独合并。
 func mergeBootstrapTunnelsJSON(tunnels []wgRefreshTunnel) error {
 	const path = "/etc/vpn-agent/bootstrap-node.json"
 	data, err := os.ReadFile(path)

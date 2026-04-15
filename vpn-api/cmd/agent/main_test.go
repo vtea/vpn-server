@@ -24,6 +24,66 @@ func TestParseInstancesFromNodeConfigJSON_nestedConfigObject(t *testing.T) {
 	}
 }
 
+func TestExtractInstancesArrayRaw_topLevel(t *testing.T) {
+	raw := []byte(`{"node_id":"n1","instances":[{"mode":"global","subnet":"10.1.5.0/24","exit_node":"node-30"}],"tunnels":[]}`)
+	got := extractInstancesArrayRaw(raw)
+	if got == nil {
+		t.Fatal("expected array")
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal(got, &arr); err != nil || len(arr) != 1 {
+		t.Fatalf("got %s err=%v", got, err)
+	}
+	if arr[0]["exit_node"] != "node-30" {
+		t.Fatalf("lost field: %v", arr[0])
+	}
+}
+
+func TestExtractInstancesArrayRaw_nestedConfig(t *testing.T) {
+	raw := []byte(`{"config":{"instances":[{"mode":"cn-split","port":1195}]}}`)
+	got := extractInstancesArrayRaw(raw)
+	if got == nil || !bytes.Contains(got, []byte("cn-split")) {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func TestExtractInstancesArrayRaw_configJSONString(t *testing.T) {
+	inner, _ := json.Marshal(map[string]any{
+		"instances": []map[string]any{{"mode": "node-direct"}},
+	})
+	outer, _ := json.Marshal(map[string]any{"config": string(inner)})
+	got := extractInstancesArrayRaw(outer)
+	if got == nil || !bytes.Contains(got, []byte("node-direct")) {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func TestMergeInstancesIntoBootstrapDoc_preservesTunnels(t *testing.T) {
+	bootstrap := []byte(`{"node_id":"node-1","tunnels":[{"peer_node_id":"node-30"}],"instances":[{"mode":"old"}]}`)
+	inst := []byte(`[{"mode":"global","subnet":"10.0.0.0/24"}]`)
+	out, err := mergeInstancesIntoBootstrapDoc(bootstrap, inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(doc["tunnels"], []byte("node-30")) {
+		t.Fatalf("tunnels lost: %s", doc["tunnels"])
+	}
+	if !bytes.Contains(doc["instances"], []byte("10.0.0.0/24")) {
+		t.Fatalf("instances not replaced: %s", doc["instances"])
+	}
+}
+
+func TestMergeInstancesIntoBootstrapDoc_rejectsEmpty(t *testing.T) {
+	_, err := mergeInstancesIntoBootstrapDoc([]byte(`{"instances":[]}`), []byte("[]"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestParseInstancesFromNodeConfigJSON_configJSONString(t *testing.T) {
 	inner, _ := json.Marshal(map[string]any{
 		"instances": []map[string]any{

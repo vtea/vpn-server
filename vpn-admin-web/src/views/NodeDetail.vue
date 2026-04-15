@@ -88,6 +88,11 @@
                     <span class="stat-value-text">{{ item.value }}</span>
                   </el-tooltip>
                 </template>
+                <template v-else-if="item.key === 'agent' && item.value && item.value !== '-'">
+                  <el-tooltip :content="String(item.value)" placement="top">
+                    <span class="stat-value-text">{{ item.value }}</span>
+                  </el-tooltip>
+                </template>
                 <template v-else>
                   <span class="stat-value-text">{{ item.value }}</span>
                 </template>
@@ -919,11 +924,9 @@ onMounted(() => {
 .node-overview__hint {
   font-weight: 400;
 }
-.stat-value-text {
-  cursor: default;
-}
 .overview-col {
   margin-bottom: 16px;
+  min-width: 0;
 }
 @media (min-width: 992px) {
   .overview-col {
