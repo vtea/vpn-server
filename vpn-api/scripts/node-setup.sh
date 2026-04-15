@@ -1521,6 +1521,20 @@ cat > /etc/vpn-agent/policy-routing.sh <<'POLROUTE'
 #!/bin/bash
 set -euo pipefail
 
+# 与 node-setup.sh 中逻辑一致（本文件由 heredoc 生成，不会继承父脚本的函数）
+is_enabled_value() {
+  local v
+  v="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
+  case "$v" in
+    ""|"0"|"false"|"no"|"off"|"null")
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 NODE_JSON_FILE="/etc/vpn-agent/bootstrap-node.json"
 [[ ! -f "$NODE_JSON_FILE" ]] && exit 0
 
@@ -1725,6 +1739,20 @@ fi
 cat > /etc/vpn-agent/nat-rules.sh <<'NATRULES'
 #!/bin/bash
 set -euo pipefail
+
+# 与 node-setup.sh 中逻辑一致（本文件由 heredoc 生成，不会继承父脚本的函数）
+is_enabled_value() {
+  local v
+  v="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
+  case "$v" in
+    ""|"0"|"false"|"no"|"off"|"null")
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
 
 DEFAULT_IF="$(ip route show default | awk '/default/ {print $5; exit}')"
 [[ -z "$DEFAULT_IF" ]] && DEFAULT_IF="eth0"
@@ -1948,12 +1976,16 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
 done
 log ""
 log "WireGuard tunnels:"
-for i in $(seq 0 $((TUNNEL_COUNT - 1))); do
-  PEER="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].peer_node_id")"
-  LIP="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].local_ip")"
-  PIP="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].peer_ip")"
-  log "  wg-${PEER}: ${LIP} <-> ${PIP}"
-done
+if [[ "$TUNNEL_COUNT" -eq 0 ]]; then
+  log "  (bootstrap 中 tunnels 为空；mesh 可在 agent 连上控制面并完成同步后由后台下发/刷新)"
+else
+  for i in $(seq 0 $((TUNNEL_COUNT - 1))); do
+    PEER="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].peer_node_id")"
+    LIP="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].local_ip")"
+    PIP="$(echo "$NODE_JSON" | jq -r ".tunnels[$i].peer_ip")"
+    log "  wg-${PEER}: ${LIP} <-> ${PIP}"
+  done
+fi
 log ""
 log "Agent: WebSocket -> $API_URL"
 print_external_firewall_reminder "$NODE_JSON"
