@@ -65,3 +65,22 @@ NudyafQ87g==
 		t.Fatalf("header should be preserved")
 	}
 }
+
+func TestSanitizeClientOVPNProfile_stripsUTF8BOM(t *testing.T) {
+	header := "client\ndev tun\nproto udp\nremote x 1194\n"
+	pem := `-----BEGIN CERTIFICATE-----
+MIIBkTCB+wIJAKHHCgVZyU3sMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBnRl
+c3QtY2EwHhcNMjYwNDEzMDAwMDAwWhcNMzYwNDEwMDAwMDAwWjARMQ8wDQYDVQQD
+DAZ0ZXN0LWNhMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALRiNgkHurdGrQH9YEqd
+W0HvKcV7sKcV7sKcV7sCAwEAAaMQMA4wDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0B
+AQsFAANBALRiNgkHurdGrQH9YEqdW0HvKcV7sKcV7sKcV7s
+-----END CERTIFICATE-----`
+	raw := append([]byte{0xEF, 0xBB, 0xBF}, []byte(header+"<ca>\n"+pem+"\n</ca>\n")...)
+	out := SanitizeClientOVPNProfile(raw)
+	if bytes.HasPrefix(out, []byte{0xEF, 0xBB, 0xBF}) {
+		t.Fatal("BOM should be stripped from output")
+	}
+	if !bytes.HasPrefix(out, []byte("client\n")) {
+		t.Fatalf("expected header after BOM strip, got %q", out[:min(40, len(out))])
+	}
+}

@@ -21,9 +21,9 @@
             <el-icon><Odometer /></el-icon>
             <template #title>仪表盘</template>
           </el-menu-item>
-          <el-menu-item index="/settings/api">
-            <el-icon><Link /></el-icon>
-            <template #title>API 连接</template>
+          <el-menu-item index="/users" v-if="hasPerm('users')">
+            <el-icon><User /></el-icon>
+            <template #title>授权管理</template>
           </el-menu-item>
           <el-menu-item index="/network-segments" v-if="hasPerm('nodes')">
             <el-icon><Share /></el-icon>
@@ -32,10 +32,6 @@
           <el-menu-item index="/nodes" v-if="hasPerm('nodes')">
             <el-icon><Monitor /></el-icon>
             <template #title>节点管理</template>
-          </el-menu-item>
-          <el-menu-item index="/users" v-if="hasPerm('users')">
-            <el-icon><User /></el-icon>
-            <template #title>用户管理</template>
           </el-menu-item>
           <el-menu-item index="/rules" v-if="hasPerm('rules')">
             <el-icon><Guide /></el-icon>
@@ -52,6 +48,10 @@
           <el-menu-item index="/admins" v-if="hasPerm('admins')">
             <el-icon><Setting /></el-icon>
             <template #title>管理员管理</template>
+          </el-menu-item>
+          <el-menu-item index="/settings/api">
+            <el-icon><Link /></el-icon>
+            <template #title>API 连接</template>
           </el-menu-item>
         </el-menu>
       </div>
@@ -164,7 +164,7 @@ const menuMap = {
   '/settings/api': 'API 连接',
   '/network-segments': '组网网段',
   '/nodes': '节点管理',
-  '/users': '用户管理',
+  '/users': '授权管理',
   '/rules': '分流规则',
   '/tunnels': '隧道状态',
   '/audit': '审计日志',

@@ -1225,6 +1225,7 @@ type wgRefreshTunnel struct {
 	PeerPubKey   string `json:"peer_pubkey"`
 	LocalIP      string `json:"local_ip"`
 	PeerIP       string `json:"peer_ip"`
+	Subnet       string `json:"subnet,omitempty"`
 	WGPort       int    `json:"wg_port"`
 	AllowedIPs   string `json:"allowed_ips"`
 	ConfigValid  bool   `json:"config_valid"`
@@ -1495,6 +1496,40 @@ func removeStaleWGPeerConfigs(want map[string]struct{}) []string {
 	return removed
 }
 
+// mergeBootstrapTunnelsJSON 将控制面下发的 WG 隧道快照写回 bootstrap-node.json，
+// 使 policy-routing.sh / nat-rules.sh（仅读该文件）与当前 wg-quick 接口一致。
+func mergeBootstrapTunnelsJSON(tunnels []wgRefreshTunnel) error {
+	const path = "/etc/vpn-agent/bootstrap-node.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse bootstrap: %w", err)
+	}
+	raw, err := json.Marshal(tunnels)
+	if err != nil {
+		return err
+	}
+	doc["tunnels"] = raw
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+func restartVpnRoutingAfterTunnelChange() {
+	out, err := exec.Command("systemctl", "restart", "vpn-routing.service").CombinedOutput()
+	if err != nil {
+		log.Printf("wg-refresh: restart vpn-routing.service: %v %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
 func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 	priv, err := os.ReadFile("/etc/wireguard/privatekey")
 	if err != nil {
@@ -1651,6 +1686,12 @@ PersistentKeepalive = 25
 	}
 	if len(restartErrors) > 0 {
 		resp["error"] = strings.Join(restartErrors, "; ")
+	}
+
+	if err := mergeBootstrapTunnelsJSON(req.Tunnels); err != nil {
+		log.Printf("wg-refresh: merge bootstrap tunnels: %v", err)
+	} else if _, statErr := os.Stat("/etc/vpn-agent/bootstrap-node.json"); statErr == nil {
+		restartVpnRoutingAfterTunnelChange()
 	}
 	return resp
 }

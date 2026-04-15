@@ -125,7 +125,7 @@ const resetting = ref(false)
 
 const allModules = [
   { value: 'nodes', label: '节点管理' },
-  { value: 'users', label: '用户管理' },
+  { value: 'users', label: '授权管理' },
   { value: 'rules', label: '分流规则' },
   { value: 'tunnels', label: '隧道状态' },
   { value: 'audit', label: '审计日志' },

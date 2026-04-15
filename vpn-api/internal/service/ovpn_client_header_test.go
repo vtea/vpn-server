@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+func TestOpenVPNClientProfileHeader_UTF8CodingComment(t *testing.T) {
+	h := OpenVPNClientProfileHeader("example.com", 1194, "udp")
+	if !strings.HasPrefix(h, "# coding: utf-8\n") {
+		t.Fatalf("want UTF-8 coding comment first line, got:\n%s", h)
+	}
+}
+
 func TestOpenVPNClientProfileHeader_TCPUsesTcpClient(t *testing.T) {
 	h := OpenVPNClientProfileHeader("example.com", 1194, "tcp")
 	if !strings.Contains(h, "proto tcp-client") {

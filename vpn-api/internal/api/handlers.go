@@ -1449,9 +1449,8 @@ func (h *Handler) DownloadGrantOVPN(c *gin.Context) {
 		return
 	}
 	filename := fmt.Sprintf("%s.ovpn", grant.CertCN)
-	c.Header("Content-Type", "application/x-openvpn-profile")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	c.Data(http.StatusOK, "application/x-openvpn-profile", service.SanitizeClientOVPNProfile(data))
+	c.Data(http.StatusOK, "application/x-openvpn-profile; charset=utf-8", service.SanitizeClientOVPNProfile(data))
 }
 
 func (h *Handler) RevokeGrant(c *gin.Context) {
@@ -2488,9 +2487,8 @@ func (h *Handler) SelfServiceDownload(c *gin.Context) {
 		return
 	}
 	filename := fmt.Sprintf("%s.ovpn", grant.CertCN)
-	c.Header("Content-Type", "application/x-openvpn-profile")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	c.Data(http.StatusOK, "application/x-openvpn-profile", service.SanitizeClientOVPNProfile(data))
+	c.Data(http.StatusOK, "application/x-openvpn-profile; charset=utf-8", service.SanitizeClientOVPNProfile(data))
 }
 
 // resolveVPNAgentPath finds a vpn-agent binary to serve to nodes.

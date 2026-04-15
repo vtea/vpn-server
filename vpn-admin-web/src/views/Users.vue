@@ -2,7 +2,7 @@
   <div>
     <div class="page-card">
       <div class="page-card-header">
-        <span class="page-card-title">用户管理</span>
+        <span class="page-card-title">授权管理</span>
         <el-button type="primary" @click="showAdd = true">
           <el-icon><Plus /></el-icon> 添加用户
         </el-button>
@@ -151,7 +151,7 @@
               size="small"
               plain
               type="primary"
-              @click="downloadOVPN(row.id)"
+              @click="downloadOVPN(row.id, row.cert_cn)"
               :disabled="!['active','placeholder'].includes(row.cert_status)"
             >
               <el-icon><Download /></el-icon> 下载
@@ -387,12 +387,37 @@ const doGrant = async () => {
   }
 }
 
-const downloadOVPN = async (id) => {
+const safeOvpnBaseName = (cn) => {
+  if (!cn || typeof cn !== 'string') return ''
+  const s = cn.trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+  return s || ''
+}
+
+const filenameFromContentDisposition = (cd) => {
+  if (!cd) return ''
+  const mStar = /filename\*=UTF-8''([^;\s]+)/i.exec(cd)
+  if (mStar) {
+    try {
+      return decodeURIComponent(mStar[1].replace(/^"|"$/g, ''))
+    } catch {
+      return mStar[1].replace(/^"|"$/g, '')
+    }
+  }
+  const mQ = /filename="([^"]+)"/i.exec(cd)
+  if (mQ) return mQ[1]
+  const mU = /filename=([^;\s]+)/i.exec(cd)
+  if (mU) return mU[1].replace(/^"|"$/g, '')
+  return ''
+}
+
+const downloadOVPN = async (id, certCN) => {
   try {
     const res = await http.get(`/api/grants/${id}/download`, { responseType: 'blob' })
-    const disposition = res.headers['content-disposition'] || ''
-    const match = disposition.match(/filename="?(.+?)"?$/)
-    const filename = match ? match[1] : `grant-${id}.ovpn`
+    const disposition = res.headers['content-disposition'] || res.headers['Content-Disposition'] || ''
+    const fromHeader = filenameFromContentDisposition(disposition)
+    const fromCn = safeOvpnBaseName(certCN)
+    const filename =
+      fromHeader || (fromCn ? `${fromCn}.ovpn` : '') || `grant-${id}.ovpn`
     const url = URL.createObjectURL(res.data)
     const a = document.createElement('a')
     a.href = url; a.download = filename; a.click()

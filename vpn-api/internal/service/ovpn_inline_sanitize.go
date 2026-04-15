@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 )
 
 // StripInlineComments removes lines that are empty or whose first non-space character is '#'.
@@ -187,11 +188,13 @@ func SanitizeOpenVPNInlineAppend(src []byte) ([]byte, error) {
 
 // SanitizeClientOVPNProfile normalizes CRLF and strips non-PEM junk inside <ca>/<cert>/<key>/<tls-crypt>
 // blocks (e.g. openssl x509 -text pasted into <cert>). The OpenVPN header lines before <ca> are preserved.
+// Leading UTF-8 BOM is removed; output is normalized to valid UTF-8 so clients treat the profile as UTF-8.
 // If sanitization fails, returns the original bytes unchanged.
 func SanitizeClientOVPNProfile(ovpn []byte) []byte {
 	if len(ovpn) == 0 {
 		return ovpn
 	}
+	ovpn = bytes.TrimPrefix(ovpn, []byte{0xEF, 0xBB, 0xBF})
 	norm := bytes.ReplaceAll(ovpn, []byte("\r\n"), []byte("\n"))
 	idx := bytes.Index(norm, []byte("<ca>"))
 	var prefix []byte
@@ -202,16 +205,26 @@ func SanitizeClientOVPNProfile(ovpn []byte) []byte {
 	}
 	sanitized, err := SanitizeOpenVPNInlineAppend(tail)
 	if err != nil {
+		if !utf8.Valid(ovpn) {
+			return bytes.ToValidUTF8(ovpn, []byte("\uFFFD"))
+		}
 		return ovpn
 	}
 	if len(prefix) == 0 {
+		if !utf8.Valid(sanitized) {
+			return bytes.ToValidUTF8(sanitized, []byte("\uFFFD"))
+		}
 		return sanitized
 	}
 	var buf bytes.Buffer
 	buf.Write(prefix)
 	buf.WriteByte('\n')
 	buf.Write(sanitized)
-	return buf.Bytes()
+	out := buf.Bytes()
+	if !utf8.Valid(out) {
+		out = bytes.ToValidUTF8(out, []byte("\uFFFD"))
+	}
+	return out
 }
 
 // SanitizePEMCAForOpenVPN returns CA file bytes reduced to concatenated X.509 PEM blocks only.

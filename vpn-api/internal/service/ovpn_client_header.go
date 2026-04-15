@@ -10,7 +10,9 @@ func OpenVPNClientProfileHeader(remoteHost string, port int, protoNorm string) s
 	if NormalizeInstanceProto(protoNorm) == "tcp" {
 		protoLine = "tcp-client"
 	}
-	return fmt.Sprintf(`client
+	// First line is ASCII-only: declares UTF-8 for editors/tools; OpenVPN treats '#' as comment.
+	return fmt.Sprintf(`# coding: utf-8
+client
 dev tun
 proto %s
 remote %s %d
