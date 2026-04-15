@@ -168,21 +168,36 @@ func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnel
 		}
 	}
 
-	if item.Reachable {
+	trafficObserved := false
+	if item.RxBytesDelta != nil && *item.RxBytesDelta > 0 {
+		trafficObserved = true
+	}
+	if item.TxBytesDelta != nil && *item.TxBytesDelta > 0 {
+		trafficObserved = true
+	}
+	if !trafficObserved {
+		if item.RxBytesTotal != nil && *item.RxBytesTotal > 0 {
+			trafficObserved = true
+		}
+		if item.TxBytesTotal != nil && *item.TxBytesTotal > 0 {
+			trafficObserved = true
+		}
+	}
+	if trafficObserved {
 		out.Status = tunnelStatusDegraded
-		out.Reason = "ping reachable but wireguard handshake missing"
-		out.ConsecutiveFailures = failures + 1
+		out.Reason = "wireguard traffic observed but handshake not fresh"
+		out.ConsecutiveFailures = 0
 		return out
 	}
 
 	failures++
 	out.ConsecutiveFailures = failures
-	out.Reason = "ping unreachable"
+	out.Reason = "wireguard handshake stale and no traffic progress"
 	if failures >= tunnelFailureThreshold {
 		out.Status = tunnelStatusDown
 	} else {
 		out.Status = tunnelStatusDegraded
-		out.Reason = "probe failed pending threshold"
+		out.Reason = "wireguard health check pending threshold"
 	}
 	return out
 }

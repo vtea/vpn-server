@@ -1131,9 +1131,6 @@ func cronHealthReport(activeConn **websocket.Conn, connMu *sync.Mutex, cfg *Conf
 
 type tunnelHealthItem struct {
 	PeerNodeID            string  `json:"peer_node_id"`
-	LatencyMs             float64 `json:"latency_ms"`
-	LossPct               float64 `json:"loss_pct"`
-	Reachable             bool    `json:"reachable"`
 	PeerPubKeyPresent     bool    `json:"peer_pubkey_present"`
 	IfaceUp               bool    `json:"iface_up"`
 	LatestHandshakeAgeSec int64   `json:"latest_handshake_age_sec"`
@@ -1150,7 +1147,6 @@ func collectTunnelHealth() []tunnelHealthItem {
 	var bootstrap struct {
 		Tunnels []struct {
 			PeerNodeID string `json:"peer_node_id"`
-			PeerIP     string `json:"peer_ip"`
 			PeerPubKey string `json:"peer_pubkey"`
 		} `json:"tunnels"`
 	}
@@ -1206,15 +1202,6 @@ func collectTunnelHealth() []tunnelHealthItem {
 			item.TxBytesTotal = tx
 		} else {
 			item.Error = appendTunnelError(item.Error, txErr.Error())
-		}
-		out, err := exec.Command("ping", "-c", "3", "-W", "3", t.PeerIP).CombinedOutput()
-		if err != nil {
-			item.Reachable = false
-			item.LossPct = 100
-		} else {
-			item.Reachable = true
-			item.LatencyMs = extractAvgLatency(string(out))
-			item.LossPct = extractLossPct(string(out))
 		}
 		results = append(results, item)
 	}
