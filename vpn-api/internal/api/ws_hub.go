@@ -33,6 +33,8 @@ type WSHub struct {
 	conns   map[string]*AgentConn // nodeID -> conn
 	db      *gorm.DB
 	OnEvent func(eventType string, data any) // broadcast to admin WS
+	// AutoWireGuardRefresh 由 main 注入：对在线 agent 下发 update_wg_config（与 Handler 手动刷新同源）。
+	AutoWireGuardRefresh func(nodeID, reason string)
 }
 
 func NewWSHub(db *gorm.DB) *WSHub {
@@ -132,7 +134,7 @@ func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnel
 	}
 	out := tunnelStatusEval{
 		Status:              tunnelStatusUnknown,
-		Reason:              "insufficient tunnel telemetry",
+		Reason:              "隧道遥测不足",
 		ConsecutiveFailures: failures,
 		LastHealthyAt:       current.LastHealthyAt,
 	}
@@ -140,14 +142,14 @@ func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnel
 	if item.PeerPubKeyPresent != nil && !*item.PeerPubKeyPresent {
 		out.ConsecutiveFailures = failures + 1
 		out.Status = tunnelStatusInvalid
-		out.Reason = "missing peer wg public key"
+		out.Reason = "对端 WireGuard 公钥缺失"
 		return out
 	}
 
 	if item.IfaceUp != nil && !*item.IfaceUp {
 		out.ConsecutiveFailures = failures + 1
 		out.Status = tunnelStatusDown
-		out.Reason = "wireguard interface is down"
+		out.Reason = "WireGuard 接口未就绪"
 		return out
 	}
 
@@ -155,14 +157,14 @@ func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnel
 		age := *item.LatestHandshakeAgeSec
 		if age >= 0 && age <= tunnelHandshakeFreshSec {
 			out.Status = tunnelStatusHealthy
-			out.Reason = "recent wireguard handshake"
+			out.Reason = "最近有 WireGuard 握手"
 			out.ConsecutiveFailures = 0
 			out.LastHealthyAt = &now
 			return out
 		}
 		if age > tunnelHandshakeFreshSec && age <= tunnelHandshakeStaleSec {
 			out.Status = tunnelStatusDegraded
-			out.Reason = "wireguard handshake is stale"
+			out.Reason = "WireGuard 握手已过期"
 			out.ConsecutiveFailures = 0
 			return out
 		}
@@ -185,19 +187,19 @@ func evaluateTunnelHealth(now time.Time, current model.Tunnel, item healthTunnel
 	}
 	if trafficObserved {
 		out.Status = tunnelStatusDegraded
-		out.Reason = "wireguard traffic observed but handshake not fresh"
+		out.Reason = "观测到流量但握手不够新"
 		out.ConsecutiveFailures = 0
 		return out
 	}
 
 	failures++
 	out.ConsecutiveFailures = failures
-	out.Reason = "wireguard handshake stale and no traffic progress"
+	out.Reason = "握手过期且无流量进展"
 	if failures >= tunnelFailureThreshold {
 		out.Status = tunnelStatusDown
 	} else {
 		out.Status = tunnelStatusDegraded
-		out.Reason = "wireguard health check pending threshold"
+		out.Reason = "健康检查未达判定阈值（暂降级）"
 	}
 	return out
 }
@@ -327,6 +329,9 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				Capabilities []string `json:"capabilities"`
 			}
 			if json.Unmarshal(msg.Payload, &rpt) == nil {
+				var prev model.Node
+				_ = hub.db.Select("wg_public_key").Where("id = ?", ac.NodeID).First(&prev).Error
+				prevWG := strings.TrimSpace(prev.WGPublicKey)
 				updates := map[string]any{"status": "online"}
 				if rpt.AgentVersion != "" {
 					updates["agent_version"] = normalizeAgentVersion(rpt.AgentVersion)
@@ -342,6 +347,12 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				}
 				hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates)
 				log.Printf("agent report: node=%s version=%s arch=%s capabilities=%d wg_pubkey=%t", ac.NodeID, normalizeAgentVersion(rpt.AgentVersion), strings.TrimSpace(rpt.AgentArch), len(rpt.Capabilities), strings.TrimSpace(rpt.WGPublicKey) != "")
+				newWG := strings.TrimSpace(rpt.WGPublicKey)
+				if hub.AutoWireGuardRefresh != nil && newWG != "" && newWG != prevWG {
+					for _, peer := range service.MeshNeighborNodeIDs(hub.db, ac.NodeID) {
+						hub.AutoWireGuardRefresh(peer, "peer_wg_pubkey_changed:"+ac.NodeID)
+					}
+				}
 			}
 		case "cert_result":
 			var res struct {
@@ -494,7 +505,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 						eval.ConsecutiveFailures = tunnel.ConsecutiveFailures
 						eval.LastHealthyAt = tunnel.LastHealthyAt
 						if eval.Reason == "" {
-							eval.Reason = "secondary reporter skipped status downgrade"
+							eval.Reason = "非主上报端未降低已报状态"
 						}
 					}
 					hub.db.Model(&model.Tunnel{}).
@@ -578,7 +589,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					}
 					reason := strings.TrimSpace(it.Error)
 					if reason == "" {
-						reason = "wg refresh failed"
+						reason = "WireGuard 刷新失败"
 					}
 					hub.db.Model(&model.Tunnel{}).
 						Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",

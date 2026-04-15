@@ -83,6 +83,93 @@ func (h *Handler) audit(c *gin.Context, action, target, detail string) {
 	_ = h.db.Create(&log).Error
 }
 
+func (h *Handler) auditSystem(action, target, detail string) {
+	_ = h.db.Create(&model.AuditLog{
+		AdminUser: "system",
+		Action:    action,
+		Target:    target,
+		Detail:    detail,
+	}).Error
+}
+
+// buildWireGuardRefreshPayload 生成与「刷新WG」一致的 update_wg_config JSON body。
+func buildWireGuardRefreshPayload(db *gorm.DB, nodeID string) (payload []byte, invalid, total int, err error) {
+	tunnelConfigs, err := service.BuildTunnelConfigsForNode(db, nodeID)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if tunnelConfigs == nil {
+		tunnelConfigs = []service.TunnelPeerConfig{}
+	}
+	listenPort := 0
+	invalid = 0
+	for _, tc := range tunnelConfigs {
+		if tc.ConfigValid && strings.TrimSpace(tc.PeerPubKey) != "" && tc.WGPort > 0 {
+			listenPort = tc.WGPort
+			break
+		}
+		if !tc.ConfigValid {
+			invalid++
+		}
+	}
+	payload, err = json.Marshal(gin.H{
+		"node_id":     nodeID,
+		"listen_port": listenPort,
+		"tunnels":     tunnelConfigs,
+	})
+	total = len(tunnelConfigs)
+	return payload, invalid, total, err
+}
+
+// PushWireGuardRefreshToOnlineNode 在库变更后主动向在线 agent 下发 WG 快照（需 wg_refresh_v1）。
+func (h *Handler) PushWireGuardRefreshToOnlineNode(nodeID, reason string) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" || h.hub == nil {
+		return
+	}
+	if !nodeSupportsCapability(h.db, nodeID, "wg_refresh_v1") {
+		log.Printf("auto wg_refresh skipped node=%s: no wg_refresh_v1 (%s)", nodeID, reason)
+		return
+	}
+	if !h.hub.IsOnline(nodeID) {
+		log.Printf("auto wg_refresh skipped node=%s: websocket offline (%s)", nodeID, reason)
+		return
+	}
+	lock := h.nodeRefreshLock(nodeID)
+	lock.Lock()
+	defer lock.Unlock()
+	var node model.Node
+	if err := h.db.Where("id = ?", nodeID).First(&node).Error; err != nil {
+		return
+	}
+	payload, invalid, total, err := buildWireGuardRefreshPayload(h.db, nodeID)
+	if err != nil {
+		log.Printf("auto wg_refresh marshal node=%s: %v (%s)", nodeID, err, reason)
+		return
+	}
+	if err := h.hub.SendToNode(nodeID, WSMessage{Type: "update_wg_config", Payload: payload}); err != nil {
+		log.Printf("auto wg_refresh send node=%s: %v (%s)", nodeID, err, reason)
+		return
+	}
+	log.Printf("auto wg_refresh ok node=%s tunnels=%d invalid=%d (%s)", nodeID, total, invalid, reason)
+	h.auditSystem("wg_refresh_auto", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("%s total=%d invalid=%d", reason, total, invalid))
+}
+
+func (h *Handler) pushWireGuardRefreshToOnlineNodes(nodeIDs []string, reason string) {
+	seen := make(map[string]struct{})
+	for _, raw := range nodeIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		h.PushWireGuardRefreshToOnlineNode(id, reason)
+	}
+}
+
 func (h *Handler) nodeRefreshLock(nodeID string) *sync.Mutex {
 	if v, ok := h.wgRefreshLocks.Load(nodeID); ok {
 		if mu, ok2 := v.(*sync.Mutex); ok2 {
@@ -350,6 +437,16 @@ func (h *Handler) CreateNode(c *gin.Context) {
 
 	h.audit(c, "create_node", fmt.Sprintf("node:%s", node.ID), fmt.Sprintf("region=%s ip=%s tunnels=%d segments=%v", node.Region, node.PublicIP, len(tunnels), segmentIDs))
 
+	var wgPushPeers []string
+	for _, t := range tunnels {
+		if t.NodeA == node.ID && t.NodeB != "" {
+			wgPushPeers = append(wgPushPeers, t.NodeB)
+		} else if t.NodeB == node.ID && t.NodeA != "" {
+			wgPushPeers = append(wgPushPeers, t.NodeA)
+		}
+	}
+	h.pushWireGuardRefreshToOnlineNodes(wgPushPeers, "create_node new_peer "+node.ID)
+
 	resp := gin.H{
 		"node":      node,
 		"instances": instances,
@@ -507,6 +604,7 @@ func (h *Handler) PatchNode(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 		return
 	}
+	prevPublicIP := strings.TrimSpace(node.PublicIP)
 	var req patchNodeReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -539,6 +637,9 @@ func (h *Handler) PatchNode(c *gin.Context) {
 		return
 	}
 	h.audit(c, "patch_node", fmt.Sprintf("node:%s", node.ID), fmt.Sprintf("name=%s region=%s ip=%s", node.Name, node.Region, node.PublicIP))
+	if req.PublicIP != nil && prevPublicIP != strings.TrimSpace(node.PublicIP) {
+		h.pushWireGuardRefreshToOnlineNodes(service.MeshNeighborNodeIDs(h.db, id), "patch_node_public_ip "+id)
+	}
 	c.JSON(http.StatusOK, gin.H{"node": node})
 }
 
@@ -652,6 +753,7 @@ func (h *Handler) PatchTunnel(c *gin.Context) {
 		h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
 	}
 	h.audit(c, "patch_tunnel", fmt.Sprintf("tunnel:%d", tun.ID), fmt.Sprintf("subnet=%s ip_a=%s ip_b=%s wg_port=%d", tun.Subnet, tun.IPA, tun.IPB, tun.WGPort))
+	h.pushWireGuardRefreshToOnlineNodes([]string{tun.NodeA, tun.NodeB}, fmt.Sprintf("patch_tunnel:%d", tun.ID))
 	c.JSON(http.StatusOK, gin.H{"tunnel": tun})
 }
 
@@ -731,6 +833,32 @@ func (h *Handler) ListTunnels(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": tunnels})
+}
+
+// RepairTunnelMesh 补全任意两节点之间缺失的隧道记录（全互联缺边修复），并递增受影响节点的 config_version。
+func (h *Handler) RepairTunnelMesh(c *gin.Context) {
+	created, err := service.EnsureFullMeshTunnels(h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	affected := make(map[string]struct{})
+	for _, t := range created {
+		affected[t.NodeA] = struct{}{}
+		affected[t.NodeB] = struct{}{}
+	}
+	for nid := range affected {
+		h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
+	}
+	h.audit(c, "repair_tunnel_mesh", "tunnels", fmt.Sprintf("created=%d", len(created)))
+	if len(affected) > 0 {
+		ids := make([]string, 0, len(affected))
+		for nid := range affected {
+			ids = append(ids, nid)
+		}
+		h.pushWireGuardRefreshToOnlineNodes(ids, "repair_tunnel_mesh")
+	}
+	c.JSON(http.StatusOK, gin.H{"created_count": len(created), "items": created})
 }
 
 func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
@@ -1507,6 +1635,26 @@ func (h *Handler) deleteNode(c *gin.Context, id string) {
 		return
 	}
 
+	var meshPeers []string
+	var meshTuns []model.Tunnel
+	if err := h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&meshTuns).Error; err == nil {
+		seen := make(map[string]struct{})
+		for _, t := range meshTuns {
+			peer := t.NodeA
+			if peer == id {
+				peer = t.NodeB
+			}
+			if peer == "" || peer == id {
+				continue
+			}
+			if _, ok := seen[peer]; ok {
+				continue
+			}
+			seen[peer] = struct{}{}
+			meshPeers = append(meshPeers, peer)
+		}
+	}
+
 	var instanceIDs []uint
 	h.db.Model(&model.Instance{}).Where("node_id = ?", id).Pluck("id", &instanceIDs)
 	if len(instanceIDs) > 0 {
@@ -1527,6 +1675,7 @@ func (h *Handler) deleteNode(c *gin.Context, id string) {
 	h.db.Where("node_a = ? OR node_b = ?", id, id).Delete(&model.Tunnel{})
 	h.db.Delete(&node)
 	h.audit(c, "delete_node", fmt.Sprintf("node:%s", id), fmt.Sprintf("instances=%d cleaned_tunnels=%d", len(instanceIDs), len(tunnelIDs)))
+	h.pushWireGuardRefreshToOnlineNodes(meshPeers, "delete_node removed "+id)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1847,35 +1996,20 @@ func (h *Handler) RefreshNodeWG(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 		return
 	}
-	tunnelConfigs, _ := service.BuildTunnelConfigsForNode(h.db, nodeID)
-	if tunnelConfigs == nil {
-		tunnelConfigs = []service.TunnelPeerConfig{}
+	payload, invalid, totalTunnel, err := buildWireGuardRefreshPayload(h.db, nodeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	listenPort := 0
-	invalid := 0
-	for _, tc := range tunnelConfigs {
-		if tc.ConfigValid && strings.TrimSpace(tc.PeerPubKey) != "" && tc.WGPort > 0 {
-			listenPort = tc.WGPort
-			break
-		}
-		if !tc.ConfigValid {
-			invalid++
-		}
-	}
-	payload, _ := json.Marshal(gin.H{
-		"node_id":     nodeID,
-		"listen_port": listenPort,
-		"tunnels":     tunnelConfigs,
-	})
 	if err := h.hub.SendToNode(nodeID, WSMessage{Type: "update_wg_config", Payload: payload}); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "node offline or ws send failed"})
 		return
 	}
-	h.audit(c, "wg_refresh", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("total=%d invalid=%d", len(tunnelConfigs), invalid))
+	h.audit(c, "wg_refresh", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("total=%d invalid=%d", totalTunnel, invalid))
 	c.JSON(http.StatusAccepted, gin.H{
 		"ok":           true,
 		"node_id":      nodeID,
-		"total_tunnel": len(tunnelConfigs),
+		"total_tunnel": totalTunnel,
 		"invalid":      invalid,
 	})
 }

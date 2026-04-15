@@ -1336,6 +1336,40 @@ func buildWGListenLine(iface string, reqListenPort int, ownerIface string) strin
 	return "# ListenPort auto (wg-refresh)"
 }
 
+// wgIniOneLine strips CR/LF and ASCII control characters so control-plane / DB fields cannot inject extra wg-quick stanzas.
+func wgIniOneLine(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// wireGuardEndpointField returns host:port or [ipv6]:port for WireGuard Endpoint= (IPv6 literals must be bracketed).
+func wireGuardEndpointField(host string, port int) string {
+	host = strings.TrimSpace(host)
+	if host == "" || port <= 0 {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// wgPeerNodeIDSafeForPath rejects peer ids that could escape /etc/wireguard/wg-<id>.conf or break systemctl instance names.
+func wgPeerNodeIDSafeForPath(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) == 0 || len(id) > 200 {
+		return false
+	}
+	if strings.Contains(id, "..") || strings.ContainsAny(id, "/\\\x00\r\n") {
+		return false
+	}
+	return true
+}
+
 func classifyWGStartError(msg string) string {
 	s := strings.ToLower(strings.TrimSpace(msg))
 	switch {
@@ -1415,6 +1449,52 @@ func sanitizeWGConfigListenPorts(ownerIface string, reqListenPort int) ([]string
 	return units, nil
 }
 
+// peerNodeIDFromWGConfPath 从 /etc/wireguard/wg-<peer>.conf 解析出 peer 节点 id（与 apply 写入时一致）。
+func peerNodeIDFromWGConfPath(confPath string) (peerID string, ok bool) {
+	base := filepath.Base(confPath)
+	if !strings.HasSuffix(base, ".conf") {
+		return "", false
+	}
+	iface := strings.TrimSuffix(base, ".conf")
+	if !strings.HasPrefix(iface, "wg-") {
+		return "", false
+	}
+	id := strings.TrimPrefix(iface, "wg-")
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// removeStaleWGPeerConfigs 停止并删除「当前刷新 payload 已不再包含」的 wg 对端配置，避免已删节点仍残留 wg-node-*。
+func removeStaleWGPeerConfigs(want map[string]struct{}) []string {
+	paths, err := filepath.Glob("/etc/wireguard/wg-*.conf")
+	if err != nil || len(paths) == 0 {
+		return nil
+	}
+	var removed []string
+	for _, p := range paths {
+		peerID, ok := peerNodeIDFromWGConfPath(p)
+		if !ok {
+			continue
+		}
+		if _, keep := want[peerID]; keep {
+			continue
+		}
+		iface := "wg-" + peerID
+		unit := "wg-quick@" + iface
+		_ = exec.Command("systemctl", "stop", unit).Run()
+		_ = exec.Command("systemctl", "disable", unit).Run()
+		if err := os.Remove(p); err != nil {
+			log.Printf("wg-refresh: remove stale conf %s: %v", p, err)
+			continue
+		}
+		removed = append(removed, peerID)
+	}
+	return removed
+}
+
 func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 	priv, err := os.ReadFile("/etc/wireguard/privatekey")
 	if err != nil {
@@ -1423,7 +1503,13 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 			"error":   "missing local wireguard private key: " + err.Error(),
 		}
 	}
-	localPrivKey := strings.TrimSpace(string(priv))
+	localPrivKey := wgIniOneLine(string(priv))
+	if localPrivKey == "" {
+		return map[string]any{
+			"success": false,
+			"error":   "invalid local wireguard private key (empty after sanitize)",
+		}
+	}
 	type peerResult struct {
 		PeerNodeID string `json:"peer_node_id"`
 		Success    bool   `json:"success"`
@@ -1433,6 +1519,18 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 	results := make([]peerResult, 0, len(req.Tunnels))
 	changedUnits := make(map[string]struct{}, len(req.Tunnels))
 	ownerIface := preferredWGListenOwnerIface()
+
+	wantPeers := make(map[string]struct{}, len(req.Tunnels))
+	for _, t := range req.Tunnels {
+		id := strings.TrimSpace(t.PeerNodeID)
+		if id != "" && wgPeerNodeIDSafeForPath(id) {
+			wantPeers[id] = struct{}{}
+		}
+	}
+	removedStale := removeStaleWGPeerConfigs(wantPeers)
+	if len(removedStale) > 0 {
+		log.Printf("wg-refresh: removed stale peer wireguard configs: %v", removedStale)
+	}
 	for _, t := range req.Tunnels {
 		r := peerResult{PeerNodeID: t.PeerNodeID}
 		configErr := strings.TrimSpace(t.ConfigError)
@@ -1444,7 +1542,37 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 			results = append(results, r)
 			continue
 		}
-		iface := "wg-" + strings.TrimSpace(t.PeerNodeID)
+		peerID := strings.TrimSpace(t.PeerNodeID)
+		if !wgPeerNodeIDSafeForPath(peerID) {
+			r.Error = "invalid peer_node_id: unsafe characters or length"
+			results = append(results, r)
+			continue
+		}
+		endpointField := wireGuardEndpointField(t.PeerEndpoint, t.WGPort)
+		if endpointField == "" {
+			r.Error = "invalid endpoint or wg_port for WireGuard"
+			results = append(results, r)
+			continue
+		}
+		localIP := wgIniOneLine(t.LocalIP)
+		if localIP == "" {
+			r.Error = "missing or invalid local_ip"
+			results = append(results, r)
+			continue
+		}
+		pubKey := wgIniOneLine(t.PeerPubKey)
+		if pubKey == "" {
+			r.Error = "missing peer public key after sanitize"
+			results = append(results, r)
+			continue
+		}
+		allowedIPs := wgIniOneLine(t.AllowedIPs)
+		if allowedIPs == "" {
+			r.Error = "missing allowed_ips after sanitize"
+			results = append(results, r)
+			continue
+		}
+		iface := "wg-" + peerID
 		listenLine := buildWGListenLine(iface, req.ListenPort, ownerIface)
 		conf := strings.TrimSpace(fmt.Sprintf(`[Interface]
 PrivateKey = %s
@@ -1454,11 +1582,11 @@ Table = off
 
 [Peer]
 PublicKey = %s
-Endpoint = %s:%d
+Endpoint = %s
 AllowedIPs = %s
 PersistentKeepalive = 25
-`, localPrivKey, strings.TrimSpace(t.LocalIP), listenLine, strings.TrimSpace(t.PeerPubKey), strings.TrimSpace(t.PeerEndpoint), t.WGPort, strings.TrimSpace(t.AllowedIPs))) + "\n"
-		confPath := filepath.Join("/etc/wireguard", "wg-"+strings.TrimSpace(t.PeerNodeID)+".conf")
+`, localPrivKey, localIP, listenLine, pubKey, endpointField, allowedIPs)) + "\n"
+		confPath := filepath.Join("/etc/wireguard", "wg-"+peerID+".conf")
 		old, _ := os.ReadFile(confPath)
 		if string(old) != conf {
 			tmpPath := confPath + ".tmp"
@@ -1482,12 +1610,16 @@ PersistentKeepalive = 25
 	}
 
 	if sanitizeUnits, serr := sanitizeWGConfigListenPorts(ownerIface, req.ListenPort); serr != nil {
-		return map[string]any{
+		out := map[string]any{
 			"success": false,
 			"node_id": req.NodeID,
 			"error":   "sanitize wg listen ports failed: " + serr.Error(),
 			"results": results,
 		}
+		if len(removedStale) > 0 {
+			out["removed_stale_peers"] = removedStale
+		}
+		return out
 	} else {
 		for _, unit := range sanitizeUnits {
 			changedUnits[unit] = struct{}{}
@@ -1513,6 +1645,9 @@ PersistentKeepalive = 25
 		"total_peers":   len(results),
 		"success_peers": okCount,
 		"results":       results,
+	}
+	if len(removedStale) > 0 {
+		resp["removed_stale_peers"] = removedStale
 	}
 	if len(restartErrors) > 0 {
 		resp["error"] = strings.Join(restartErrors, "; ")

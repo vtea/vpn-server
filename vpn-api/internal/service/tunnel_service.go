@@ -89,6 +89,71 @@ func CreateTunnelsForNewNode(db *gorm.DB, newNodeID string) ([]model.Tunnel, err
 	return tunnels, nil
 }
 
+// tunnelPairKeyUnordered 用于判断两节点之间是否已有隧道（与 node_a/node_b 存库顺序无关）。
+func tunnelPairKeyUnordered(idA, idB string) string {
+	if strings.Compare(idA, idB) < 0 {
+		return idA + "\x00" + idB
+	}
+	return idB + "\x00" + idA
+}
+
+// EnsureFullMeshTunnels 扫描所有节点，为尚未存在隧道记录的无序节点对补建一条 /30 隧道。
+// 新建行的 NodeA 为 node_number 较小者、IPA 为其隧道地址，与 BuildTunnelConfigsForNode 的语义一致。
+// 在单事务内执行，便于分配子网时与已插入行一致。
+func EnsureFullMeshTunnels(db *gorm.DB) ([]model.Tunnel, error) {
+	var created []model.Tunnel
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var nodes []model.Node
+		if err := tx.Order("node_number asc, id asc").Find(&nodes).Error; err != nil {
+			return err
+		}
+		if len(nodes) < 2 {
+			return nil
+		}
+
+		var existing []model.Tunnel
+		if err := tx.Find(&existing).Error; err != nil {
+			return err
+		}
+		has := make(map[string]struct{}, len(existing))
+		for _, t := range existing {
+			has[tunnelPairKeyUnordered(t.NodeA, t.NodeB)] = struct{}{}
+		}
+
+		for i := 0; i < len(nodes); i++ {
+			for j := i + 1; j < len(nodes); j++ {
+				a, b := nodes[i].ID, nodes[j].ID
+				if _, ok := has[tunnelPairKeyUnordered(a, b)]; ok {
+					continue
+				}
+				subnet, ipA, ipB, err := AllocateTunnelSubnet(tx)
+				if err != nil {
+					return err
+				}
+				t := model.Tunnel{
+					NodeA:  a,
+					NodeB:  b,
+					Subnet: subnet,
+					IPA:    ipA,
+					IPB:    ipB,
+					WGPort: wgPort,
+					Status: "pending",
+				}
+				if err := tx.Create(&t).Error; err != nil {
+					return err
+				}
+				has[tunnelPairKeyUnordered(a, b)] = struct{}{}
+				created = append(created, t)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
 type TunnelPeerConfig struct {
 	PeerNodeID   string `json:"peer_node_id"`
 	PeerEndpoint string `json:"peer_endpoint"`
@@ -100,6 +165,31 @@ type TunnelPeerConfig struct {
 	Subnet       string `json:"subnet"`
 	WGPort       int    `json:"wg_port"`
 	AllowedIPs   string `json:"allowed_ips"`
+}
+
+// MeshNeighborNodeIDs 返回与 nodeID 在隧道表中相连的所有对端节点 ID（去重、顺序不保证）。
+func MeshNeighborNodeIDs(db *gorm.DB, nodeID string) []string {
+	var tunnels []model.Tunnel
+	if err := db.Where("node_a = ? OR node_b = ?", nodeID, nodeID).Find(&tunnels).Error; err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, t := range tunnels {
+		peer := t.NodeA
+		if peer == nodeID {
+			peer = t.NodeB
+		}
+		if peer == "" || peer == nodeID {
+			continue
+		}
+		if _, ok := seen[peer]; ok {
+			continue
+		}
+		seen[peer] = struct{}{}
+		out = append(out, peer)
+	}
+	return out
 }
 
 func BuildTunnelConfigsForNode(db *gorm.DB, nodeID string) ([]TunnelPeerConfig, error) {
@@ -128,20 +218,32 @@ func BuildTunnelConfigsForNode(db *gorm.DB, nodeID string) ([]TunnelPeerConfig, 
 
 		var peerInstances []model.Instance
 		db.Where("node_id = ?", peerNodeID).Find(&peerInstances)
+		localIP = strings.TrimSpace(localIP)
+		peerIP = strings.TrimSpace(peerIP)
 		allowedCIDRs := peerIP + "/32"
 		for _, inst := range peerInstances {
-			allowedCIDRs += ", " + inst.Subnet
+			sub := strings.TrimSpace(inst.Subnet)
+			if sub == "" {
+				continue
+			}
+			allowedCIDRs += ", " + sub
 		}
 
+		pub := strings.TrimSpace(peerNode.WGPublicKey)
+		ep := strings.TrimSpace(peerNode.PublicIP)
+		cfgErr := ""
+		if pub == "" {
+			cfgErr = "missing peer wg public key"
+		}
 		configs = append(configs, TunnelPeerConfig{
 			PeerNodeID:   peerNodeID,
-			PeerEndpoint: peerNode.PublicIP,
-			PeerPubKey:   peerNode.WGPublicKey,
-			ConfigValid:  strings.TrimSpace(peerNode.WGPublicKey) != "",
-			ConfigError:  map[bool]string{true: "", false: "missing peer wg public key"}[strings.TrimSpace(peerNode.WGPublicKey) != ""],
+			PeerEndpoint: ep,
+			PeerPubKey:   pub,
+			ConfigValid:  pub != "",
+			ConfigError:  cfgErr,
 			LocalIP:      localIP,
 			PeerIP:       peerIP,
-			Subnet:       t.Subnet,
+			Subnet:       strings.TrimSpace(t.Subnet),
 			WGPort:       t.WGPort,
 			AllowedIPs:   allowedCIDRs,
 		})

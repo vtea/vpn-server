@@ -49,6 +49,7 @@ func main() {
 
 	hub := api.NewWSHub(db)
 	h := api.NewHandler(db, cfg.JWTSecret, hub, ca, cfg.ExternalURL, cfg.ExternalURLLAN, cfg.AgentLatestVersion, cfg.CADir, cfg.DBPath, cfg.DBDriver, cfg.IPListDualEnabled)
+	hub.AutoWireGuardRefresh = h.PushWireGuardRefreshToOnlineNode
 	hub.OnEvent = func(eventType string, data any) {
 		h.BroadcastToAdmins(eventType, data)
 	}
@@ -142,6 +143,7 @@ func main() {
 
 	tunnels := secured.Group("", middleware.RequirePermission("tunnels"))
 	tunnels.GET("/tunnels", h.ListTunnels)
+	tunnels.POST("/tunnels/repair-mesh", h.RepairTunnelMesh)
 	tunnels.PATCH("/tunnels/:id", h.PatchTunnel)
 	tunnels.GET("/tunnels/:id/metrics", h.GetTunnelMetrics)
 

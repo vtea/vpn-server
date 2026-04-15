@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,5 +103,47 @@ func TestClassifyWGStartError(t *testing.T) {
 		if got := classifyWGStartError(input); got != want {
 			t.Fatalf("classifyWGStartError(%q)=%q want=%q", input, got, want)
 		}
+	}
+}
+
+func TestWireGuardEndpointField(t *testing.T) {
+	if got := wireGuardEndpointField("203.0.113.5", 51820); got != "203.0.113.5:51820" {
+		t.Fatalf("ipv4: %q", got)
+	}
+	if got := wireGuardEndpointField("2001:db8::1", 51820); got != "[2001:db8::1]:51820" {
+		t.Fatalf("ipv6: %q", got)
+	}
+	if got := wireGuardEndpointField("vpn.example.com", 51820); got != "vpn.example.com:51820" {
+		t.Fatalf("dns: %q", got)
+	}
+	if wireGuardEndpointField("", 51820) != "" || wireGuardEndpointField("1.2.3.4", 0) != "" {
+		t.Fatal("expected empty")
+	}
+}
+
+func TestWgIniOneLine(t *testing.T) {
+	in := "  key\nwith\rstuff\x01 "
+	if got := wgIniOneLine(in); got != "key with stuff" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestWgPeerNodeIDSafeForPath(t *testing.T) {
+	if !wgPeerNodeIDSafeForPath("node-10") {
+		t.Fatal()
+	}
+	if wgPeerNodeIDSafeForPath("../x") || wgPeerNodeIDSafeForPath("a/b") || wgPeerNodeIDSafeForPath("x\ny") {
+		t.Fatal("expected false")
+	}
+}
+
+func TestPeerNodeIDFromWGConfPath(t *testing.T) {
+	p := filepath.Join("etc", "wireguard", "wg-node-30.conf")
+	id, ok := peerNodeIDFromWGConfPath(p)
+	if !ok || id != "node-30" {
+		t.Fatalf("got ok=%v id=%q", ok, id)
+	}
+	if _, ok := peerNodeIDFromWGConfPath("/etc/wireguard/privatekey"); ok {
+		t.Fatal("expected false for non-wg conf name")
 	}
 }

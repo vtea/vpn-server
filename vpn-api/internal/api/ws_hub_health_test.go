@@ -21,7 +21,7 @@ func TestEvaluateTunnelHealthFreshHandshake(t *testing.T) {
 	if eval.Status != tunnelStatusHealthy {
 		t.Fatalf("want healthy, got %s", eval.Status)
 	}
-	if eval.Reason != "recent wireguard handshake" {
+	if eval.Reason != "最近有 WireGuard 握手" {
 		t.Fatalf("unexpected reason: %s", eval.Reason)
 	}
 }
@@ -41,7 +41,7 @@ func TestEvaluateTunnelHealthTrafficObservedWithoutFreshHandshake(t *testing.T) 
 	if eval.Status != tunnelStatusDegraded {
 		t.Fatalf("want degraded, got %s", eval.Status)
 	}
-	if eval.Reason != "wireguard traffic observed but handshake not fresh" {
+	if eval.Reason != "观测到流量但握手不够新" {
 		t.Fatalf("unexpected reason: %s", eval.Reason)
 	}
 	if eval.ConsecutiveFailures != 0 {
@@ -64,7 +64,7 @@ func TestEvaluateTunnelHealthNoTrafficProgressThreshold(t *testing.T) {
 	if eval.Status != tunnelStatusDown {
 		t.Fatalf("want down, got %s", eval.Status)
 	}
-	if eval.Reason != "wireguard handshake stale and no traffic progress" {
+	if eval.Reason != "握手过期且无流量进展" {
 		t.Fatalf("unexpected reason: %s", eval.Reason)
 	}
 }
