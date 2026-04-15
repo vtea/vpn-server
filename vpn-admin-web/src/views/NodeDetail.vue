@@ -195,8 +195,8 @@
           <el-form-item label="地域">
             <el-input v-model="editNode.region" placeholder="如 cn-east" class="node-edit-input" />
           </el-form-item>
-          <el-form-item label="公网 IP">
-            <el-input v-model="editNode.public_ip" placeholder="IPv4/IPv6" class="node-edit-input node-edit-input--wide" />
+          <el-form-item label="公网地址">
+            <el-input v-model="editNode.public_ip" placeholder="IPv4/IPv6 或域名" class="node-edit-input node-edit-input--wide" />
           </el-form-item>
         </div>
       </el-form>

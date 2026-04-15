@@ -213,9 +213,46 @@ type createNodeReq struct {
 	SegmentIDs []string `json:"segment_ids"`
 }
 
+func normalizeNodePublicHost(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", fmt.Errorf("public_ip cannot be empty")
+	}
+	if strings.Contains(s, "://") || strings.ContainsAny(s, "/\\?#@") {
+		return "", fmt.Errorf("public_ip must be a valid IPv4/IPv6 address or domain")
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return s, nil
+	}
+	if len(s) > 253 || strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") || strings.Contains(s, "..") {
+		return "", fmt.Errorf("public_ip must be a valid IPv4/IPv6 address or domain")
+	}
+	labels := strings.Split(s, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return "", fmt.Errorf("public_ip must be a valid IPv4/IPv6 address or domain")
+		}
+		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return "", fmt.Errorf("public_ip must be a valid IPv4/IPv6 address or domain")
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return "", fmt.Errorf("public_ip must be a valid IPv4/IPv6 address or domain")
+		}
+	}
+	return s, nil
+}
+
 func (h *Handler) CreateNode(c *gin.Context) {
 	var req createNodeReq
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	publicHost, err := normalizeNodePublicHost(req.PublicIP)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -273,7 +310,7 @@ func (h *Handler) CreateNode(c *gin.Context) {
 			Name:       req.Name,
 			NodeNumber: num,
 			Region:     req.Region,
-			PublicIP:   req.PublicIP,
+			PublicIP:   publicHost,
 			Status:     "offline",
 		}
 		nodeToken := model.NodeBootstrapToken{NodeID: nodeID, Token: bootstrapToken}
@@ -483,9 +520,13 @@ func (h *Handler) PatchNode(c *gin.Context) {
 	}
 	if req.PublicIP != nil {
 		s := strings.TrimSpace(*req.PublicIP)
-		if s != "" && net.ParseIP(s) == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "public_ip must be a valid IPv4/IPv6 address"})
-			return
+		if s != "" {
+			var err error
+			s, err = normalizeNodePublicHost(s)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 		}
 		node.PublicIP = s
 	}

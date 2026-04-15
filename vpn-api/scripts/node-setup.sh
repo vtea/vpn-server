@@ -1406,8 +1406,8 @@ tls-crypt ${PKI}/private/easyrsa-tls.key
 server ${SUBNET_IP} 255.255.255.0
 ifconfig-pool-persist /var/log/openvpn/${MODE}-ipp.txt
 
+push "dhcp-option DNS 223.5.5.5"
 push "dhcp-option DNS 8.8.8.8"
-push "dhcp-option DNS 1.1.1.1"
 
 keepalive 10 120
 cipher AES-256-GCM

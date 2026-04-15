@@ -120,7 +120,7 @@ EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTER
 | GET/POST/PATCH/DELETE | /api/network-segments | 组网网段列表/创建/更新/删除；创建时 **ID 与端口基址由服务端生成**；可选 `default_ovpn_proto`（udp/tcp）。`PATCH` 可选 `apply_to_instances` 将当前网段默认协议批量写入该段下已有实例 |
 | GET/POST | /api/nodes | 节点列表/创建（创建体需含 `segment_ids`，可省略则等同 `["default"]`） |
 | GET | /api/nodes/:id | 节点详情（含 `mesh_summary`：OpenVPN 实例子网 + WG 隧道本端 IP 汇总，无单一「组网 IP」） |
-| PATCH | /api/nodes/:id | 更新名称、地域、公网 IP（JSON 可选字段 `name`/`region`/`public_ip`） |
+| PATCH | /api/nodes/:id | 更新名称、地域、公网地址（`public_ip` 支持 IPv4/IPv6/域名；JSON 可选字段 `name`/`region`/`public_ip`） |
 | POST | /api/nodes/:id/delete | 删除节点（JSON：`{"password":"当前管理员密码"}`） |
 | POST | /api/nodes/:id/rotate-bootstrap-token | 换发该节点的 bootstrap 令牌（旧令牌作废；返回新部署命令） |
 | GET | /api/nodes/:id/status | 节点实时状态 |

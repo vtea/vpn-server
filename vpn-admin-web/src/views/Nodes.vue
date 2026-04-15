@@ -37,7 +37,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="node.region" label="地域" width="100" />
-        <el-table-column prop="node.public_ip" label="公网 IP" width="140" />
+        <el-table-column prop="node.public_ip" label="公网地址" width="180" />
         <el-table-column prop="node.node_number" label="节点号" width="80" align="center" />
         <el-table-column prop="node.status" label="状态" width="90">
           <template #default="{ row }">
@@ -123,8 +123,8 @@
         <el-form-item label="地域">
           <el-input v-model="addForm.region" placeholder="如: cn-east" />
         </el-form-item>
-        <el-form-item label="公网 IP">
-          <el-input v-model="addForm.public_ip" placeholder="如: 1.2.3.4" />
+        <el-form-item label="公网地址">
+          <el-input v-model="addForm.public_ip" placeholder="如: 1.2.3.4 或 node.example.com" />
         </el-form-item>
       </el-form>
       <template #footer>
