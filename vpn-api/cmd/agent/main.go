@@ -1132,6 +1132,12 @@ func updateIPListFromAPI(cfg *Config, scope, downloadURL, version string) error 
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if scope == "overseas" {
+			ip, _, err := net.ParseCIDR(line)
+			if err != nil || ip.To4() == nil {
+				continue
+			}
+		}
 		filtered = append(filtered, line)
 	}
 	if len(filtered) == 0 {
@@ -1153,7 +1159,7 @@ ipset create "$NEW_SET" hash:net -exist
 ipset flush "$NEW_SET"
 while IFS= read -r cidr; do
   [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-  ipset add "$NEW_SET" "$cidr" -exist
+  ipset add "$NEW_SET" "$cidr" -exist || true
 done < "$TMPFILE"
 ipset create "$SET_NAME" hash:net -exist
 ipset swap "$NEW_SET" "$SET_NAME"

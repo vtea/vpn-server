@@ -1750,24 +1750,27 @@ else
   log "  WARNING: china_ip_list is empty, skipped ipset population"
 fi
 
-# Overseas IP 库：与控制面 ensureIPListSources（overseas）及 Agent 的 overseas-ip / overseas-ip-list.txt 对齐
+# Overseas IP 库：与控制面 overseas 制品及 Agent 的 overseas-ip / overseas-ip-list.txt 对齐。
+# overseas-ip 为 ipset hash:net（仅 IPv4）。旧默认 china6.txt 全系 IPv6，会导致海量 ipset 报错且无法入库。
 OVERSEAS_LIST="/tmp/overseas_ip_list.txt"
-OVERSEAS_URL_PRIMARY="https://cdn.jsdelivr.net/gh/gaoyifan/china-operator-ip/ip-lists/china6.txt"
-OVERSEAS_URL_MIRROR="https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china6.txt"
+OVERSEAS_LIST_V4="/tmp/overseas_ip_list_v4.txt"
+# 公网 IPv4 聚合段（示例：美国 / 日本），供 hash:net；管理员可在控制面改「分流规则」数据源
+OVERSEAS_URL_PRIMARY="https://www.ipdeny.com/ipblocks/data/countries/us.zone"
+OVERSEAS_URL_MIRROR="https://www.ipdeny.com/ipblocks/data/countries/jp.zone"
 
 ipset create overseas-ip hash:net -exist
 
 download_overseas_from_cp() {
   [[ -z "${API_URL:-}" ]] && return 1
-  curl -fsSL --connect-timeout 8 --max-time 60 --retry 2 --retry-delay 1 \
+  curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 1 \
     "${API_URL%/}/api/ip-lists/download/overseas" -o "$OVERSEAS_LIST" 2>/dev/null
 }
 
 download_overseas_public() {
-  curl -fsSL --connect-timeout 8 --max-time 30 --retry 2 --retry-delay 1 "$1" -o "$OVERSEAS_LIST" 2>/dev/null
+  curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 1 "$1" -o "$OVERSEAS_LIST" 2>/dev/null
 }
 
-rm -f "$OVERSEAS_LIST"
+rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
 if download_overseas_from_cp && [[ -s "$OVERSEAS_LIST" ]]; then
   log "  overseas ip list downloaded from control plane"
 elif download_overseas_public "$OVERSEAS_URL_PRIMARY" && [[ -s "$OVERSEAS_LIST" ]]; then
@@ -1779,16 +1782,35 @@ else
 fi
 
 if [[ -s "$OVERSEAS_LIST" ]]; then
-  ipset flush overseas-ip 2>/dev/null || true
-  while IFS= read -r cidr; do
-    [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-    ipset add overseas-ip "$cidr" -exist || true
+  : > "$OVERSEAS_LIST_V4"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    cidr="$(echo "$line" | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$cidr" ]] && continue
+    [[ "$cidr" == *:* ]] && continue
+    [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]+$ ]] || continue
+    m="${cidr#*/}"
+    [[ "$m" =~ ^[0-9]+$ ]] || continue
+    [[ "$m" -le 32 ]] 2>/dev/null || continue
+    echo "$cidr" >> "$OVERSEAS_LIST_V4"
   done < "$OVERSEAS_LIST"
-  cp "$OVERSEAS_LIST" /etc/vpn-agent/overseas-ip-list.txt
-  rm -f "$OVERSEAS_LIST"
-  log "  overseas-ip ipset loaded"
+  orig_n="$(wc -l < "$OVERSEAS_LIST" | tr -d ' ')"
+  v4_n="$(wc -l < "$OVERSEAS_LIST_V4" 2>/dev/null | tr -d ' ')"
+  v4_n="${v4_n:-0}"
+  if [[ "${v4_n:-0}" -eq 0 && "${orig_n:-0}" -gt 0 ]]; then
+    log "  WARNING: overseas list had content but no valid IPv4 CIDR for ipset (e.g. IPv6-only source); overseas-ip cleared"
+  fi
+  ipset flush overseas-ip 2>/dev/null || true
+  if [[ -s "$OVERSEAS_LIST_V4" ]]; then
+    while IFS= read -r cidr; do
+      [[ -z "$cidr" ]] && continue
+      ipset add overseas-ip "$cidr" -exist 2>/dev/null || true
+    done < "$OVERSEAS_LIST_V4"
+  fi
+  cp "$OVERSEAS_LIST_V4" /etc/vpn-agent/overseas-ip-list.txt
+  rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
+  log "  overseas-ip ipset loaded (${v4_n} IPv4 prefixes)"
 else
-  rm -f "$OVERSEAS_LIST"
+  rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
   log "  WARNING: overseas ip list empty, skipped overseas-ip ipset population"
 fi
 
@@ -1925,6 +1947,9 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
 Description=OpenVPN instance - ${MODE}
 After=network-online.target vpn-routing.service
 Wants=network-online.target
+# StartLimit* 须在 [Unit]；放在 [Service] 时旧版 systemd 会忽略，导致失败时无限重启刷盘
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -1932,9 +1957,6 @@ ExecStart=/usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/$
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
-# 配置错误等会持续退出，避免每秒刷盘与 systemd 任务队列打满
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

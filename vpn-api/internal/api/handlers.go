@@ -1117,6 +1117,12 @@ func (h *Handler) refreshIPListArtifact(scope string) (*model.IPListArtifact, er
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if scope == "overseas" {
+			ip, _, err := net.ParseCIDR(line)
+			if err != nil || ip.To4() == nil {
+				continue
+			}
+		}
 		filtered = append(filtered, line)
 	}
 	if len(filtered) == 0 {

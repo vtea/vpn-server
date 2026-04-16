@@ -193,6 +193,7 @@ EASYRSA_BATCH=1 ./easyrsa gen-crl
 
 - **国内库**：写入 **`china-ip`** ipset；**`policy-routing.sh`** 用 **`cn-ip-list.txt`** 注入策略路由表；**`nat-rules.sh`** 对 `cn-split` 用 **`china-ip`** 匹配目的地址做 SNAT。即 **国内分流主路径依赖国内库**。
 - **海外库**：由 Agent（及安装脚本）维护 **`overseas-ip`** ipset 与列表文件；**当前生成的 `nat-rules.sh` / `policy-routing.sh` 未引用 `overseas-ip`**。若需按「海外列表」进一步改 NAT/路由，需另行设计规则链后再改脚本模板。
+- **海外库与 ipset 类型**：`overseas-ip` 为 **`hash:net`（仅 IPv4 CIDR）**。数据源须为 IPv4 段列表；若误用 **仅含 IPv6** 的文本（例如历史上的 `china6.txt`），`ipset add` 会大量报错且无法入库。控制面默认海外源已改为 **IPv4 国家聚合段**；存量库在控制面 **重启迁移** 时会将仍指向 `china6.txt` 的 `overseas` 源自动升级。控制面与 Agent 在写入制品时会对 **`overseas` 范围**丢弃非 IPv4 CIDR 行。
 
 环境变量 **`IPLIST_DUAL_ENABLED=false` 已被忽略**（控制面始终为双库）；若仍见旧文档请勿再关闭该能力。
 

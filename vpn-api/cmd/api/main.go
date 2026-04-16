@@ -295,6 +295,9 @@ func autoMigrateAndSeed(db *gorm.DB) error {
 	if err := ensureIPListSources(db); err != nil {
 		return err
 	}
+	if err := upgradeLegacyOverseasIPListSource(db); err != nil {
+		return err
+	}
 
 	now := time.Now()
 	if err := db.Model(&model.Node{}).
@@ -321,6 +324,32 @@ func autoMigrateAndSeed(db *gorm.DB) error {
 			return err
 		}
 		db.Create(&model.AuditLog{AdminUser: "system", Action: "seed_admin", Target: "admin", Detail: "created default admin account"})
+	}
+	return nil
+}
+
+// upgradeLegacyOverseasIPListSource 将误配的 china6.txt（IPv6）源改为 IPv4 段列表，避免节点 ipset hash:net 刷屏失败。
+func upgradeLegacyOverseasIPListSource(db *gorm.DB) error {
+	var src model.IPListSource
+	if err := db.Where("scope = ?", "overseas").First(&src).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !strings.Contains(src.PrimaryURL, "china6.txt") && !strings.Contains(src.MirrorURL, "china6.txt") {
+		return nil
+	}
+	res := db.Model(&model.IPListSource{}).Where("scope = ?", "overseas").Updates(map[string]any{
+		"primary_url":  "https://www.ipdeny.com/ipblocks/data/countries/us.zone",
+		"mirror_url":   "https://www.ipdeny.com/ipblocks/data/countries/jp.zone",
+		"max_time_sec": 120,
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("vpn-api: upgraded overseas IPListSource (removed china6 IPv6 URLs); run 分流规则「全网立即更新」以重建 overseas 制品")
 	}
 	return nil
 }
@@ -366,10 +395,10 @@ func ensureIPListSources(db *gorm.DB) error {
 		},
 		{
 			Scope:             "overseas",
-			PrimaryURL:        "https://cdn.jsdelivr.net/gh/gaoyifan/china-operator-ip/ip-lists/china6.txt",
-			MirrorURL:         "https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china6.txt",
+			PrimaryURL:        "https://www.ipdeny.com/ipblocks/data/countries/us.zone",
+			MirrorURL:         "https://www.ipdeny.com/ipblocks/data/countries/jp.zone",
 			ConnectTimeoutSec: 8,
-			MaxTimeSec:        30,
+			MaxTimeSec:        120,
 			RetryCount:        2,
 			Enabled:           true,
 		},
