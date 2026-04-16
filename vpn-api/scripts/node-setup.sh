@@ -1865,6 +1865,13 @@ for t in $(seq 0 $((TUNNEL_COUNT - 1))); do
   iptables -A VPN_FORWARD -i "wg-${PEER_ID}" -j ACCEPT
   iptables -A VPN_FORWARD -o "wg-${PEER_ID}" -j ACCEPT
 done
+
+# 邻节点经 WG 把流量送到本机、再从默认公网口转出时，源地址为隧道链路地址，不会命中上方
+# 「-s OpenVPN 子网」规则；出口节点须对 wg->WAN 再做 MASQUERADE，否则海外回程不可达。
+for t in $(seq 0 $((TUNNEL_COUNT - 1))); do
+  PEER_ID="$(jq -r ".tunnels[$t].peer_node_id" "$NODE_JSON_FILE")"
+  iptables -t nat -A VPN_POSTROUTING -i "wg-${PEER_ID}" -o "$DEFAULT_IF" -j MASQUERADE
+done
 NATRULES
 chmod +x /etc/vpn-agent/nat-rules.sh
 bash /etc/vpn-agent/nat-rules.sh || log "  WARNING: NAT rules apply failed"

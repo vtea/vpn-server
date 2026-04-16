@@ -153,6 +153,18 @@ if [[ "$ROLE" == "node" ]]; then
     warn "bootstrap missing: /etc/vpn-agent/bootstrap-node.json"
   fi
 
+  # 出口节点：邻节点经 wg->本机 WAN 须 MASQUERADE；旧 nat-rules.sh 无则海外经隧道全挂
+  if [[ -f /etc/vpn-agent/bootstrap-node.json ]] && command -v jq >/dev/null 2>&1; then
+    tun_n="$(jq '.tunnels | length' /etc/vpn-agent/bootstrap-node.json 2>/dev/null || echo 0)"
+    if [[ "${tun_n:-0}" =~ ^[0-9]+$ ]] && [[ "${tun_n:-0}" -gt 0 ]] && command -v iptables >/dev/null 2>&1; then
+      if iptables -t nat -S VPN_POSTROUTING 2>/dev/null | grep -qE '\-i wg-[^ ]+ .*\-j MASQUERADE'; then
+        ok "nat VPN_POSTROUTING: wg transit MASQUERADE present"
+      else
+        warn "nat VPN_POSTROUTING: no -i wg-... MASQUERADE (re-run node-setup.sh to refresh /etc/vpn-agent/nat-rules.sh for exit-node transit)"
+      fi
+    fi
+  fi
+
   if [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
     if [[ -s /etc/vpn-agent/cn-ip-list.txt ]]; then
       ok "cn-ip-list exists and non-empty"

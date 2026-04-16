@@ -76,6 +76,24 @@
 2. 在 **组网接入** 对应模式的 **出口节点** 下拉中选择该 ID（或清空），保存。API 会校验非空 `exit_node` 须为本节点某隧道的对端。
 3. **在线节点**：保存后控制面会通过 WebSocket 下发 `update_config`；**vpn-agent（新版本）** 会把 **`instances` 合并进 `/etc/vpn-agent/bootstrap-node.json`** 并 **`systemctl restart vpn-routing.service`**（执行 `policy-routing.sh` 与 `nat-rules.sh`），使 **出口节点 / 子网 / 启用** 与 `last-config.json` 一致。**若节点仍为旧版 Agent**，则须在入口机上 **重新执行** 安装脚本（或至少手动执行 `policy-routing.sh` / `nat-rules.sh`）。**注意**：`update_config` **不会**在 `server.conf` 中补写 `redirect-gateway` 或新建 OpenVPN 实例目录；从旧语义升级或**首次启用**某模式仍须在节点上重跑含 OpenVPN 配置生成的 **node-setup.sh** 步骤。
 
+#### 3.2.1 出口节点：隧道转发与出网 NAT（邻节点经本机出公网）
+
+**场景**：入口节点 A 上用户走 `cn-split` / `global` / `node-direct`+`exit_node`，策略路由把海外（或全部）流量经 **WireGuard 送到出口节点 B**，再由 B 访问公网。
+
+**要点**：B 上除「本机 OpenVPN 子网」的 NAT 外，还须对 **从 `wg-<对端节点ID>` 进入、从本机默认路由网卡转出** 的转发流量做 **MASQUERADE**。否则进入 B 的数据包源地址仍为隧道链路私网地址，公网回程不可达，表现为「直连 A 国内正常、直连 B 海外正常，但连 A 借 B 出口时海外全挂」。
+
+**脚本行为**：新版 `node-setup.sh` 生成的 `/etc/vpn-agent/nat-rules.sh` 会按 `bootstrap-node.json` 的每条隧道追加 `iptables -t nat -A VPN_POSTROUTING -i wg-<peer> -o <默认网卡> -j MASQUERADE`（与现有 `DEFAULT_IF` 检测一致；多 WAN 需自行评估是否改用固定出口接口）。
+
+**存量升级**：仅 **`systemctl restart vpn-routing.service`** 会重跑磁盘上**已有**的 `nat-rules.sh`；若该文件仍是旧模板（无上述 `wg-*` MASQUERADE），重启**不会**自动补规则。请在**出口节点及有隧道的节点**上 **重跑 `node-setup.sh`（或你们约定的部署步骤）** 以重新生成 `nat-rules.sh`，再执行 `systemctl restart vpn-routing.service` 或依赖 Agent 的 `vpn-routing` 重启。
+
+**验证（在出口 B 上）**：
+
+```bash
+iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
+```
+
+应能看到每条隧道对应一条 `-i wg-<节点ID> -o <网卡> -j MASQUERADE`。在入口 A 上仍可用 §4 的 `ip route get 8.8.8.8`（结合客户端 VPN 源地址）确认海外走隧道。
+
 ### 3.3 新建节点默认启用与存量升级
 
 **新建节点（当前版本）**：控制面为每个节点创建三套实例，但 **`enabled` 仅 `node-direct` 为 true**；`cn-split` / `global` 默认关闭。管理员在 Web **组网接入** 中**首次勾选启用**其它模式并保存后，须在节点上 **重新执行 `node-setup.sh`**，以便生成对应 **`server.conf`**、systemd 单元及监听；**已部署节点**上若仅调整 **出口 / 子网 / 启用**（实例已存在），在线 **新版 Agent** 在收到 `update_config` 后会合并 `bootstrap` 并重跑 **vpn-routing**；**从未生成过该模式的 `server.conf`** 时仍须重跑安装脚本。

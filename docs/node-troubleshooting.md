@@ -98,6 +98,18 @@ tcpdump -ni any udp port 1194
 - 抓到入站但无握手：本机服务或本机防火墙问题；
 - 有完整握手但业务仍异常：进一步检查策略路由/NAT。
 
+### 3) 入口经隧道走出口节点时「海外全挂」、两端各自直连却正常
+
+**常见根因**：出口节点上 **未对「从 `wg-<对端ID>` 入、从公网口出」的转发流量做 MASQUERADE**，公网回程地址非法。
+
+**在出口节点执行**：
+
+```bash
+iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
+```
+
+若仅有 `-s <OpenVPN 子网>` 而无 `-i wg-... -j MASQUERADE`，请 **重跑 `node-setup.sh`** 以重新生成 `/etc/vpn-agent/nat-rules.sh`，再 `systemctl restart vpn-routing.service`。详见 [operations.md](operations.md) 小节「3.2.1 出口节点：隧道转发与出网 NAT」。
+
 ## 五、云安全组最小放行建议
 
 - OpenVPN：按实例实际端口放行 UDP（例如 `1194/udp` 或 `56710-56712/udp`）。
