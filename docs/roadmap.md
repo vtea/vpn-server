@@ -101,7 +101,7 @@
 
 | # | 任务 | 产出 | 验收标准 |
 |---|------|------|----------|
-| 3.1 | 项目初始化（Vite + Vue3 + Element Plus + Router + Pinia） | vpn-admin-web/ | `npm run dev` 启动 |
+| 3.1 | 项目初始化（Vite + Vue3 + Element Plus + Router + Pinia） | vpn-web/ | `npm run dev` 启动 |
 | 3.2 | 登录页 | Login.vue | 输入账号密码登录成功 |
 | 3.3 | 整体布局（侧边栏 + 顶栏 + 主内容区） | App.vue | 导航切换正常 |
 | 3.4 | 仪表盘页面 | Dashboard.vue | 显示在线用户数、节点状态、最近操作 |

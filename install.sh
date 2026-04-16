@@ -69,7 +69,7 @@ for arg in "$@"; do
 项目结构:
   install.sh              ← 你在这里
   vpn-api/                ← Go 后端 + Agent 源码
-  vpn-admin-web/          ← Vue3 前端源码
+  vpn-web/                ← Vue3 前端源码
   docs/                   ← 架构文档、运维手册、用户指南、ports.md（默认端口）
 ═══════════════════════════════════════════════════════════════
 HELP
@@ -96,7 +96,7 @@ if [[ ! -d "$SCRIPT_DIR/vpn-api" ]]; then
   echo "  $(basename "$SCRIPT_DIR")/"
   echo "  ├── install.sh        ← 当前脚本"
   echo "  ├── vpn-api/"
-  echo "  ├── vpn-admin-web/"
+  echo "  ├── vpn-web/"
   echo "  └── docs/"
   exit 1
 fi

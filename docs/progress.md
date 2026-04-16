@@ -35,7 +35,7 @@
 | `internal/middleware/auth.go` | JWT 认证中间件 | ✅ |
 | `internal/config/config.go` | 环境变量配置加载 | ✅ |
 
-### 前端 (`vpn-admin-web/`)
+### 前端 (`vpn-web/`)
 
 | 文件 | 功能 | 状态 |
 |------|------|------|
@@ -271,7 +271,7 @@ go mod tidy
 go run ./cmd/api          # 启动 API（默认 :56700）
 
 # 2. 前端
-cd vpn-admin-web
+cd vpn-web
 npm install
 npm run dev               # 启动开发服务器（默认 :56701，代理 /api 到 :56700）
 

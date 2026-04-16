@@ -990,7 +990,7 @@ EOF
 ## 七、Vue 3 前端项目结构（P3）
 
 ```
-vpn-admin-web/
+vpn-web/
 ├── src/
 │   ├── api/
 │   │   ├── auth.ts

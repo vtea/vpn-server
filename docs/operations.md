@@ -201,7 +201,7 @@ systemctl start vpn-api
 ## 11. 控制面迁移
 
 1. 备份数据库：`bash scripts/backup.sh`
-2. 在新机器上部署 vpn-api 和 vpn-admin-web
+2. 在新机器上部署 vpn-api 和 vpn-web
 3. 恢复数据库
 4. 更新 DNS 指向新机器
 5. 所有节点 Agent 会自动重连（通过 DNS 解析到新地址）

@@ -127,7 +127,7 @@
 </template>
 
 <script setup>
-import { computed, ref, reactive, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import router from './router'
@@ -231,6 +231,15 @@ const hasPerm = (module) => {
   if (!info.perms) return false
   return info.perms.split(',').map(s => s.trim()).includes(module)
 }
+
+watch(
+  () => route.path,
+  () => {
+    if (isMobile.value && !isCollapsed.value) {
+      isCollapsed.value = true
+    }
+  }
+)
 
 onMounted(async () => {
   syncCollapsedForViewport()

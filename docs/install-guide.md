@@ -191,7 +191,7 @@ bash install.sh --domain vpn.company.com --yes
 ```
 /opt/vpn-api/
 ├── vpn-api/              # Go 源码（编译用）
-├── vpn-admin-web/        # Vue 源码（构建用）
+├── vpn-web/              # Vue 源码（构建用）
 ├── data/
 │   └── vpn.db            # SQLite 数据库
 ├── ca/

@@ -40,7 +40,7 @@ bash install.sh --help
 └──────┬──────┘               └──────────────┘               └──────────────┘
        │ HTTP/HTTPS
 ┌──────┴──────┐
-│ vpn-admin-web│  Vue3 + Element Plus
+│ vpn-web      │  Vue3 + Element Plus
 │ Web 管理端   │
 └─────────────┘
 ```
@@ -118,7 +118,7 @@ journalctl -u vpn-agent -f
 
 ## 前后端分离部署
 
-适用于 `vpn-api` 与 `vpn-admin-web` 分别部署在不同域名/主机的场景。
+适用于 `vpn-api` 与 `vpn-web` 分别部署在不同域名/主机的场景。
 
 ### 1) API 侧配置（CORS）
 
@@ -136,16 +136,16 @@ export EXTERNAL_URL="https://api.example.com"
 
 ### 2) 前端侧构建（指定 API 根地址）
 
-在 `vpn-admin-web` 构建前指定 API 地址：
+在 `vpn-web` 构建前指定 API 地址：
 
 ```bash
-cd vpn-admin-web
+cd vpn-web
 export VITE_API_BASE_URL="https://api.example.com"
 npm install
 npm run build
 ```
 
-构建产物在 `vpn-admin-web/dist/`，可部署到 Nginx/Caddy/静态站点服务。
+构建产物在 `vpn-web/dist/`，可部署到 Nginx/Caddy/静态站点服务。
 
 ### 3) 反向代理建议
 
@@ -165,7 +165,7 @@ Nginx 参考配置见：`docs/nginx-control-plane.example.conf`。
 │   ├── internal/                   # 业务逻辑
 │   ├── scripts/                    # 控制面/节点/备份/打包脚本
 │   └── docs/deploy-manual.md       # 手工打包部署
-├── vpn-admin-web/                  # Vue3 前端（src/、dist/）
+├── vpn-web/                        # Vue3 前端（src/、dist/）
 ├── docs/
 │   ├── ports.md
 │   ├── install-guide.md

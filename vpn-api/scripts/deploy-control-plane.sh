@@ -52,7 +52,7 @@ Options:
   --skip-frontend       Skip Vue frontend build
   --jwt-secret SECRET   Set JWT secret (auto-generated if omitted)
   --cors-origins LIST   Set CORS_ALLOWED_ORIGINS (逗号分隔，默认 *)
-  --source-dir DIR      指定源码包根目录（其下须有 vpn-api/go.mod，即含 vpn-api/、vpn-admin-web/ 的那一层）
+  --source-dir DIR      指定源码包根目录（其下须有 vpn-api/go.mod，即含 vpn-api/、vpn-web/ 的那一层；旧包若仅有 vpn-admin-web/ 仍可构建）
   --cwd-source          仅当当前目录下存在 vpn-api/go.mod 时，将 PWD 作为候选源码根（cd 到 A 仓库却用他处脚本绝对路径时加此项）
   --prefer-installed    优先使用 /opt/vpn-api 内已有源码（旧行为）；升级覆盖时请勿加此项，或配合 --source-dir
   --http-proxy URL      安装依赖时使用 HTTP(S) 代理（apt/curl/wget；例 http://127.0.0.1:8080）
@@ -1387,7 +1387,13 @@ build_frontend() {
     log "非交互模式默认构建前端（如需跳过请使用 --skip-frontend）"
   fi
 
-  if [[ "$SKIP_FRONTEND" -eq 1 ]] || [[ ! -d "$INSTALL_DIR/vpn-admin-web/src" ]]; then
+  local _fe_dir=""
+  if [[ -d "$INSTALL_DIR/vpn-web/src" ]]; then
+    _fe_dir="vpn-web"
+  elif [[ -d "$INSTALL_DIR/vpn-admin-web/src" ]]; then
+    _fe_dir="vpn-admin-web"
+  fi
+  if [[ "$SKIP_FRONTEND" -eq 1 ]] || [[ -z "$_fe_dir" ]]; then
     log "Phase 3b: 跳过前端构建"
     return
   fi
@@ -1395,8 +1401,8 @@ build_frontend() {
     warn "Node.js 不可用，跳过前端"; return
   fi
 
-  log "Phase 3b: 构建前端 ..."
-  cd "$INSTALL_DIR/vpn-admin-web"
+  log "Phase 3b: 构建前端 ($_fe_dir) ..."
+  cd "$INSTALL_DIR/$_fe_dir"
 
   local vite_entry="./node_modules/vite/bin/vite.js"
   if command -v npm >/dev/null 2>&1; then

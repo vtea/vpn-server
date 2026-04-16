@@ -1,5 +1,5 @@
 {
-  "name": "vpn-admin-web",
+  "name": "vpn-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",

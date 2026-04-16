@@ -9,7 +9,7 @@
 | 组件 | 要求 |
 |------|------|
 | **vpn-api** | Go **1.21+**（以 `vpn-api/go.mod` 为准） |
-| **vpn-admin-web** | **Node.js 18+**、**npm** 或 **pnpm** |
+| **vpn-web** | **Node.js 18+**、**npm** 或 **pnpm** |
 
 ---
 
@@ -70,14 +70,14 @@ GET http://127.0.0.1:56700/api/health
 
 ---
 
-## 二、编译与运行：vpn-admin-web（管理台前端）
+## 二、编译与运行：vpn-web（管理台前端）
 
-源码目录：`vpn-admin-web/`。
+源码目录：`vpn-web/`。
 
 ### 2.1 安装依赖
 
 ```bash
-cd vpn-admin-web
+cd vpn-web
 npm install
 ```
 
@@ -87,7 +87,7 @@ npm install
 npm run build
 ```
 
-产物在 **`vpn-admin-web/dist/`**，由 Nginx/Caddy 或 `install.sh` 部署到站点根目录。
+产物在 **`vpn-web/dist/`**，由 Nginx/Caddy 或 `install.sh` 部署到站点根目录。
 
 构建前若 API 与页面**不同源**，需设置 API 根地址（见下）。
 
@@ -122,7 +122,7 @@ npm run dev
 | 终端 | 目录 | 命令 |
 |------|------|------|
 | A | `vpn-api` | `go run ./cmd/api` |
-| B | `vpn-admin-web` | `npm run dev` |
+| B | `vpn-web` | `npm run dev` |
 
 登录默认账号（若未改种子数据）：**admin** / **admin123**。
 
@@ -140,7 +140,7 @@ npm run dev
 
 | 现象 | 处理 |
 |------|------|
-| `npm run dev` 在 `vpn-api` 下报找不到 `package.json` | API 是 Go 项目，请进入 **`vpn-admin-web`** 再执行 npm 命令。 |
+| `npm run dev` 在 `vpn-api` 下报找不到 `package.json` | API 是 Go 项目，请进入 **`vpn-web`** 再执行 npm 命令。 |
 | 前端请求 `/api/...` 返回 **404** | 开发时 API 应跑在 **56700**；确认 Vite 代理或 `VITE_API_BASE_URL` 指向 API，且未把 56701 填成 API 地址。 |
 | 新接口（如 `POST /api/nodes/:id/rotate-bootstrap-token`）始终 **404**，但 `GET /api/health` 正常 | **56700 上的进程仍是旧二进制**：结束旧 `vpn-api`/`go run` 后重新编译并启动。自检：无 JWT 时 `POST` 该地址应返回 **401**（缺 Bearer），若仍为 **404** 则路由未加载，必为旧进程。 |
 | 页面**一直转圈加载** | 多为 API 未启动或地址错误导致请求挂起。前端已对 Axios 设置约 **45s 超时**，超时后会提示并结束 loading；请仍确保 **vpn-api 在 56700 运行**。 |
