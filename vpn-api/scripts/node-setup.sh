@@ -131,6 +131,44 @@ vpn_ipset_per_line_add_from_cidr_file() {
   done < "$list_file"
 }
 
+# hash:net 默认 maxelem 常为 65536；完整 us.zone 过滤后可达 7 万+，整批 restore 会因集合满失败。
+vpn_ipset_recreate_hash_net_large() {
+  local set_name="$1"
+  ipset destroy "$set_name" 2>/dev/null || true
+  ipset create "$set_name" hash:net family inet hashsize 65536 maxelem 2621440
+}
+
+# 仅 add 行，分块 ipset restore；比 shell 逐条 ipset add 快数量级
+vpn_ipset_chunked_add_from_cidr_file() {
+  local set_name="$1"
+  local list_file="$2"
+  local batch chunk=12000 n=0
+  [[ -s "$list_file" ]] || return 0
+  batch="$(mktemp)" || return 1
+  : > "$batch"
+  while IFS= read -r cidr || [[ -n "$cidr" ]]; do
+    [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+    echo "add ${set_name} ${cidr}" >> "$batch"
+    n=$((n + 1))
+    if [[ "$n" -ge "$chunk" ]]; then
+      if ! ipset restore -exist < "$batch"; then
+        rm -f "$batch"
+        return 1
+      fi
+      : > "$batch"
+      n=0
+    fi
+  done < "$list_file"
+  if [[ -s "$batch" ]]; then
+    if ! ipset restore -exist < "$batch"; then
+      rm -f "$batch"
+      return 1
+    fi
+  fi
+  rm -f "$batch"
+  return 0
+}
+
 TOTAL_STEPS=9
 LEGACY_OPENVPN_UNITS=(
   "openvpn-server@server.service"
@@ -771,8 +809,8 @@ verify_required_ports_listening_file() {
     fi
     listeners=""
     tries=0
-    # openvpn 刚启动后监听建立可能有短暂延迟，做短重试避免瞬时误判
-    while [[ "$tries" -lt 3 ]]; do
+    # openvpn 刚启动后监听建立可能有短暂延迟；vpn-agent 重启后 try-restart OpenVPN 也会短暂无监听
+    while [[ "$tries" -lt 15 ]]; do
       if [[ "$proto" == "tcp" ]]; then
         listeners="$(ss -H -tlnp "( sport = :${port} )" 2>/dev/null || true)"
       else
@@ -800,7 +838,7 @@ verify_required_ports_listening_file() {
 
 post_deploy_health_check() {
   local f="$1"
-  local errors mode inst_en ic i
+  local errors mode inst_en ic i ov_ok j
   errors=0
   echo ""
   log "部署后健康检查 ..."
@@ -829,10 +867,18 @@ post_deploy_health_check() {
       warn "服务健康跳过: openvpn-${mode}.service（管理员选择跳过）"
       continue
     fi
-    if systemctl is-active --quiet "openvpn-${mode}.service"; then
+    ov_ok=0
+    for j in $(seq 1 25); do
+      if systemctl is-active --quiet "openvpn-${mode}.service"; then
+        ov_ok=1
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$ov_ok" -eq 1 ]]; then
       ok "服务健康: openvpn-${mode}.service"
     else
-      fail "服务异常: openvpn-${mode}.service"
+      fail "服务异常: openvpn-${mode}.service（25s 内未变为 active，可能因 vpn-agent 收到 update_config 后 try-restart 较慢）"
       errors=$((errors + 1))
     fi
   done
@@ -1762,7 +1808,7 @@ bash /etc/vpn-agent/policy-routing.sh || log "  WARNING: policy routing setup in
 
 log "Step 7/${TOTAL_STEPS}: Configuring NAT rules ..."
 
-ipset create china-ip hash:net -exist
+vpn_ipset_recreate_hash_net_large china-ip
 
 CHINA_LIST="/tmp/china_ip_list.txt"
 CHINA_LIST_URL_DEFAULT="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
@@ -1819,10 +1865,16 @@ if [[ -s "$CHINA_LIST" ]]; then
   if vpn_ipset_flush_and_restore_from_cidr_file "china-ip" "$CHINA_LIST"; then
     log "  china-ip ipset loaded (ipset restore)"
   else
-    warn "  china-ip: ipset restore failed, using slower per-line add"
+    warn "  china-ip: full restore failed, trying chunked restore"
     ipset flush china-ip 2>/dev/null || true
-    vpn_ipset_per_line_add_from_cidr_file "china-ip" "$CHINA_LIST"
-    log "  china-ip ipset loaded (per-line fallback)"
+    if vpn_ipset_chunked_add_from_cidr_file "china-ip" "$CHINA_LIST"; then
+      log "  china-ip ipset loaded (chunked restore)"
+    else
+      warn "  china-ip: chunked restore failed, per-line add (slow)"
+      ipset flush china-ip 2>/dev/null || true
+      vpn_ipset_per_line_add_from_cidr_file "china-ip" "$CHINA_LIST"
+      log "  china-ip ipset loaded (per-line fallback)"
+    fi
   fi
   cp "$CHINA_LIST" /etc/vpn-agent/cn-ip-list.txt
   rm -f "$CHINA_LIST"
@@ -1838,8 +1890,6 @@ OVERSEAS_LIST_V4="/tmp/overseas_ip_list_v4.txt"
 # 公网 IPv4 聚合段（示例：美国 / 日本），供 hash:net；管理员可在控制面改「分流规则」数据源
 OVERSEAS_URL_PRIMARY="https://www.ipdeny.com/ipblocks/data/countries/us.zone"
 OVERSEAS_URL_MIRROR="https://www.ipdeny.com/ipblocks/data/countries/jp.zone"
-
-ipset create overseas-ip hash:net -exist
 
 download_overseas_from_cp() {
   [[ -z "${API_URL:-}" ]] && return 1
@@ -1857,6 +1907,14 @@ vpn_filter_overseas_list_to_v4_file() {
   local src="$1"
   local dst="$2"
   awk '
+    function ipv4_ok(ip, a, i) {
+      if (split(ip, a, ".") != 4) return 0
+      for (i = 1; i <= 4; i++) {
+        if (a[i] !~ /^[0-9]+$/) return 0
+        if (a[i] + 0 > 255) return 0
+      }
+      return 1
+    }
     /^[[:space:]]*#/ { next }
     {
       line = $0
@@ -1864,11 +1922,12 @@ vpn_filter_overseas_list_to_v4_file() {
       gsub(/\r/, "", line)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
       if (line == "" || index(line, ":") > 0) next
-      if (line ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}\/[0-9]+$/) {
-        pfx = line
-        sub(/^.*\//, "", pfx)
-        if (pfx ~ /^[0-9]+$/ && pfx + 0 <= 32) print line
-      }
+      if (line !~ /^[0-9.]+\/[0-9]+$/) next
+      split(line, ap, "/")
+      if (!ipv4_ok(ap[1])) next
+      if (ap[2] !~ /^[0-9]+$/) next
+      if (ap[2] + 0 > 32) next
+      print line
     }
   ' "$src" > "$dst"
 }
@@ -1892,13 +1951,21 @@ if [[ -s "$OVERSEAS_LIST" ]]; then
   if [[ "${v4_n:-0}" -eq 0 && "${orig_n:-0}" -gt 0 ]]; then
     log "  WARNING: overseas list had content but no valid IPv4 CIDR for ipset (e.g. IPv6-only source); overseas-ip cleared"
   fi
-  ipset flush overseas-ip 2>/dev/null || true
   if [[ -s "$OVERSEAS_LIST_V4" ]]; then
-    if ! vpn_ipset_flush_and_restore_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
-      warn "  overseas-ip: ipset restore failed, using slower per-line add"
+    vpn_ipset_recreate_hash_net_large overseas-ip
+    if vpn_ipset_flush_and_restore_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
+      :
+    else
+      warn "  overseas-ip: full restore failed; trying chunked restore (avoid default maxelem 65536)"
       ipset flush overseas-ip 2>/dev/null || true
-      vpn_ipset_per_line_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"
+      if ! vpn_ipset_chunked_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
+        warn "  overseas-ip: chunked restore failed, per-line add (very slow)"
+        ipset flush overseas-ip 2>/dev/null || true
+        vpn_ipset_per_line_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"
+      fi
     fi
+  else
+    ipset flush overseas-ip 2>/dev/null || true
   fi
   cp "$OVERSEAS_LIST_V4" /etc/vpn-agent/overseas-ip-list.txt
   rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
