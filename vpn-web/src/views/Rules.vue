@@ -14,45 +14,68 @@
         </el-button>
         </div>
       </div>
-      <el-table :data="ipListRows" v-loading="loadingIP" stripe size="small">
-        <el-table-column prop="node_id" label="节点" min-width="120" />
-        <el-table-column prop="domestic_version" label="国内版本" min-width="120" />
-        <el-table-column prop="domestic_entry_count" label="国内条目数" width="110" align="center" />
-        <el-table-column prop="domestic_last_update_at" label="国内更新时间" min-width="160">
-          <template #default="{ row }">{{ formatDate(row.domestic_last_update_at) }}</template>
-        </el-table-column>
-        <el-table-column prop="overseas_version" label="海外版本" min-width="120" />
-        <el-table-column prop="overseas_entry_count" label="海外条目数" width="110" align="center" />
-        <el-table-column prop="overseas_last_update_at" label="海外更新时间" min-width="160">
-          <template #default="{ row }">{{ formatDate(row.overseas_last_update_at) }}</template>
-        </el-table-column>
-      </el-table>
-      <el-empty v-if="!loadingIP && !ipListRows.length" description="暂无 IP 库数据" :image-size="60" />
+      <div v-loading="loadingIP" class="record-grid">
+        <div v-for="row in ipListRows" :key="row.node_id" class="record-card">
+          <div class="record-card__head">
+            <div class="record-card__title mono-text min-w-0">{{ row.node_id }}</div>
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">国内版本</span>
+              <span class="kv-value">{{ row.domestic_version || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">国内条目 / 更新</span>
+              <span class="kv-value">{{ row.domestic_entry_count ?? 0 }} · {{ formatDate(row.domestic_last_update_at) }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">海外版本</span>
+              <span class="kv-value">{{ row.overseas_version || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">海外条目 / 更新</span>
+              <span class="kv-value">{{ row.overseas_entry_count ?? 0 }} · {{ formatDate(row.overseas_last_update_at) }}</span>
+            </div>
+          </div>
+        </div>
+        <el-empty v-if="!loadingIP && !ipListRows.length" description="暂无 IP 库数据" :image-size="60" />
+      </div>
     </div>
 
     <div v-if="sourceApiSupported" class="page-card mb-md">
       <div class="page-card-header">
         <span class="page-card-title">IP 库同步源配置</span>
       </div>
-      <el-table :data="ipSources" v-loading="loadingSources" stripe size="small">
-        <el-table-column prop="scope" label="库类型" width="100">
-          <template #default="{ row }">{{ row.scope === 'domestic' ? '国内库' : '海外库' }}</template>
-        </el-table-column>
-        <el-table-column prop="primary_url" label="主地址" min-width="220" />
-        <el-table-column prop="mirror_url" label="镜像地址" min-width="220" />
-        <el-table-column prop="max_time_sec" label="超时(s)" width="90" />
-        <el-table-column prop="retry_count" label="重试" width="80" />
-        <el-table-column prop="enabled" label="启用" width="80" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '是' : '否' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="120" align="center">
-          <template #default="{ row }">
+      <div v-loading="loadingSources" class="record-grid record-grid--single">
+        <div
+          v-for="row in ipSources"
+          :key="row.scope"
+          class="record-card"
+          :class="recordCardToneFromTagType(row.enabled ? 'success' : 'info')"
+        >
+          <div class="record-card__head">
+            <div class="record-card__title">{{ row.scope === 'domestic' ? '国内库' : '海外库' }}</div>
+            <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '关闭' }}</el-tag>
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">主地址</span>
+              <span class="kv-value">{{ row.primary_url || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">镜像</span>
+              <span class="kv-value">{{ row.mirror_url || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">超时 / 重试</span>
+              <span class="kv-value">{{ row.max_time_sec ?? '—' }}s · {{ row.retry_count ?? '—' }} 次</span>
+            </div>
+          </div>
+          <div class="record-card__actions">
             <el-button size="small" @click="openEditSource(row)">编辑</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+      </div>
     </div>
     <div v-else class="page-card mb-md">
       <el-alert
@@ -70,19 +93,34 @@
           <el-icon><Plus /></el-icon> 添加规则
         </el-button>
       </div>
-      <el-table :data="exceptions" v-loading="loadingEx" stripe size="small">
-        <el-table-column prop="cidr" label="IP 段" min-width="140" />
-        <el-table-column prop="domain" label="域名" min-width="140" />
-        <el-table-column prop="direction" label="方向" width="100">
-          <template #default="{ row }">
+      <div v-loading="loadingEx" class="record-grid">
+        <div
+          v-for="row in exceptions"
+          :key="row.id"
+          class="record-card"
+          :class="recordCardToneFromTagType(row.direction === 'foreign' ? 'warning' : 'success')"
+        >
+          <div class="record-card__head">
+            <div class="record-card__title mono-text min-w-0">{{ row.cidr || row.domain || '例外规则' }}</div>
             <el-tag :type="row.direction === 'foreign' ? 'warning' : 'success'" size="small">
               {{ row.direction === 'foreign' ? '走境外' : '走国内' }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="note" label="备注" min-width="120" />
-        <el-table-column label="操作" width="90" align="center" class-name="op-col">
-          <template #default="{ row }">
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">IP 段</span>
+              <span class="kv-value mono-text">{{ row.cidr || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">域名</span>
+              <span class="kv-value">{{ row.domain || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">备注</span>
+              <span class="kv-value">{{ row.note || '—' }}</span>
+            </div>
+          </div>
+          <div class="record-card__actions">
             <el-popconfirm title="删除此规则？" @confirm="deleteEx(row.id)">
               <template #reference>
                 <el-button size="small" plain type="danger">
@@ -90,10 +128,10 @@
                 </el-button>
               </template>
             </el-popconfirm>
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-empty v-if="!loadingEx && !exceptions.length" description="暂无例外规则" :image-size="60" />
+          </div>
+        </div>
+        <el-empty v-if="!loadingEx && !exceptions.length" description="暂无例外规则" :image-size="60" />
+      </div>
     </div>
 
     <el-dialog v-model="showAddEx" title="添加例外规则" width="min(480px, 92vw)" destroy-on-close class="rules-dialog">
@@ -153,7 +191,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
-import { formatDate } from '../utils'
+import { formatDate, recordCardToneFromTagType } from '../utils'
 
 const ipListRows = ref([])
 const loadingIP = ref(false)
@@ -233,9 +271,21 @@ const loadEx = async () => {
 const triggerUpdate = async () => {
   updating.value = true
   try {
-    const scope = sourceApiSupported.value ? updateScope.value : 'domestic'
-    await http.post('/api/ip-list/update', { scope })
-    ElMessage.success('更新指令已下发')
+    const scope = sourceApiSupported.value ? updateScope.value : 'all'
+    const resp = await http.post('/api/ip-list/update', { scope })
+    const sent = resp.data?.sent_to
+    const total = resp.data?.total_nodes
+    if (typeof sent === 'number' && typeof total === 'number') {
+      if (sent === 0) {
+        ElMessage.warning(
+          `没有 WebSocket 在线的节点（0 / ${total}），指令未下发。请确认各节点 vpn-agent 已运行且能连上控制面。`
+        )
+      } else {
+        ElMessage.success(`更新指令已下发（在线 ${sent} / 共 ${total} 节点）`)
+      }
+    } else {
+      ElMessage.success('更新指令已下发')
+    }
     setTimeout(loadIP, 3000)
   } finally {
     updating.value = false
@@ -304,10 +354,6 @@ onMounted(() => {
   }
   .rules-header-btn {
     flex: 1;
-  }
-  .page-card :deep(.el-table__cell),
-  .page-card :deep(.el-table .el-button) {
-    white-space: nowrap;
   }
   .rules-dialog :deep(.el-dialog__body) {
     padding: 12px;

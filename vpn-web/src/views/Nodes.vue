@@ -28,72 +28,95 @@
         <el-text type="info" size="small">共 {{ filteredRows.length }} 个节点</el-text>
       </div>
 
-      <el-table :data="filteredRows" v-loading="loading" stripe>
-        <el-table-column prop="node.name" label="名称" min-width="120">
-          <template #default="{ row }">
-            <el-link type="primary" @click="$router.push(`/nodes/${row.node.id}`)">
-              {{ row.node.name }}
-            </el-link>
-          </template>
-        </el-table-column>
-        <el-table-column prop="node.region" label="地域" width="100" />
-        <el-table-column prop="node.public_ip" label="公网地址" width="180" />
-        <el-table-column prop="node.node_number" label="节点号" width="80" align="center" />
-        <el-table-column prop="node.status" label="状态" width="90">
-          <template #default="{ row }">
-            <span>
-              <span class="status-dot" :class="`status-dot--${row.node.status}`" />
-              {{ getStatusInfo('node', row.node.status).label }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="node.online_users" label="在线" width="70" align="center" />
-        <el-table-column label="Agent版本" width="220">
-          <template #default="{ row }">
-            <span>{{ displayAgentVersion(row.node?.agent_version) || '-' }}</span>
-            <el-text v-if="row.node?.agent_arch" type="info" size="small"> / {{ row.node.agent_arch }}</el-text>
-            <el-text type="info" size="small"> (latest: {{ latestAgentVersion || '-' }})</el-text>
-          </template>
-        </el-table-column>
-        <el-table-column label="升级提示" width="120" align="center">
-          <template #default="{ row }">
-            <el-tag
-              size="small"
-              :type="agentUpgradeHintType(row.node?.agent_version)"
-              :style="{ cursor: agentUpgradeHintText(row.node?.agent_version) === '需更新' ? 'pointer' : 'default' }"
-              @click="openUpgradeIfNeeded(row)"
-            >
-              {{ agentUpgradeHintText(row.node?.agent_version) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="接入/网段" min-width="220">
-          <template #default="{ row }">
-            <el-tag
-              v-for="inst in enabledInstances(row.instances)"
-              :key="inst.id"
-              size="small"
-              class="instance-tag"
-            >
-              {{ inst.segment_id || 'default' }} · {{ modeLabel(inst.mode) }} {{ (inst.proto || 'udp').toUpperCase() }}/{{ inst.port }}
-            </el-tag>
-            <el-text v-if="!enabledInstances(row.instances).length" type="info" size="small">暂无</el-text>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="260" align="center" class-name="op-col">
-          <template #default="{ row }">
-            <el-button size="small" plain @click="refreshWG(row.node)">
-              刷新WG
-            </el-button>
+      <div v-loading="loading" class="record-grid">
+        <div
+          v-for="row in filteredRows"
+          :key="row.node.id"
+          class="record-card node-list-card"
+          :class="recordCardToneClass('node', row.node.status)"
+        >
+          <div class="record-card__head">
+            <div class="min-w-0">
+              <div class="record-card__title record-card__title--with-node-num">
+                <el-link type="primary" @click="$router.push(`/nodes/${row.node.id}`)">
+                  {{ row.node.name }}
+                </el-link>
+                <span
+                  v-if="row.node.node_number != null && row.node.node_number !== ''"
+                  class="node-title-node-number"
+                >
+                  · {{ row.node.node_number }}
+                </span>
+              </div>
+              <div class="record-card__meta">
+                {{ row.node.region || '—' }}
+                <span v-if="row.node.public_ip"> · {{ row.node.public_ip }}</span>
+              </div>
+            </div>
+            <div class="record-card__head-aside">
+              <el-tooltip
+                v-if="agentUpgradeHintText(row.node?.agent_version) !== '已最新'"
+                placement="top"
+                :content="agentVersionTooltip(row.node)"
+              >
+                <el-tag
+                  size="small"
+                  :type="agentUpgradeHintType(row.node?.agent_version)"
+                  :style="{ cursor: agentUpgradeHintText(row.node?.agent_version) === '需更新' ? 'pointer' : 'default' }"
+                  class="node-agent-status-tag"
+                  @click="openUpgradeIfNeeded(row)"
+                >
+                  {{ agentUpgradeHintText(row.node?.agent_version) }}
+                </el-tag>
+              </el-tooltip>
+              <el-tooltip
+                placement="top"
+                :content="`${getStatusInfo('node', row.node.status).label}，在线用户 ${row.node.online_users ?? 0}`"
+              >
+                <span class="node-user-orbit-tooltip">
+                  <span
+                    class="node-user-orbit-wrap"
+                    :class="
+                      isNodeOnline(row.node.status) ? 'node-user-orbit-wrap--online' : 'node-user-orbit-wrap--offline'
+                    "
+                  >
+                    <span v-if="isNodeOnline(row.node.status)" class="node-user-orbit-spin" aria-hidden="true" />
+                    <span
+                      class="node-user-orbit-inner"
+                      :class="nodeUserOrbitSizeClass(row.node.online_users)"
+                    ><span class="node-user-orbit-num">{{ row.node.online_users ?? 0 }}</span></span>
+                  </span>
+                </span>
+              </el-tooltip>
+            </div>
+          </div>
+          <div class="record-card__tags record-card__tags--node-list">
+            <template v-if="enabledInstances(row.instances).length">
+              <el-tooltip
+                v-for="inst in enabledInstances(row.instances)"
+                :key="inst.id"
+                placement="top"
+                :content="instanceTagTooltip(inst)"
+              >
+                <el-tag size="small" class="instance-tag">
+                  {{ instanceTagLabel(inst) }}
+                </el-tag>
+              </el-tooltip>
+            </template>
+            <el-text v-else type="info" size="small">暂无已启用接入</el-text>
+          </div>
+          <div class="record-card__actions">
+            <el-button size="small" plain @click="refreshWG(row.node)">刷新WG</el-button>
             <el-button size="small" type="primary" plain @click="$router.push(`/nodes/${row.node.id}`)">
               <el-icon><EditPen /></el-icon> 编辑
             </el-button>
             <el-button size="small" type="danger" plain @click="openDeleteDialog(row.node)">
               <el-icon><Delete /></el-icon> 删除
             </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !filteredRows.length" description="暂无节点" :image-size="60" />
+      </div>
     </div>
 
     <el-dialog v-model="showAdd" title="添加节点" width="520px" destroy-on-close>
@@ -174,26 +197,42 @@
       <el-alert v-if="upgradeTask.id" type="info" :closable="false" show-icon style="margin-bottom:12px;">
         任务 #{{ upgradeTask.id }} 状态：{{ upgradeTask.status }}，成功 {{ upgradeTask.success_count || 0 }}/{{ upgradeTask.total_nodes || 0 }}，失败 {{ upgradeTask.failed_count || 0 }}
       </el-alert>
-      <el-table v-if="upgradeItems.length" :data="upgradeItems" size="small" stripe max-height="220">
-        <el-table-column prop="node_id" label="节点" min-width="120" />
-        <el-table-column prop="stage" label="阶段" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{ formatUpgradeStage(row.stage) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="120">
-          <template #default="{ row }">
-            <el-tag size="small" :type="upgradeStatusTagType(row.status)">
-              {{ formatUpgradeStatus(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="result_version" label="版本" width="100" />
-        <el-table-column prop="step" label="步骤" width="110" />
-        <el-table-column prop="error_code" label="错误码" width="130" />
-        <el-table-column prop="message" label="信息" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="stderr_tail" label="日志摘要" min-width="220" show-overflow-tooltip />
-      </el-table>
+      <div v-if="upgradeItems.length" class="dialog-record-stack">
+        <div
+          v-for="(it, idx) in upgradeItems"
+          :key="idx"
+          class="record-card"
+          :class="recordCardToneFromTagType(upgradeStatusTagType(it.status))"
+        >
+          <div class="record-card__head">
+            <div class="record-card__title mono-text min-w-0">{{ it.node_id }}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end">
+              <el-tag size="small" effect="plain">{{ formatUpgradeStage(it.stage) }}</el-tag>
+              <el-tag size="small" :type="upgradeStatusTagType(it.status)">
+                {{ formatUpgradeStatus(it.status) }}
+              </el-tag>
+            </div>
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">版本 / 步骤</span>
+              <span class="kv-value">{{ it.result_version || '—' }} · {{ it.step || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">错误码</span>
+              <span class="kv-value">{{ it.error_code || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">信息</span>
+              <span class="kv-value">{{ it.message || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">日志摘要</span>
+              <span class="kv-value">{{ it.stderr_tail || '—' }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
       <template #footer>
         <el-button @click="showUpgrade = false">关闭</el-button>
         <el-button type="primary" :loading="upgradeLoading" @click="startUpgrade">开始灰度+全量</el-button>
@@ -208,7 +247,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, EditPen } from '@element-plus/icons-vue'
 import http from '../api/http'
-import { getStatusInfo } from '../utils'
+import { getStatusInfo, recordCardToneClass, recordCardToneFromTagType } from '../utils'
 
 const rows = ref([])
 const loading = ref(false)
@@ -245,6 +284,27 @@ const displayAgentVersion = (v) => {
   return s
 }
 
+/** 列表卡片：在线绿圈 / 离线红圈，圈内为在线用户数 */
+const isNodeOnline = (status) => String(status || '').toLowerCase() === 'online'
+
+const nodeUserOrbitSizeClass = (n) => {
+  const v = Number(n)
+  if (!Number.isFinite(v) || v < 0) return ''
+  if (v > 999) return 'node-user-orbit--digits-4'
+  if (v > 99) return 'node-user-orbit--digits-3'
+  if (v > 9) return 'node-user-orbit--digits-2'
+  return ''
+}
+
+/** 悬停在「版本状态」标签上：完整版本与补充信息 */
+const agentVersionTooltip = (node) => {
+  const raw = String(node?.agent_version || '').trim()
+  const verLine = raw ? `版本：${raw}` : '版本：未上报'
+  const arch = node?.agent_arch ? `架构：${node.agent_arch}` : ''
+  const lat = latestAgentVersion.value ? `仓库参考：${latestAgentVersion.value}` : ''
+  return [verLine, arch, lat].filter(Boolean).join('\n')
+}
+
 const filteredRows = computed(() => {
   let list = rows.value
   if (statusFilter.value) {
@@ -269,6 +329,29 @@ const modeLabel = (mode) => {
     global: '全局'
   }
   return m[mode] || mode || '-'
+}
+
+/** 列表标签：直连/分流/全局 + U/T + 端口 */
+const modeShortLabel = (mode) => {
+  const m = { 'node-direct': '直连', 'cn-split': '分流', global: '全局' }
+  return m[mode] || (mode ? String(mode) : '—')
+}
+
+const instanceTagLabel = (inst) => {
+  const p = (inst.proto || 'udp').toLowerCase() === 'tcp' ? 'T' : 'U'
+  return `${modeShortLabel(inst.mode)}${p}${inst.port}`
+}
+
+const instanceTagTooltip = (inst) => {
+  const seg = inst.segment_id || 'default'
+  const proto = (inst.proto || 'udp').toUpperCase()
+  const parts = [
+    `${modeLabel(inst.mode)} ${proto}/${inst.port}`,
+    `网段实例: ${seg}`
+  ]
+  if (inst.subnet) parts.push(`子网: ${inst.subnet}`)
+  if (inst.mode) parts.push(`mode: ${inst.mode}`)
+  return parts.join('\n')
 }
 
 const loadSegments = async () => {
@@ -389,8 +472,19 @@ const refreshWG = async (node) => {
   if (!node?.id) return
   try {
     const res = await http.post(`/api/nodes/${node.id}/wg-refresh`)
-    const invalid = res.data?.invalid || 0
-    ElMessage.success(`已下发WG刷新任务（无效peer: ${invalid}）`)
+    const invalid = Number(res.data?.invalid) || 0
+    const total = Number(res.data?.total_tunnel) || 0
+    if (invalid > 0) {
+      ElMessage.warning(
+        `已下发 WireGuard 配置刷新。共 ${total} 条隧道，其中 ${invalid} 条配置校验未通过（请在节点详情「相关隧道」中查看状态并修正）。`
+      )
+    } else {
+      ElMessage.success(
+        total > 0
+          ? `已下发 WireGuard 配置刷新（${total} 条隧道，配置校验均通过）。`
+          : '已下发 WireGuard 配置刷新（当前无隧道条目）。'
+      )
+    }
   } catch {
     // http.js 已统一处理
   }
@@ -614,7 +708,238 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* 节点列表专用：同排等高、中部可伸展 */
+.record-grid .node-list-card.record-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  box-sizing: border-box;
+}
+
+.node-list-card .record-card__head {
+  flex-shrink: 0;
+}
+
 .instance-tag {
-  margin: 2px 4px 2px 0;
+  margin: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  cursor: default;
+  white-space: nowrap;
+}
+
+.node-list-card .record-card__tags--node-list :deep(.instance-tag.el-tag) {
+  height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 22px;
+  border-radius: 4px;
+}
+
+.node-list-card .record-card__tags--node-list {
+  flex: 1 1 auto;
+  min-height: 36px;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: flex-start;
+  gap: 4px 6px;
+  overflow: visible;
+}
+
+/* 默认收起操作区，悬停/键盘焦点时展开；触控或窄屏始终显示 */
+.node-list-card .record-card__actions {
+  flex-shrink: 0;
+  margin-top: 0;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding-top: 0;
+  border-top: none;
+  transition:
+    max-height 0.28s ease,
+    opacity 0.22s ease,
+    padding-top 0.22s ease,
+    border-color 0.2s ease;
+  pointer-events: none;
+}
+
+.node-list-card:hover .record-card__actions,
+.node-list-card:focus-within .record-card__actions {
+  max-height: 96px;
+  opacity: 1;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--glass-edge);
+  pointer-events: auto;
+}
+
+@media (hover: none), (max-width: 768px) {
+  .node-list-card .record-card__actions {
+    max-height: none;
+    opacity: 1;
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--glass-edge);
+    pointer-events: auto;
+  }
+}
+
+.record-card__title--with-node-num {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 4px;
+  max-width: 100%;
+}
+
+.node-title-node-number {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-card__tags--node-list {
+  margin-top: 2px;
+}
+
+.node-agent-status-tag {
+  max-width: 100%;
+}
+
+.record-card__head-aside {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* 避免 EP tooltip 触发器 inline 基线把圆顶歪 */
+.node-user-orbit-tooltip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  line-height: 0;
+}
+
+/* 线框圆 + 在线时绿色光束绕圈旋转 */
+.node-user-orbit-wrap {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  line-height: 0;
+  cursor: default;
+  user-select: none;
+}
+
+/* 光带只落在圆环外圈，像「绿色光线」沿圆周旋转 */
+.node-user-orbit-spin {
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    transparent 210deg,
+    rgba(74, 222, 128, 0.2) 228deg,
+    rgba(34, 197, 94, 1) 258deg,
+    rgba(190, 242, 100, 0.95) 275deg,
+    rgba(74, 222, 128, 0.35) 292deg,
+    transparent 312deg,
+    transparent 360deg
+  );
+  animation: node-user-orbit-rotate 1.8s linear infinite;
+  mask: radial-gradient(
+    circle closest-side at center,
+    transparent 0,
+    transparent 52%,
+    #000 54%,
+    #000 71%,
+    transparent 73%
+  );
+  -webkit-mask: radial-gradient(
+    circle closest-side at center,
+    transparent 0,
+    transparent 52%,
+    #000 54%,
+    #000 71%,
+    transparent 73%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node-user-orbit-spin {
+    animation: none;
+    opacity: 0.35;
+  }
+}
+
+@keyframes node-user-orbit-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.node-user-orbit-inner {
+  position: relative;
+  z-index: 1;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  line-height: 0;
+}
+
+.node-user-orbit-num {
+  display: block;
+  line-height: 1;
+  text-align: center;
+  margin: 0;
+  padding: 0;
+}
+
+.node-user-orbit-wrap--online .node-user-orbit-inner {
+  border: 2px solid rgba(22, 163, 74, 0.45);
+  background: rgba(255, 255, 255, 0.92);
+  color: #166534;
+}
+
+.node-user-orbit-wrap--offline .node-user-orbit-inner {
+  border: 2px solid rgba(220, 38, 38, 0.5);
+  background: rgba(254, 242, 242, 0.95);
+  color: #b91c1c;
+}
+
+.node-user-orbit-inner.node-user-orbit--digits-2 {
+  font-size: 11px;
+}
+
+.node-user-orbit-inner.node-user-orbit--digits-3 {
+  font-size: 10px;
+}
+
+.node-user-orbit-inner.node-user-orbit--digits-4 {
+  font-size: 8px;
+  letter-spacing: -0.04em;
 }
 </style>

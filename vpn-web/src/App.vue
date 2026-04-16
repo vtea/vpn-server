@@ -2,20 +2,26 @@
   <router-view v-if="isFullPage" />
 
   <div v-else class="app-layout">
-    <aside class="layout-sidebar" :class="{ 'is-collapsed': isCollapsed, 'is-mobile': isMobile }">
-      <div class="sidebar-logo">
-        <div class="logo-icon">V</div>
+    <aside
+      class="layout-sidebar"
+      :class="{ 'is-collapsed': isCollapsed, 'is-mobile': isMobile }"
+      aria-label="主导航"
+    >
+      <div class="sidebar-logo" @click="onLogoClick">
+        <div class="logo-icon" aria-hidden="true">V</div>
         <span class="logo-text">VPN 管理中心</span>
       </div>
       <div class="sidebar-menu">
         <el-menu
+          :key="activeMenu"
           :default-active="activeMenu"
           :collapse="isCollapsed"
           :collapse-transition="false"
           router
+          class="app-sidebar-menu"
           background-color="transparent"
-          text-color="rgba(255,255,255,0.65)"
-          active-text-color="#ffffff"
+          text-color="rgba(224,242,254,0.82)"
+          active-text-color="#f8fafc"
         >
           <el-menu-item index="/">
             <el-icon><Odometer /></el-icon>
@@ -60,9 +66,16 @@
     <div class="layout-main" :class="{ 'is-collapsed': isCollapsed }">
       <header class="layout-header">
         <div class="header-left">
-          <span class="collapse-btn" @click="isCollapsed = !isCollapsed">
+          <button
+            type="button"
+            class="collapse-btn"
+            :aria-expanded="String(!isCollapsed)"
+            :aria-label="isCollapsed ? '展开侧栏' : '收起侧栏'"
+            @click="toggleSidebar"
+          >
             <el-icon><Fold v-if="!isCollapsed" /><Expand v-else /></el-icon>
-          </span>
+          </button>
+          <span v-if="isMobile" class="header-route-title">{{ currentBreadcrumb || 'VPN 管理中心' }}</span>
           <el-breadcrumb v-if="!isMobile" separator="/">
             <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
             <el-breadcrumb-item v-if="currentBreadcrumb">{{ currentBreadcrumb }}</el-breadcrumb-item>
@@ -232,6 +245,19 @@ const hasPerm = (module) => {
   return info.perms.split(',').map(s => s.trim()).includes(module)
 }
 
+const toggleSidebar = () => {
+  isCollapsed.value = !isCollapsed.value
+}
+
+const onLogoClick = () => {
+  if (isMobile.value) {
+    isCollapsed.value = true
+    if (route.path !== '/') router.push('/')
+    return
+  }
+  router.push('/')
+}
+
 watch(
   () => route.path,
   () => {
@@ -294,7 +320,17 @@ const handleCommand = (cmd) => {
 <style scoped>
 .app-layout {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
+}
+
+@media (max-width: 768px) {
+  .app-layout {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow: visible;
+  }
 }
 
 .user-dropdown {
@@ -308,11 +344,11 @@ const handleCommand = (cmd) => {
 }
 
 .user-dropdown:hover {
-  background: var(--border-lighter);
+  background: rgba(14, 165, 233, 0.08);
 }
 
 .user-name {
-  font-size: 14px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
   font-weight: 500;
 }
@@ -325,8 +361,60 @@ const handleCommand = (cmd) => {
 .mobile-sidebar-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(15, 40, 70, 0.42);
   z-index: 99;
+  animation: sidebar-mask-in 0.36s cubic-bezier(0.16, 1, 0.3, 1);
+  backdrop-filter: blur(2px);
+}
+
+@keyframes sidebar-mask-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  min-width: 42px;
+  min-height: 42px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-regular);
+  font-size: 20px;
+  cursor: pointer;
+  transition:
+    color var(--transition-normal),
+    background var(--transition-normal),
+    transform var(--transition-fast);
+}
+
+.collapse-btn:hover {
+  color: var(--color-primary);
+  background: rgba(14, 165, 233, 0.09);
+}
+
+.collapse-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.header-route-title {
+  font-size: var(--font-title);
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
 }
 
 @media (max-width: 768px) {

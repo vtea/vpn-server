@@ -31,7 +31,8 @@ func Load() Config {
 		// Empty means "auto detect from .agent-release-version".
 		AgentLatestVersion: strings.TrimSpace(os.Getenv("AGENT_LATEST_VERSION")),
 		CORSAllowedOrigins: parseCommaList(os.Getenv("CORS_ALLOWED_ORIGINS")),
-		IPListDualEnabled:  parseBoolDefault(os.Getenv("IPLIST_DUAL_ENABLED"), true),
+		// 恒为 true：Agent 依赖 /api/ip-lists/download/{domestic,overseas}；设为 false 会导致 404 且控制台「全网更新」无法同步节点。
+		IPListDualEnabled: true,
 	}
 }
 
@@ -54,15 +55,4 @@ func getOrDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func parseBoolDefault(raw string, def bool) bool {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return def
-	}
 }

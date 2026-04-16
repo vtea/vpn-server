@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("IPLIST_DUAL_ENABLED")), "false") {
+		log.Printf("NOTICE: IPLIST_DUAL_ENABLED=false is ignored; dual IP list mode is always enabled (see vpn-api/README.md).")
+	}
 	if config.ExternalURLIsLoopbackOnly(cfg.ExternalURL) {
 		log.Printf("WARNING: EXTERNAL_URL=%q 为回环地址；生成的部署命令中 --api-url 仅本机可用。远程节点请设置 EXTERNAL_URL 为控制面公网 IP/域名（见 vpn-api/README.md）。", cfg.ExternalURL)
 	}

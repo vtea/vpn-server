@@ -19,7 +19,7 @@ const allowedHosts = devAllowedHosts()
 /** 管理台与 vpn-api 分端口时，由 dev/preview 将 /api 转发到后端（勿与页面端口混为 API 根地址） */
 const apiProxy = {
   '/api': {
-    target: 'http://192.168.110.62:56700',
+    target: 'http://127.0.0.1:56700',
     changeOrigin: true
   }
 }

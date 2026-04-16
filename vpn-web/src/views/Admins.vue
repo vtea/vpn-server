@@ -17,21 +17,24 @@
         <el-text type="info" size="small">共 {{ admins.length }} 个管理员</el-text>
       </div>
 
-      <el-table :data="admins" v-loading="loading" stripe>
-        <el-table-column prop="id" label="ID" width="60" align="center" />
-        <el-table-column prop="username" label="用户名" width="160">
-          <template #default="{ row }">
-            <span>{{ row.username }}</span>
-            <el-tag v-if="row.username === 'admin'" size="small" type="danger" style="margin-left: 6px">默认</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="role" label="角色" width="120">
-          <template #default="{ row }">
+      <div v-loading="loading" class="record-grid">
+        <div
+          v-for="row in admins"
+          :key="row.id"
+          class="record-card"
+          :class="recordCardToneFromTagType(roleTagType(row.role))"
+        >
+          <div class="record-card__head">
+            <div class="min-w-0">
+              <div class="record-card__title">
+                {{ row.username }}
+                <el-tag v-if="row.username === 'admin'" size="small" type="danger" style="margin-left: 6px">默认</el-tag>
+              </div>
+              <div class="record-card__meta">#{{ row.id }} · {{ formatDate(row.created_at) }}</div>
+            </div>
             <el-tag :type="roleTagType(row.role)" size="small">{{ roleLabel(row.role) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="权限模块" min-width="260">
-          <template #default="{ row }">
+          </div>
+          <div class="record-card__tags">
             <template v-if="row.permissions === '*' || row.role === 'admin'">
               <el-tag size="small" type="danger">全部权限</el-tag>
             </template>
@@ -40,13 +43,8 @@
                 {{ permLabel(p) }}
               </el-tag>
             </template>
-          </template>
-        </el-table-column>
-        <el-table-column prop="created_at" label="创建时间" width="180">
-          <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right" align="center" class-name="op-col">
-          <template #default="{ row }">
+          </div>
+          <div class="record-card__actions">
             <el-button size="small" plain type="primary" @click="openEdit(row)" :disabled="!isAdmin">
               <el-icon><Edit /></el-icon> 编辑
             </el-button>
@@ -56,9 +54,10 @@
             <el-button size="small" plain type="danger" @click="handleDelete(row)" :disabled="!isAdmin || row.username === 'admin'">
               <el-icon><Delete /></el-icon> 删除
             </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !admins.length" description="暂无管理员" :image-size="60" />
+      </div>
     </div>
 
     <!-- 创建/编辑对话框 -->
@@ -111,7 +110,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import http from '../api/http'
-import { formatDate } from '../utils'
+import { formatDate, recordCardToneFromTagType } from '../utils'
 import { parseJwtPayload } from '../utils/jwt'
 
 const admins = ref([])

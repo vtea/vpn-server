@@ -24,20 +24,24 @@
         <el-text type="info" size="small">共 {{ filteredRows.length }} 个用户</el-text>
       </div>
 
-      <el-table :data="filteredRows" v-loading="loading" stripe>
-        <el-table-column prop="username" label="用户名" width="130" />
-        <el-table-column prop="display_name" label="姓名" width="130" />
-        <el-table-column prop="group_name" label="组" width="110" />
-        <el-table-column prop="status" label="状态" width="90">
-          <template #default="{ row }">
+      <div v-loading="loading" class="record-grid">
+        <div
+          v-for="row in filteredRows"
+          :key="row.id"
+          class="record-card"
+          :class="recordCardToneClass('user', row.status)"
+        >
+          <div class="record-card__head">
+            <div class="min-w-0">
+              <div class="record-card__title">{{ row.username }}</div>
+              <div class="record-card__meta">{{ row.display_name || '—' }} · {{ row.group_name || 'default' }}</div>
+            </div>
             <span>
               <span class="status-dot" :class="`status-dot--${row.status}`" />
               {{ getStatusInfo('user', row.status).label }}
             </span>
-          </template>
-        </el-table-column>
-        <el-table-column :width="isMobileViewport ? 220 : 240" label="操作" align="center" class-name="op-col">
-          <template #default="{ row }">
+          </div>
+          <div class="record-card__actions">
             <el-button size="small" plain type="primary" @click="openGrants(row)">
               <el-icon><Key /></el-icon> 授权
             </el-button>
@@ -51,9 +55,10 @@
                 </el-button>
               </template>
             </el-popconfirm>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !filteredRows.length" description="暂无用户" :image-size="60" />
+      </div>
     </div>
 
     <!-- 添加用户 -->
@@ -127,17 +132,22 @@
           </span>
         </div>
       </template>
-      <el-table :data="grants" size="small" stripe class="mb-md">
-        <el-table-column prop="cert_cn" label="证书 CN" min-width="140" />
-        <el-table-column prop="cert_status" label="状态" width="100">
-          <template #default="{ row }">
+      <div class="dialog-record-stack mb-md">
+        <div
+          v-for="row in grants"
+          :key="row.id"
+          class="record-card"
+          :class="recordCardToneClass('cert', row.cert_status)"
+        >
+          <div class="record-card__head">
+            <div class="min-w-0">
+              <div class="record-card__title mono-text">{{ row.cert_cn }}</div>
+            </div>
             <el-tag :type="getStatusInfo('cert', row.cert_status).type" size="small">
               {{ getStatusInfo('cert', row.cert_status).label }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column :width="isMobileViewport ? 420 : 420" label="操作" align="center" class-name="op-col">
-          <template #default="{ row }">
+          </div>
+          <div class="record-card__actions">
             <el-button
               size="small"
               plain
@@ -174,9 +184,10 @@
             >
               删除
             </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+        <el-empty v-if="!grants.length" description="暂无授权" :image-size="48" />
+      </div>
       <el-text type="info" size="small" style="display: block; margin-top: 8px">
         下载将自动返回与节点实例协议一致的配置文件。
       </el-text>
@@ -190,7 +201,7 @@
           <el-option
             v-for="inst in grantableInstances"
             :key="inst.id"
-            :label="`${inst.node_name || inst.node_id} (${inst.node_id}) / ${inst.mode} (${(inst.proto || 'udp').toUpperCase()}) :${inst.port}`"
+            :label="grantInstanceOptionLabel(inst)"
             :value="inst.id"
           />
         </el-select>
@@ -209,11 +220,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
-import { getStatusInfo } from '../utils'
+import { getStatusInfo, recordCardToneClass } from '../utils'
 
 const rows = ref([])
 const loading = ref(false)
@@ -235,11 +246,6 @@ const allInstances = ref([])
 const newGrantInstanceId = ref(null)
 const grantLoading = ref(false)
 const grantsRefreshLoading = ref(false)
-const isMobileViewport = ref(false)
-
-const updateViewportState = () => {
-  isMobileViewport.value = window.innerWidth <= 768
-}
 
 const groups = computed(() => [...new Set(rows.value.map(r => r.group_name))].sort())
 
@@ -257,6 +263,21 @@ const filteredRows = computed(() => {
   }
   return list
 })
+
+/** 组网模式中文简称（与节点列表一致） */
+const modeMeshLabel = (mode) => {
+  const m = { 'node-direct': '直连', 'cn-split': '分流', global: '全局' }
+  return m[mode] || (mode ? String(mode) : '—')
+}
+
+/** 下拉展示：节点名称 (节点id) / 组网名称 (端口号) */
+const grantInstanceOptionLabel = (inst) => {
+  const nm = (inst.node_name || '').trim() || inst.node_id || '—'
+  const nid = inst.node_id || '—'
+  const mesh = modeMeshLabel(inst.mode)
+  const port = inst.port != null && inst.port !== '' ? inst.port : '—'
+  return `${nm} (${nid}) / ${mesh} (${port})`
+}
 
 /** 排除「已有待签发/可用等有效授权」的实例，避免重复提交触发 cert_cn 唯一约束 */
 const grantableInstances = computed(() => {
@@ -475,14 +496,6 @@ const retryIssue = async (id) => {
 }
 
 onMounted(() => void loadUsers().catch(() => {}))
-onMounted(() => {
-  updateViewportState()
-  window.addEventListener('resize', updateViewportState)
-})
-
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', updateViewportState)
-})
 </script>
 
 <style scoped>
@@ -501,12 +514,24 @@ onBeforeUnmount(() => {
 .grant-dialog-header__close {
   margin-left: 0;
 }
+.grant-create-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: nowrap;
+}
+
 .grant-instance-select {
-  width: 320px;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 0;
   max-width: 100%;
 }
+
 .grant-create-btn {
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 @media (max-width: 768px) {
@@ -517,9 +542,11 @@ onBeforeUnmount(() => {
   }
   .grant-instance-select {
     width: 100%;
+    flex: none;
   }
   .grant-create-btn {
     width: 100%;
+    margin-left: 0;
   }
   .grant-dialog-header {
     gap: 8px;
@@ -533,14 +560,6 @@ onBeforeUnmount(() => {
   .grant-dialog :deep(.el-dialog__body),
   .user-form-dialog :deep(.el-dialog__body) {
     padding: 12px;
-  }
-  .grant-dialog :deep(.el-table .el-button),
-  .page-card :deep(.el-table .el-button) {
-    margin: 2px 4px 2px 0;
-    white-space: nowrap;
-  }
-  .grant-dialog :deep(.el-table__cell) {
-    white-space: nowrap;
   }
 }
 </style>

@@ -1074,14 +1074,15 @@ func revokeCert(cfg *Config, certCN string) error {
 
 func normalizeIPListScope(scope string) string {
 	switch strings.ToLower(strings.TrimSpace(scope)) {
-	case "", "domestic":
+	case "domestic":
 		return "domestic"
 	case "overseas":
 		return "overseas"
-	case "all":
+	case "", "all":
+		// 与控制面无 payload 的 update_iplist 及「全网」一致：空则拉 domestic + overseas
 		return "all"
 	default:
-		return "domestic"
+		return "all"
 	}
 }
 
@@ -1271,7 +1272,7 @@ func collectTunnelHealth() []tunnelHealthItem {
 			PeerPubKeyPresent:     strings.TrimSpace(t.PeerPubKey) != "",
 		}
 		if !item.PeerPubKeyPresent {
-			item.Error = "missing peer wg public key in bootstrap config"
+			item.Error = "bootstrap 中缺少对端 WireGuard 公钥"
 		}
 		iface := "wg-" + t.PeerNodeID
 		var (
@@ -1681,7 +1682,7 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 		configErr := strings.TrimSpace(t.ConfigError)
 		if configErr != "" || !t.ConfigValid || strings.TrimSpace(t.PeerPubKey) == "" {
 			if configErr == "" {
-				configErr = "missing peer wg public key"
+				configErr = "缺少对端 WireGuard 公钥"
 			}
 			r.Error = configErr
 			results = append(results, r)
@@ -1689,31 +1690,31 @@ func applyWGConfigRefresh(req wgRefreshPayload) map[string]any {
 		}
 		peerID := strings.TrimSpace(t.PeerNodeID)
 		if !wgPeerNodeIDSafeForPath(peerID) {
-			r.Error = "invalid peer_node_id: unsafe characters or length"
+			r.Error = "peer_node_id 非法：含不安全字符或长度不符"
 			results = append(results, r)
 			continue
 		}
 		endpointField := wireGuardEndpointField(t.PeerEndpoint, t.WGPort)
 		if endpointField == "" {
-			r.Error = "invalid endpoint or wg_port for WireGuard"
+			r.Error = "WireGuard 对端地址或 wg_port 无效"
 			results = append(results, r)
 			continue
 		}
 		localIP := wgIniOneLine(t.LocalIP)
 		if localIP == "" {
-			r.Error = "missing or invalid local_ip"
+			r.Error = "本端 local_ip 缺失或无效"
 			results = append(results, r)
 			continue
 		}
 		pubKey := wgIniOneLine(t.PeerPubKey)
 		if pubKey == "" {
-			r.Error = "missing peer public key after sanitize"
+			r.Error = "对端公钥在清洗后为空"
 			results = append(results, r)
 			continue
 		}
 		allowedIPs := wgIniOneLine(t.AllowedIPs)
 		if allowedIPs == "" {
-			r.Error = "missing allowed_ips after sanitize"
+			r.Error = "AllowedIPs 在清洗后为空"
 			results = append(results, r)
 			continue
 		}
@@ -1736,13 +1737,13 @@ PersistentKeepalive = 25
 		if string(old) != conf {
 			tmpPath := confPath + ".tmp"
 			if werr := os.WriteFile(tmpPath, []byte(conf), 0600); werr != nil {
-				r.Error = "write tmp config failed: " + werr.Error()
+				r.Error = "写入临时配置失败: " + werr.Error()
 				results = append(results, r)
 				continue
 			}
 			if rerr := os.Rename(tmpPath, confPath); rerr != nil {
 				_ = os.Remove(tmpPath)
-				r.Error = "replace config failed: " + rerr.Error()
+				r.Error = "替换配置文件失败: " + rerr.Error()
 				results = append(results, r)
 				continue
 			}

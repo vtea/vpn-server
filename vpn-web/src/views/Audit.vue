@@ -32,27 +32,37 @@
         <el-text type="info" size="small">共 {{ total }} 条记录</el-text>
       </div>
 
-      <el-table :data="rows" v-loading="loading" stripe>
-        <el-table-column prop="created_at" label="时间" width="180">
-          <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column prop="admin_user" label="操作人" width="110" />
-        <el-table-column prop="action" label="动作" width="160">
-          <template #default="{ row }">
+      <div v-loading="loading" class="record-grid record-grid--single">
+        <div v-for="row in rows" :key="row.id" class="record-card">
+          <div class="record-card__head">
+            <div class="min-w-0">
+              <div class="record-card__title">{{ formatDate(row.created_at) }}</div>
+              <div class="record-card__meta">{{ row.admin_user || '—' }}</div>
+            </div>
             <el-tag size="small" type="info">{{ row.action }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="target" label="目标" min-width="140" />
-        <el-table-column prop="detail" label="详情" min-width="180" show-overflow-tooltip />
-      </el-table>
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">目标</span>
+              <span class="kv-value">{{ row.target || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">详情</span>
+              <span class="kv-value">{{ row.detail || '—' }}</span>
+            </div>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !rows.length" description="暂无记录" :image-size="60" />
+      </div>
 
       <div class="pagination-wrap">
         <el-pagination
           v-model:current-page="page"
           :page-size="pageSize"
           :total="total"
-          layout="total, prev, pager, next, sizes"
+          :layout="paginationLayout"
           :page-sizes="[20, 50, 100]"
+          :small="paginationSmall"
           @current-change="loadLogs"
           @size-change="onSizeChange"
         />
@@ -62,10 +72,19 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { formatDate, downloadBlob } from '../utils'
+
+const viewportNarrow = ref(typeof window !== 'undefined' && window.innerWidth <= 600)
+const onResizeAudit = () => {
+  viewportNarrow.value = window.innerWidth <= 600
+}
+const paginationLayout = computed(() =>
+  viewportNarrow.value ? 'prev, pager, next' : 'total, prev, pager, next, sizes'
+)
+const paginationSmall = computed(() => viewportNarrow.value)
 
 const rows = ref([])
 const loading = ref(false)
@@ -102,5 +121,12 @@ const exportCSV = () => {
   downloadBlob(header + body, 'audit-logs.csv')
 }
 
-onMounted(loadLogs)
+onMounted(() => {
+  window.addEventListener('resize', onResizeAudit)
+  loadLogs()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResizeAudit)
+})
 </script>

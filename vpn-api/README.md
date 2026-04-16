@@ -84,6 +84,9 @@ EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTER
 # AGENT_LATEST_VERSION=0.2.1   # 可选：与已部署 agent 的 buildVersion 一致时，升级默认值/推荐 URL 与节点自报一致；一键部署脚本会写入与编译相同的值
 # 跨域：管理台与 API 不同源时设置（逗号分隔多个来源；仅开发可用 * 表示任意来源）
 # CORS_ALLOWED_ORIGINS=https://vpn-admin.example.com,http://localhost:56701
+#
+# IPLIST_DUAL_ENABLED：已废弃；控制面始终启用「国内 + 海外」双库与 /api/ip-lists/download/*，
+# 以便 vpn-agent 与「分流规则 → 全网立即更新」能同步节点。详见 docs/operations.md §8。
 ```
 
 ### 前后端分离 / 跨域

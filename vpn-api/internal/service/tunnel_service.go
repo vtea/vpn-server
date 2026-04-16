@@ -233,7 +233,7 @@ func BuildTunnelConfigsForNode(db *gorm.DB, nodeID string) ([]TunnelPeerConfig, 
 		ep := strings.TrimSpace(peerNode.PublicIP)
 		cfgErr := ""
 		if pub == "" {
-			cfgErr = "missing peer wg public key"
+			cfgErr = "对端 WireGuard 公钥缺失"
 		}
 		configs = append(configs, TunnelPeerConfig{
 			PeerNodeID:   peerNodeID,

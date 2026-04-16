@@ -1169,7 +1169,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "Step 4: Render server.conf files"
   log "Step 5: Deploy WireGuard tunnels"
   log "Step 6: Configure policy routing tables"
-  log "Step 7: Configure NAT rules (iptables + ipset china-ip)"
+  log "Step 7: Configure NAT rules (iptables + ipset china-ip / overseas-ip)"
   log "Step 8: Create systemd units"
   log "Step 9: Install vpn-agent"
   log "Done (dry-run). Use --apply to execute."
@@ -1288,8 +1288,17 @@ else
 fi
 
 mkdir -p /etc/dnsmasq.d
+# 默认 dnsmasq 监听 0.0.0.0:53，在 Ubuntu 等环境易与 systemd-resolved / 其它解析器冲突。
+# 本节点 dnsmasq 仅用于本机域名分流（vpn-exceptions.conf / ipset），绑定回环即可。
+cat > /etc/dnsmasq.d/zzz-vpn-node-dns-bind.conf <<'DMASQ'
+listen-address=127.0.0.1
+bind-interfaces
+DMASQ
 systemctl enable dnsmasq 2>/dev/null || true
-systemctl start dnsmasq 2>/dev/null || true
+if ! systemctl restart dnsmasq 2>/dev/null; then
+  warn "dnsmasq 启动失败（常见原因：53 仍被占用）。可执行: ss -ulnp | grep ':53 '；"
+  warn "若占用方为 systemd-resolved，可在 /etc/systemd/resolved.conf 设置 DNSStubListener=no 后 systemctl restart systemd-resolved，再重试。"
+fi
 
 # ── Step 3: Initialize easy-rsa PKI ──────────────────────────────────────────
 
@@ -1494,9 +1503,14 @@ PersistentKeepalive = 25
 WGCONF
 
   chmod 600 "$WG_CONF"
-  systemctl enable "wg-quick@wg-${PEER_ID}" 2>/dev/null || true
-  systemctl start "wg-quick@wg-${PEER_ID}" 2>/dev/null || \
+  # 必须成功 enable，否则仅本次 start 有效，重启后隧道不会自动拉起
+  if ! systemctl enable "wg-quick@wg-${PEER_ID}"; then
+    fail "systemctl enable wg-quick@wg-${PEER_ID} 失败（重启后 WireGuard 不会自启）。请检查 wireguard-tools 是否已安装、单元名是否合法。"
+    exit 1
+  fi
+  if ! systemctl start "wg-quick@wg-${PEER_ID}"; then
     log "  WARNING: wg-${PEER_ID} failed to start (peer may not be ready yet)"
+  fi
   log "  Tunnel wg-${PEER_ID}: ${LOCAL_IP} <-> ${PEER_IP} via ${PEER_ENDPOINT}"
 done
 
@@ -1736,6 +1750,48 @@ else
   log "  WARNING: china_ip_list is empty, skipped ipset population"
 fi
 
+# Overseas IP 库：与控制面 ensureIPListSources（overseas）及 Agent 的 overseas-ip / overseas-ip-list.txt 对齐
+OVERSEAS_LIST="/tmp/overseas_ip_list.txt"
+OVERSEAS_URL_PRIMARY="https://cdn.jsdelivr.net/gh/gaoyifan/china-operator-ip/ip-lists/china6.txt"
+OVERSEAS_URL_MIRROR="https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china6.txt"
+
+ipset create overseas-ip hash:net -exist
+
+download_overseas_from_cp() {
+  [[ -z "${API_URL:-}" ]] && return 1
+  curl -fsSL --connect-timeout 8 --max-time 60 --retry 2 --retry-delay 1 \
+    "${API_URL%/}/api/ip-lists/download/overseas" -o "$OVERSEAS_LIST" 2>/dev/null
+}
+
+download_overseas_public() {
+  curl -fsSL --connect-timeout 8 --max-time 30 --retry 2 --retry-delay 1 "$1" -o "$OVERSEAS_LIST" 2>/dev/null
+}
+
+rm -f "$OVERSEAS_LIST"
+if download_overseas_from_cp && [[ -s "$OVERSEAS_LIST" ]]; then
+  log "  overseas ip list downloaded from control plane"
+elif download_overseas_public "$OVERSEAS_URL_PRIMARY" && [[ -s "$OVERSEAS_LIST" ]]; then
+  log "  overseas ip list downloaded from primary public mirror"
+elif download_overseas_public "$OVERSEAS_URL_MIRROR" && [[ -s "$OVERSEAS_LIST" ]]; then
+  log "  overseas ip list downloaded from mirror"
+else
+  log "  WARNING: could not download overseas ip list (API or public mirrors)"
+fi
+
+if [[ -s "$OVERSEAS_LIST" ]]; then
+  ipset flush overseas-ip 2>/dev/null || true
+  while IFS= read -r cidr; do
+    [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+    ipset add overseas-ip "$cidr" -exist || true
+  done < "$OVERSEAS_LIST"
+  cp "$OVERSEAS_LIST" /etc/vpn-agent/overseas-ip-list.txt
+  rm -f "$OVERSEAS_LIST"
+  log "  overseas-ip ipset loaded"
+else
+  rm -f "$OVERSEAS_LIST"
+  log "  WARNING: overseas ip list empty, skipped overseas-ip ipset population"
+fi
+
 cat > /etc/vpn-agent/nat-rules.sh <<'NATRULES'
 #!/bin/bash
 set -euo pipefail
@@ -1821,6 +1877,30 @@ log "Step 8/${TOTAL_STEPS}: Creating systemd services ..."
 cleanup_legacy_openvpn_units
 cleanup_stale_openvpn_management_ports
 
+# 先安装并启用 vpn-routing，再拉起 OpenVPN / Agent，避免单元内 After= 指向尚未注册的服务；
+# 重启时策略路由与 NAT 也会先于 OpenVPN 执行。
+cat > /etc/systemd/system/vpn-routing.service <<'UNIT'
+[Unit]
+Description=VPN NAT + Policy Routing
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '/etc/vpn-agent/policy-routing.sh && /etc/vpn-agent/nat-rules.sh'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable vpn-routing.service
+if ! systemctl restart vpn-routing.service; then
+  warn "vpn-routing.service 启动失败，将在健康检查中报告详情"
+  journalctl -u vpn-routing.service -n 30 --no-pager -o cat | sed 's/^/    /' || true
+fi
+
 FAILED_OPENVPN_MODES=()
 SKIPPED_OPENVPN_MODES=()
 
@@ -1836,15 +1916,18 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   cat > "/etc/systemd/system/openvpn-${MODE}.service" <<UNIT
 [Unit]
 Description=OpenVPN instance - ${MODE}
-After=network-online.target
+After=network-online.target vpn-routing.service
 Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server/${MODE}/server.conf
+ExecStart=/usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/${MODE}/server.conf
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+# 配置错误等会持续退出，避免每秒刷盘与 systemd 任务队列打满
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
@@ -1873,28 +1956,6 @@ fi
 
 if [[ "${#SKIPPED_OPENVPN_MODES[@]}" -gt 0 ]]; then
   warn "以下实例已按管理员选择跳过，不会监听对应端口: ${SKIPPED_OPENVPN_MODES[*]}"
-fi
-
-cat > /etc/systemd/system/vpn-routing.service <<'UNIT'
-[Unit]
-Description=VPN NAT + Policy Routing
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c '/etc/vpn-agent/policy-routing.sh && /etc/vpn-agent/nat-rules.sh'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable vpn-routing.service
-if ! systemctl restart vpn-routing.service; then
-  warn "vpn-routing.service 启动失败，将在健康检查中报告详情"
-  journalctl -u vpn-routing.service -n 30 --no-pager -o cat | sed 's/^/    /' || true
 fi
 
 # ── Step 9: Install vpn-agent ────────────────────────────────────────────────
@@ -1933,7 +1994,7 @@ fi
 cat > /etc/systemd/system/vpn-agent.service <<'UNIT'
 [Unit]
 Description=VPN Node Agent
-After=network-online.target
+After=network-online.target vpn-routing.service
 Wants=network-online.target
 
 [Service]

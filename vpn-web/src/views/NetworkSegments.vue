@@ -12,29 +12,39 @@
         个端口）。新建节点在该网段下生成实例时，默认使用「默认协议」。若要让<strong>已有</strong>接入实例一并改协议，请点「编辑」修改默认协议并勾选「同步到已有实例」；否则库中
         <code>instances.proto</code> 不变，签发与用户 .ovpn 仍为旧协议。
       </el-text>
-      <el-table :data="rows" v-loading="loading" stripe>
-        <el-table-column prop="id" label="ID" min-width="160" show-overflow-tooltip />
-        <el-table-column prop="name" label="名称" min-width="140" />
-        <el-table-column prop="second_octet" label="地址第二段" width="120" align="center">
-          <template #default="{ row }">
-            {{ row.second_octet === 0 ? '（默认/旧公式）' : row.second_octet }}
-          </template>
-        </el-table-column>
-        <el-table-column label="默认协议" width="100" align="center">
-          <template #default="{ row }">{{ protoLabel(row.default_ovpn_proto) }}</template>
-        </el-table-column>
-        <el-table-column prop="port_base" label="监听起始端口" width="130" align="center" />
-        <el-table-column prop="description" label="说明" min-width="180" show-overflow-tooltip />
-        <el-table-column label="操作" width="150" align="center" class-name="op-col">
-          <template #default="{ row }">
+      <div v-loading="loading" class="record-grid">
+        <div v-for="row in rows" :key="row.id" class="record-card">
+          <div class="record-card__head">
+            <div class="min-w-0">
+              <div class="record-card__title mono-text">{{ row.id }}</div>
+              <div class="record-card__meta">{{ row.name }}</div>
+            </div>
+            <el-tag size="small" effect="plain">{{ protoLabel(row.default_ovpn_proto) }}</el-tag>
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">地址第二段</span>
+              <span class="kv-value">{{ row.second_octet === 0 ? '（默认/旧公式）' : row.second_octet }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">监听起始端口</span>
+              <span class="kv-value">{{ row.port_base ?? '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">说明</span>
+              <span class="kv-value">{{ row.description || '—' }}</span>
+            </div>
+          </div>
+          <div class="record-card__actions">
             <template v-if="row.id !== 'default'">
               <el-button size="small" type="primary" plain @click="openEdit(row)">编辑</el-button>
               <el-button size="small" type="danger" plain @click="removeSeg(row)">删除</el-button>
             </template>
             <el-text v-else type="info" size="small">内置（不可改网段属性）</el-text>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !rows.length" description="暂无网段" :image-size="60" />
+      </div>
     </div>
 
     <el-dialog v-model="showAdd" title="新建组网网段" width="520px" destroy-on-close @open="onDialogOpen">

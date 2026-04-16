@@ -92,6 +92,36 @@ type tunnelStatusEval struct {
 	LastHealthyAt       *time.Time
 }
 
+// localizeTunnelAgentErrorDetail 将 Agent 上报的隧道错误中的常见英文片段转为中文，便于管理台展示。
+func localizeTunnelAgentErrorDetail(msg string) string {
+	s := strings.TrimSpace(msg)
+	if s == "" {
+		return ""
+	}
+	low := strings.ToLower(s)
+	switch {
+	case strings.Contains(low, "missing peer wg public key in bootstrap"):
+		return "bootstrap 中缺少对端 WireGuard 公钥"
+	case strings.Contains(low, "missing peer wg public key"):
+		return "缺少对端 WireGuard 公钥"
+	}
+	out := s
+	repl := []struct{ from, to string }{
+		{"Unable to access interface: ", "无法访问接口："},
+		{"Unable to access interface", "无法访问接口"},
+		{"No such device", "无此设备"},
+		{"does not exist", "不存在"},
+		{"exit status 1", "退出码 1"},
+		{"exit status 2", "退出码 2"},
+	}
+	for _, p := range repl {
+		out = strings.ReplaceAll(out, p.from, p.to)
+	}
+	out = strings.ReplaceAll(out, "wg handshake ", "wg 握手 ")
+	out = strings.ReplaceAll(out, "wg transfer ", "wg 流量 ")
+	return strings.TrimSpace(out)
+}
+
 func normalizeAgentVersion(v string) string {
 	v = strings.TrimSpace(v)
 	v = strings.TrimPrefix(v, "v")
@@ -494,7 +524,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					eval := evaluateTunnelHealth(now, tunnel, t)
 					reason := eval.Reason
 					if strings.TrimSpace(t.Error) != "" {
-						reason = reason + ": " + singleLine(t.Error)
+						reason = reason + "：" + singleLine(localizeTunnelAgentErrorDetail(t.Error))
 					}
 					currentStatus := canonicalTunnelStatus(tunnel.Status)
 					reporterIsPrimary := ac.NodeID == tunnel.NodeA
@@ -587,7 +617,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 						okPeers++
 						continue
 					}
-					reason := strings.TrimSpace(it.Error)
+					reason := singleLine(localizeTunnelAgentErrorDetail(strings.TrimSpace(it.Error)))
 					if reason == "" {
 						reason = "WireGuard 刷新失败"
 					}
@@ -596,7 +626,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 							ac.NodeID, it.PeerNodeID, it.PeerNodeID, ac.NodeID).
 						Updates(map[string]any{
 							"status":               tunnelStatusInvalid,
-							"status_reason":        singleLine(reason),
+							"status_reason":        reason,
 							"status_updated_at":    now,
 							"consecutive_failures": gorm.Expr("COALESCE(consecutive_failures, 0) + 1"),
 						})

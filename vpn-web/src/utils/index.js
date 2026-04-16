@@ -57,6 +57,24 @@ export function getStatusInfo(category, status) {
   return maps[category]?.[status] || { label: status || '-', type: 'info' }
 }
 
+const tagTypeToToneClass = {
+  success: 'record-card--tone-success',
+  warning: 'record-card--tone-warning',
+  danger: 'record-card--tone-danger',
+  info: 'record-card--tone-info',
+}
+
+/** 列表卡片背景色调（与 Element Plus tag type 一致） */
+export function recordCardToneFromTagType(type) {
+  return tagTypeToToneClass[type] || 'record-card--tone-neutral'
+}
+
+/** 按业务状态映射卡片色调类名，供列表卡片 :class 使用 */
+export function recordCardToneClass(category, status) {
+  const { type } = getStatusInfo(category, status)
+  return recordCardToneFromTagType(type)
+}
+
 export async function confirmAction(message, action) {
   try {
     await action()

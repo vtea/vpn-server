@@ -163,11 +163,26 @@ if [[ "$ROLE" == "node" ]]; then
     warn "cn-ip-list missing: /etc/vpn-agent/cn-ip-list.txt"
   fi
 
+  if [[ -f /etc/vpn-agent/overseas-ip-list.txt ]]; then
+    if [[ -s /etc/vpn-agent/overseas-ip-list.txt ]]; then
+      ok "overseas-ip-list exists and non-empty"
+    else
+      warn "overseas-ip-list exists but empty"
+    fi
+  else
+    warn "overseas-ip-list missing: /etc/vpn-agent/overseas-ip-list.txt"
+  fi
+
   if command -v ipset >/dev/null 2>&1; then
     if ipset list china-ip >/dev/null 2>&1; then
       ok "ipset china-ip exists"
     else
       warn "ipset china-ip not found"
+    fi
+    if ipset list overseas-ip >/dev/null 2>&1; then
+      ok "ipset overseas-ip exists"
+    else
+      warn "ipset overseas-ip not found"
     fi
   else
     warn "ipset command not installed"

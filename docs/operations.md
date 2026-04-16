@@ -163,6 +163,23 @@ EASYRSA_BATCH=1 ./easyrsa gen-crl
 
 ## 8. IP 库更新异常
 
+### 8.1 双库、控制台「全网立即更新」与节点在线
+
+控制面固定启用 **国内（domestic）+ 海外（overseas）** 两套 IP 库制品，并提供 **`GET /api/ip-lists/download/{domestic,overseas}`** 供 **vpn-agent** 拉取。
+
+- **管理台「分流规则」→「全网立即更新」**：先刷新控制面制品，再经 **WebSocket** 向节点下发 **`update_iplist`**（可带 `scope`：`all` / `domestic` / `overseas`）。界面会提示 **在线节点数 / 总节点数**；若为 **0 / N**，说明当前 **没有任何节点 Agent 连上控制面 WS**，指令不会发到节点，需在节点上检查 **`systemctl status vpn-agent`** 与到控制面的网络。
+- **节点首次部署**：`node-setup.sh` Step 7 会初始化 **`china-ip` + `cn-ip-list.txt`**（国内），并尽量拉取 **`overseas-ip` + `overseas-ip-list.txt`**（优先从控制面 **`/api/ip-lists/download/overseas`**，失败则回退公网镜像）。
+- **节点侧文件**：国内 `/etc/vpn-agent/cn-ip-list.txt`，海外 `/etc/vpn-agent/overseas-ip-list.txt`；健康检查脚本会检查两套文件与对应 **ipset**。
+
+### 8.2 国内库与海外库在数据面上的作用（cn-split）
+
+- **国内库**：写入 **`china-ip`** ipset；**`policy-routing.sh`** 用 **`cn-ip-list.txt`** 注入策略路由表；**`nat-rules.sh`** 对 `cn-split` 用 **`china-ip`** 匹配目的地址做 SNAT。即 **国内分流主路径依赖国内库**。
+- **海外库**：由 Agent（及安装脚本）维护 **`overseas-ip`** ipset 与列表文件；**当前生成的 `nat-rules.sh` / `policy-routing.sh` 未引用 `overseas-ip`**。若需按「海外列表」进一步改 NAT/路由，需另行设计规则链后再改脚本模板。
+
+环境变量 **`IPLIST_DUAL_ENABLED=false` 已被忽略**（控制面始终为双库）；若仍见旧文档请勿再关闭该能力。
+
+### 8.3 Agent 日志「ip list anomaly detected」
+
 **现象**：Agent 日志显示 "ip list anomaly detected"。
 
 **原因**：新下载的 IP 库条目数与旧版本差异超过 5%。

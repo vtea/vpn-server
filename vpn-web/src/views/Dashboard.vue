@@ -31,30 +31,40 @@
               查看全部 <el-icon><ArrowRight /></el-icon>
             </el-button>
           </div>
-          <el-table :data="nodeRows" size="small" stripe>
-            <el-table-column prop="node.name" label="名称" min-width="120">
-              <template #default="{ row }">
-                <el-link type="primary" @click="$router.push(`/nodes/${row.node.id}`)">
-                  {{ row.node.name }}
-                </el-link>
-              </template>
-            </el-table-column>
-            <el-table-column prop="node.region" label="地域" width="100" />
-            <el-table-column prop="node.status" label="状态" width="90">
-              <template #default="{ row }">
-                <span>
-                  <span class="status-dot" :class="`status-dot--${row.node.status}`" />
-                  {{ getStatusInfo('node', row.node.status).label }}
-                </span>
-              </template>
-            </el-table-column>
-            <el-table-column label="实例数" width="80" align="center">
-              <template #default="{ row }">
-                <el-tag size="small" round>{{ row.instances?.length || 0 }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="node.online_users" label="在线" width="70" align="center" />
-          </el-table>
+          <div v-if="nodeRows.length" class="record-grid record-grid--dense">
+            <div
+              v-for="row in nodeRows"
+              :key="row.node.id"
+              class="record-card"
+              :class="recordCardToneClass('node', row.node.status)"
+            >
+              <div class="record-card__head">
+                <div class="min-w-0">
+                  <div class="record-card__title">
+                    <el-link type="primary" @click="$router.push(`/nodes/${row.node.id}`)">
+                      {{ row.node.name }}
+                    </el-link>
+                  </div>
+                  <div class="record-card__meta">{{ row.node.region || '—' }}</div>
+                </div>
+                <el-tag size="small" round type="info">{{ row.instances?.length || 0 }} 实例</el-tag>
+              </div>
+              <div class="record-card__fields">
+                <div class="kv-row">
+                  <span class="kv-label">状态</span>
+                  <span class="kv-value">
+                    <span class="status-dot" :class="`status-dot--${row.node.status}`" />
+                    {{ getStatusInfo('node', row.node.status).label }}
+                  </span>
+                </div>
+                <div class="kv-row">
+                  <span class="kv-label">在线用户</span>
+                  <span class="kv-value">{{ row.node.online_users ?? 0 }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="暂无节点" :image-size="60" />
         </div>
       </el-col>
       <el-col :xs="24" :sm="24" :md="10" :lg="10">
@@ -89,7 +99,7 @@
 <script setup>
 import { reactive, ref, onMounted } from 'vue'
 import http from '../api/http'
-import { getStatusInfo, formatRelativeTime } from '../utils'
+import { getStatusInfo, formatRelativeTime, recordCardToneClass } from '../utils'
 
 const stats = reactive({ nodes: 0, onlineNodes: 0, users: 0, tunnels: 0 })
 const nodeRows = ref([])

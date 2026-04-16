@@ -11,3 +11,4 @@
 {"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","location":"ws_hub.go:cert_result","message":"before sanitize","ovpn_len":8328,"ovpn_short":false,"sessionId":"892464","timestamp":1776059845578}
 {"cert_cn":"vt-node-30-local-only","hypothesisId":"H4","len_changed":true,"location":"ws_hub.go:cert_result","message":"after sanitize","ovpn_len":5002,"sessionId":"892464","timestamp":1776059845579}
 {"hub_online":false,"hypothesisId":"H1","inst_mode":"local-only","inst_proto":"udp","location":"handlers.go:finalizeUserGrantCert","message":"issue_cert plan","node_id":"node-40","norm_proto":"udp","sessionId":"892464","timestamp":1776067068169}
+{"hub_online":false,"hypothesisId":"H1","inst_mode":"node-direct","inst_proto":"udp","location":"handlers.go:finalizeUserGrantCert","message":"issue_cert plan","node_id":"shanghai","norm_proto":"udp","sessionId":"892464","timestamp":1776279781589}

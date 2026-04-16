@@ -5,6 +5,12 @@
         <div class="detail-header-row">
           <div class="detail-header-main">
             <span class="detail-header-name">{{ node.name || nodeId }}</span>
+            <span
+              v-if="node.node_number != null && node.node_number !== ''"
+              class="detail-header-node-num"
+            >
+              · {{ node.node_number }}
+            </span>
             <el-tag
               v-if="node.status"
               :type="getStatusInfo('node', node.status).type"
@@ -17,6 +23,7 @@
           <el-button
             type="primary"
             plain
+            size="small"
             :loading="refreshing"
             class="detail-header-refresh"
             @click="load({ refresh: true })"
@@ -73,31 +80,46 @@
     <section class="node-overview mb-lg">
       <div class="node-overview__head">
         <span class="node-overview__title">运行概况</span>
-        <el-text type="info" size="small" class="node-overview__hint">含在线状态、隧道与在线用户</el-text>
+        <el-text type="info" size="small" class="node-overview__hint">
+          状态后为在线人数；版本号绿色为已跟上参考、红色为建议升级、橙色为无法比对；隧道数来自当前列表
+        </el-text>
       </div>
       <el-row :gutter="16">
-        <el-col v-for="item in statCards" :key="item.key" :xs="24" :sm="12" :lg="6" class="overview-col">
+        <el-col v-for="item in statCards" :key="item.key" :xs="24" :sm="12" :lg="8" class="overview-col">
           <div class="stat-card">
             <div class="stat-icon" :class="`stat-icon--${item.color}`">
               <el-icon :size="24"><component :is="item.icon" /></el-icon>
             </div>
             <div class="stat-content">
-              <div class="stat-value">
-                <template v-if="item.key === 'status' && item.rawStatus">
-                  <el-tooltip :content="`原始值: ${item.rawStatus}`" placement="top">
-                    <span class="stat-value-text">{{ item.value }}</span>
-                  </el-tooltip>
-                </template>
-                <template v-else-if="item.key === 'agent' && item.value && item.value !== '-'">
-                  <el-tooltip :content="String(item.value)" placement="top">
-                    <span class="stat-value-text">{{ item.value }}</span>
-                  </el-tooltip>
-                </template>
-                <template v-else>
+              <template v-if="item.key === 'latest-status'">
+                <div class="stat-latest">
+                  <div class="stat-value stat-value--latest">
+                    <template v-if="item.rawStatus">
+                      <el-tooltip :content="`原始状态: ${item.rawStatus}`" placement="top">
+                        <span class="stat-value-text">{{ item.statusLabel }}</span>
+                      </el-tooltip>
+                    </template>
+                    <template v-else>
+                      <span class="stat-value-text">{{ item.statusLabel }}</span>
+                    </template>
+                    <span class="stat-inline-online-num">{{
+                      item.onlineUsers != null ? item.onlineUsers : '—'
+                    }}</span>
+                  </div>
+                  <div
+                    class="stat-agent-version-display"
+                    :class="`stat-agent-version-display--${item.agentVersionTone}`"
+                  >
+                    版本：{{ item.agentDisplay }}
+                  </div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="stat-value stat-value--overview-num">
                   <span class="stat-value-text">{{ item.value }}</span>
-                </template>
-              </div>
-              <div class="stat-label">{{ item.label }}</div>
+                </div>
+              </template>
+              <div v-if="item.label" class="stat-label stat-label--overview">{{ item.label }}</div>
             </div>
           </div>
         </el-col>
@@ -112,42 +134,6 @@
             重新生成部署令牌
           </el-button>
           <el-button type="primary" size="small" :loading="savingNode" @click="saveNodeMeta">保存</el-button>
-        </div>
-      </div>
-      <div v-if="meshSummary.note" class="mesh-note-panel">
-        <el-icon class="mesh-note-panel__icon"><InfoFilled /></el-icon>
-        <p class="mesh-note-panel__text">{{ meshSummary.note }}</p>
-      </div>
-      <div v-if="meshSummary.openvpn_instance_subnets?.length || meshSummary.wireguard_peer_local_ips?.length" class="mesh-summary-block">
-        <div v-if="meshSummary.openvpn_instance_subnets?.length" class="mesh-summary-section">
-          <div class="mesh-summary-label">OpenVPN 客户端地址池与监听（按实例）</div>
-          <el-tag
-            v-for="(row, idx) in meshSummary.openvpn_instance_subnets"
-            :key="'ov-' + idx"
-            size="small"
-            class="mesh-tag"
-          >
-            {{ row.mode }} · {{ protoUpper(row.proto) }}/{{ row.port }} · {{ row.subnet }}
-          </el-tag>
-        </div>
-        <div v-if="meshSummary.wireguard_peer_local_ips?.length" class="mesh-summary-section">
-          <div class="mesh-summary-label">WireGuard 骨干（每对端一条 /30，本端 IP）</div>
-          <div
-            v-for="(row, idx) in meshSummary.wireguard_peer_local_ips"
-            :key="'wg-' + idx"
-            class="mesh-wg-line"
-          >
-            <span class="mesh-wg-k">对端</span>
-            <span class="mesh-wg-v mesh-wg-peer">{{ row.peer_node_id }}</span>
-            <span class="mesh-wg-k">本端</span>
-            <span class="mesh-wg-v mesh-wg-ip">{{ row.local_ip }}</span>
-            <template v-if="row.wg_port != null && row.wg_port !== ''">
-              <span class="mesh-wg-k">监听</span>
-              <span class="mesh-wg-v mesh-wg-port">UDP {{ row.wg_port }}</span>
-            </template>
-            <span class="mesh-wg-k">隧道</span>
-            <el-text type="info" size="small" class="mesh-wg-v">{{ row.tunnel_subnet }}</el-text>
-          </div>
         </div>
       </div>
       <div class="node-readonly-block">
@@ -189,6 +175,42 @@
               复制
             </el-button>
           </span>
+        </div>
+      </div>
+      <div v-if="meshSummary.note" class="mesh-note-panel">
+        <el-icon class="mesh-note-panel__icon"><InfoFilled /></el-icon>
+        <p class="mesh-note-panel__text">{{ meshSummary.note }}</p>
+      </div>
+      <div v-if="meshSummary.openvpn_instance_subnets?.length || meshSummary.wireguard_peer_local_ips?.length" class="mesh-summary-block">
+        <div v-if="meshSummary.openvpn_instance_subnets?.length" class="mesh-summary-section">
+          <div class="mesh-summary-label">OpenVPN 客户端地址池与监听（按实例）</div>
+          <el-tag
+            v-for="(row, idx) in meshSummary.openvpn_instance_subnets"
+            :key="'ov-' + idx"
+            size="small"
+            class="mesh-tag"
+          >
+            {{ modeMeshShort(row.mode) }} · {{ protoMeshChar(row.proto) }}/{{ row.port }} · {{ row.subnet }}
+          </el-tag>
+        </div>
+        <div v-if="meshSummary.wireguard_peer_local_ips?.length" class="mesh-summary-section">
+          <div class="mesh-summary-label">WireGuard 骨干（每对端一条 /30，本端 IP）</div>
+          <div
+            v-for="(row, idx) in meshSummary.wireguard_peer_local_ips"
+            :key="'wg-' + idx"
+            class="mesh-wg-line"
+          >
+            <span class="mesh-wg-k">对端</span>
+            <span class="mesh-wg-v mesh-wg-peer">{{ row.peer_node_id }}</span>
+            <span class="mesh-wg-k">本端</span>
+            <span class="mesh-wg-v mesh-wg-ip">{{ row.local_ip }}</span>
+            <template v-if="row.wg_port != null && row.wg_port !== ''">
+              <span class="mesh-wg-k">监听</span>
+              <span class="mesh-wg-v mesh-wg-port">UDP {{ row.wg_port }}</span>
+            </template>
+            <span class="mesh-wg-k">隧道</span>
+            <el-text type="info" size="small" class="mesh-wg-v">{{ row.tunnel_subnet }}</el-text>
+          </div>
         </div>
       </div>
       <el-divider content-position="left" class="node-edit-divider">可编辑</el-divider>
@@ -241,7 +263,7 @@
               <strong>国内分流（<code>cn-split</code>）/ 全局（<code>global</code>）</strong>：<strong>出口节点</strong>填写对端节点 ID；留空时节点脚本仍按旧逻辑尝试 <code>hongkong</code> 等内置名。
             </p>
             <p>
-              <strong>新建节点</strong>默认仅启用 <code>node-direct</code>（节点直连）；其余模式需在下方表格中打开「启用」后，在节点上重新执行安装脚本或等待同步，以生成对应 OpenVPN 与路由。
+              <strong>新建节点</strong>默认仅启用 <code>node-direct</code>（节点直连）；其余模式需在下方列表中打开「启用」后，在节点上重新执行安装脚本或等待同步，以生成对应 OpenVPN 与路由。
             </p>
             <p>
               <strong>在线用户</strong>由 Agent 按各模式固定 management 端口统计；若长期为 0 请见运维手册第 3.3 节。若客户端开启「仅允许 VPN 流量」而所用实例未推默认路由（旧版节点），可能出现连上但无公网，见用户指南。
@@ -265,160 +287,153 @@
           </span>
         </el-tag>
       </p>
-      <div class="node-instances-table-wrap">
-        <el-table
-          :data="enabledInstances"
-          class="node-data-table node-instances-table"
-          size="default"
-          stripe
-          table-layout="auto"
-        >
-        <el-table-column label="网段" min-width="200">
-          <template #default="{ row }">
-            <div class="inst-segment-cell">
-              <el-tooltip
-                :content="segmentName(row.segment_id)"
-                placement="top"
-                :disabled="!segmentName(row.segment_id)"
-              >
-                <span class="inst-segment-text">{{ segmentName(row.segment_id) }}</span>
-              </el-tooltip>
-              <el-button
-                v-if="segmentName(row.segment_id)"
-                link
-                type="primary"
-                size="small"
-                class="inst-segment-copy"
-                @click="copyText(segmentName(row.segment_id))"
-              >
-                <el-icon><DocumentCopy /></el-icon>
-              </el-button>
+      <div class="instance-cards-wrap">
+        <div class="instance-cards-grid">
+          <div
+            v-for="row in enabledInstances"
+            :key="row.id"
+            class="record-card instance-card"
+            :class="recordCardToneFromTagType('success')"
+          >
+            <div class="record-card__head instance-card__head">
+              <div class="inst-segment-cell min-w-0">
+                <el-tooltip
+                  :content="segmentName(row.segment_id)"
+                  placement="top"
+                  :disabled="!segmentName(row.segment_id)"
+                >
+                  <span class="inst-segment-text">{{ segmentName(row.segment_id) }}</span>
+                </el-tooltip>
+                <el-button
+                  v-if="segmentName(row.segment_id)"
+                  link
+                  type="primary"
+                  size="small"
+                  class="inst-segment-copy"
+                  @click="copyText(segmentName(row.segment_id))"
+                >
+                  <el-icon><DocumentCopy /></el-icon>
+                </el-button>
+              </div>
+              <el-switch :model-value="row.enabled" size="small" @change="toggleInstance(row)" />
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="模式" min-width="128" show-overflow-tooltip>
-          <template #default="{ row }">{{ modeLabel(row.mode) }}</template>
-        </el-table-column>
-        <el-table-column label="协议" width="104" align="center">
-          <template #default="{ row }">
-            <el-select v-model="editProto[row.id]" size="small" class="inst-select-proto">
-              <el-option label="UDP" value="udp" />
-              <el-option label="TCP" value="tcp" />
-            </el-select>
-          </template>
-        </el-table-column>
-        <el-table-column label="端口" width="132" align="center">
-          <template #default="{ row }">
-            <el-input-number
-              v-model="editPort[row.id]"
-              :min="1"
-              :max="65535"
-              size="small"
-              controls-position="right"
-              class="inst-input-port"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column label="子网 (CIDR)" min-width="160">
-          <template #default="{ row }">
-            <el-input
-              v-model="editSubnet[row.id]"
-              size="small"
-              placeholder="10.8.0.0/24"
-              class="inst-input-cidr"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column label="出口节点" min-width="280">
-          <template #default="{ row }">
-            <template v-if="instanceModeUsesExit(row.mode)">
-              <el-select
-                v-model="editExitNode[row.id]"
-                clearable
-                filterable
-                :placeholder="
-                  row.mode === 'node-direct' ? '未指定（本入口节点公网出口）' : '未指定（内置名回退）'
-                "
-                size="small"
-                class="inst-select-exit"
-              >
-                <el-option
-                  v-for="pid in peerTunnelIds"
-                  :key="pid"
-                  :label="peerTunnelOptionLabel(pid)"
-                  :value="pid"
+            <div class="instance-card__fields">
+              <div class="inst-field-row inst-field-row--top">
+                <div class="inst-field inst-field--stack">
+                  <span class="inst-field__label">模式</span>
+                  <div class="inst-field__ctl inst-field__ctl--text">{{ modeLabel(row.mode) }}</div>
+                </div>
+                <div class="inst-field inst-field--stack">
+                  <span class="inst-field__label">协议</span>
+                  <el-select v-model="editProto[row.id]" size="small" class="inst-field__ctl inst-select-proto">
+                    <el-option label="UDP" value="udp" />
+                    <el-option label="TCP" value="tcp" />
+                  </el-select>
+                </div>
+                <div class="inst-field inst-field--stack">
+                  <span class="inst-field__label">端口</span>
+                  <el-input-number
+                    v-model="editPort[row.id]"
+                    :min="1"
+                    :max="65535"
+                    size="small"
+                    controls-position="right"
+                    class="inst-field__ctl inst-input-port"
+                  />
+                </div>
+              </div>
+              <div class="inst-field inst-field--row">
+                <span class="inst-field__label">子网 (CIDR)</span>
+                <el-input
+                  v-model="editSubnet[row.id]"
+                  size="small"
+                  placeholder="10.8.0.0/24"
+                  class="inst-field__ctl inst-input-cidr"
                 />
-              </el-select>
-            </template>
-            <el-text v-else type="info">—</el-text>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="76" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-button type="primary" size="small" @click="saveInstancePatch(row)">保存</el-button>
-          </template>
-        </el-table-column>
-        <el-table-column prop="enabled" label="启用" width="72" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-switch :model-value="row.enabled" @change="toggleInstance(row)" size="small" />
-          </template>
-        </el-table-column>
-        </el-table>
+              </div>
+              <div class="inst-field inst-field--row">
+                <span class="inst-field__label">出口节点</span>
+                <template v-if="instanceModeUsesExit(row.mode)">
+                  <el-select
+                    v-model="editExitNode[row.id]"
+                    clearable
+                    filterable
+                    :placeholder="
+                      row.mode === 'node-direct' ? '未指定（本入口节点公网出口）' : '未指定（内置名回退）'
+                    "
+                    size="small"
+                    class="inst-field__ctl inst-select-exit"
+                  >
+                    <el-option
+                      v-for="pid in peerTunnelIds"
+                      :key="pid"
+                      :label="peerTunnelOptionLabel(pid)"
+                      :value="pid"
+                    />
+                  </el-select>
+                </template>
+                <el-text v-else type="info" class="inst-field__ctl">—</el-text>
+              </div>
+            </div>
+            <div class="record-card__actions">
+              <el-button type="primary" size="small" @click="saveInstancePatch(row)">保存</el-button>
+            </div>
+          </div>
+        </div>
       </div>
       <el-empty v-if="!enabledInstances.length" description="暂无已启用实例" :image-size="60" />
 
       <el-collapse v-if="disabledInstances.length" class="mt-md">
         <el-collapse-item title="已禁用的接入（可重新启用）" name="disabled">
-          <div class="node-instances-table-wrap">
-          <el-table
-            :data="disabledInstances"
-            class="node-data-table node-instances-table"
-            size="default"
-            stripe
-            table-layout="auto"
-          >
-            <el-table-column label="网段" min-width="200">
-              <template #default="{ row }">
-                <div class="inst-segment-cell">
-                  <el-tooltip
-                    :content="segmentName(row.segment_id)"
-                    placement="top"
-                    :disabled="!segmentName(row.segment_id)"
-                  >
-                    <span class="inst-segment-text">{{ segmentName(row.segment_id) }}</span>
-                  </el-tooltip>
-                  <el-button
-                    v-if="segmentName(row.segment_id)"
-                    link
-                    type="primary"
-                    size="small"
-                    class="inst-segment-copy"
-                    @click="copyText(segmentName(row.segment_id))"
-                  >
-                    <el-icon><DocumentCopy /></el-icon>
-                  </el-button>
+          <div class="instance-cards-wrap">
+            <div class="instance-cards-grid">
+              <div
+                v-for="row in disabledInstances"
+                :key="row.id"
+                class="record-card instance-card instance-card--readonly record-card--tone-muted"
+              >
+                <div class="record-card__head instance-card__head">
+                  <div class="inst-segment-cell min-w-0">
+                    <el-tooltip
+                      :content="segmentName(row.segment_id)"
+                      placement="top"
+                      :disabled="!segmentName(row.segment_id)"
+                    >
+                      <span class="inst-segment-text">{{ segmentName(row.segment_id) }}</span>
+                    </el-tooltip>
+                    <el-button
+                      v-if="segmentName(row.segment_id)"
+                      link
+                      type="primary"
+                      size="small"
+                      class="inst-segment-copy"
+                      @click="copyText(segmentName(row.segment_id))"
+                    >
+                      <el-icon><DocumentCopy /></el-icon>
+                    </el-button>
+                  </div>
+                  <el-switch :model-value="row.enabled" size="small" @change="toggleInstance(row)" />
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="模式" min-width="128" show-overflow-tooltip>
-              <template #default="{ row }">{{ modeLabel(row.mode) }}</template>
-            </el-table-column>
-            <el-table-column label="协议" width="96" align="center">
-              <template #default="{ row }">{{ protoUpper(row.proto) }}</template>
-            </el-table-column>
-            <el-table-column prop="port" label="端口" width="112" align="center" />
-            <el-table-column prop="subnet" label="子网" min-width="140" show-overflow-tooltip />
-            <el-table-column label="出口节点" min-width="240" show-overflow-tooltip>
-              <template #default="{ row }">
-                {{ exitCellLabel(row) }}
-              </template>
-            </el-table-column>
-            <el-table-column prop="enabled" label="启用" width="72" align="center">
-              <template #default="{ row }">
-                <el-switch :model-value="row.enabled" @change="toggleInstance(row)" size="small" />
-              </template>
-            </el-table-column>
-          </el-table>
+                <div class="instance-card__fields">
+                  <div class="kv-row">
+                    <span class="kv-label">模式</span>
+                    <span class="kv-value">{{ modeLabel(row.mode) }}</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-label">协议 / 端口</span>
+                    <span class="kv-value">{{ protoUpper(row.proto) }} / {{ row.port }}</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-label">子网</span>
+                    <span class="kv-value mono-text">{{ row.subnet || '—' }}</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-label">出口节点</span>
+                    <span class="kv-value">{{ exitCellLabel(row) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </el-collapse-item>
       </el-collapse>
@@ -428,37 +443,48 @@
       <div class="page-card-header tunnel-section__head">
         <span class="page-card-title">相关隧道</span>
       </div>
-      <el-table :data="tunnels" class="node-data-table" size="default" stripe>
-        <el-table-column label="对端节点" min-width="168">
-          <template #default="{ row }">{{ tunnelPeerLine(row) }}</template>
-        </el-table-column>
-        <el-table-column prop="subnet" label="隧道子网" min-width="120" />
-        <el-table-column label="WG 本端 IP" min-width="120">
-          <template #default="{ row }">{{ row.node_a === nodeId ? row.ip_a : row.ip_b }}</template>
-        </el-table-column>
-        <el-table-column label="WG 对端 IP" min-width="120">
-          <template #default="{ row }">{{ row.node_a === nodeId ? row.ip_b : row.ip_a }}</template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="90">
-          <template #default="{ row }">
-            <span>
-              <span class="status-dot" :class="`status-dot--${row.status}`" />
-              {{ getStatusInfo('tunnel', row.status).label }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="WG 端口" width="96" align="center">
-          <template #default="{ row }">{{ row.wg_port != null ? row.wg_port : '-' }}</template>
-        </el-table-column>
-        <el-table-column prop="latency_ms" label="延迟(ms)" width="100" align="center">
-          <template #default="{ row }">{{ row.latency_ms > 0 ? row.latency_ms.toFixed(1) : '-' }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="90" align="center" fixed="right">
-          <template #default="{ row }">
+      <div class="tunnel-cards-wrap">
+        <div class="tunnel-cards-grid">
+          <div
+            v-for="row in tunnels"
+            :key="row.id || row.subnet"
+            class="record-card tunnel-card"
+            :class="recordCardToneClass('tunnel', row.status)"
+          >
+          <div class="record-card__head">
+            <div class="record-card__title min-w-0">{{ tunnelPeerLine(row) }}</div>
             <el-button type="primary" size="small" link @click="openTunnelEdit(row)">编辑</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+          <div class="record-card__fields">
+            <div class="kv-row">
+              <span class="kv-label">隧道子网</span>
+              <span class="kv-value mono-text">{{ row.subnet || '—' }}</span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">WG 本端 / 对端</span>
+              <span class="kv-value mono-text">
+                {{ row.node_a === nodeId ? row.ip_a : row.ip_b }} → {{ row.node_a === nodeId ? row.ip_b : row.ip_a }}
+              </span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">状态</span>
+              <span class="kv-value">
+                <span class="status-dot" :class="`status-dot--${row.status}`" />
+                {{ getStatusInfo('tunnel', row.status).label }}
+              </span>
+            </div>
+            <div class="kv-row">
+              <span class="kv-label">WG 端口 / 延迟</span>
+              <span class="kv-value">
+                {{ row.wg_port != null ? row.wg_port : '—' }}
+                <span class="record-card__meta"> · </span>
+                {{ row.latency_ms > 0 ? row.latency_ms.toFixed(1) : '—' }} ms
+              </span>
+            </div>
+          </div>
+          </div>
+        </div>
+      </div>
       <el-empty v-if="!tunnels.length" description="暂无隧道" :image-size="60" class="tunnel-empty" />
     </div>
 
@@ -532,12 +558,14 @@ import { ref, computed, onMounted, reactive } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import http from '../api/http'
-import { getStatusInfo } from '../utils'
+import { getStatusInfo, recordCardToneClass, recordCardToneFromTagType } from '../utils'
 
 const route = useRoute()
 const nodeId = route.params.id
 const loading = ref(false)
 const refreshing = ref(false)
+/** 与节点列表同源：来自 /api/nodes/upgrade-status，用于详情页 Agent 版本着色 */
+const latestAgentVersion = ref('')
 const node = ref({})
 const instances = ref([])
 const segments = ref([])
@@ -581,6 +609,14 @@ const modeLabel = (mode) => {
   }
   return m[mode] || mode || '-'
 }
+
+/** mesh 摘要标签：直连/分流/全局 */
+const modeMeshShort = (mode) => {
+  const m = { 'node-direct': '直连', 'cn-split': '分流', global: '全局' }
+  return m[mode] || mode || '—'
+}
+
+const protoMeshChar = (p) => ((p || 'udp').toLowerCase() === 'tcp' ? 'T' : 'U')
 
 const instanceModeUsesExit = (mode) =>
   mode === 'node-direct' ||
@@ -647,21 +683,66 @@ const instanceListenDirty = (inst) => {
   return ep !== savedProtoKey(inst) || editPort[inst.id] !== inst.port
 }
 
+const displayAgentVersion = (v) => {
+  const s = String(v || '').trim().replace(/^v/i, '').replace(/-unknown$/i, '')
+  return s
+}
+
+const parseVersion = (v) => {
+  const s = displayAgentVersion(v)
+  if (!s) return null
+  const parts = s.split('.').map((x) => Number.parseInt(x, 10))
+  if (parts.some((n) => Number.isNaN(n))) return null
+  while (parts.length < 3) parts.push(0)
+  return parts.slice(0, 3)
+}
+
+const compareVersion = (a, b) => {
+  const va = parseVersion(a)
+  const vb = parseVersion(b)
+  if (!va || !vb) return 0
+  for (let i = 0; i < 3; i++) {
+    if (va[i] > vb[i]) return 1
+    if (va[i] < vb[i]) return -1
+  }
+  return 0
+}
+
+/** empty：未上报；warn：格式异常或缺少参考版本；latest：不低于参考；stale：低于参考 */
+const resolveAgentVersionTone = (agentRaw) => {
+  const cur = displayAgentVersion(agentRaw)
+  if (!cur) return 'empty'
+  if (!parseVersion(cur)) return 'warn'
+  const lat = latestAgentVersion.value
+  if (!lat || !parseVersion(lat)) return 'warn'
+  return compareVersion(cur, lat) >= 0 ? 'latest' : 'stale'
+}
+
 const statCards = computed(() => {
   const st = node.value.status
   const statusLabel = st ? getStatusInfo('node', st).label : '-'
+  const agentRaw = String(node.value.agent_version || '').trim()
+  const agentDisplay = agentRaw ? displayAgentVersion(agentRaw) : '—'
+
   return [
     {
-      key: 'status',
-      label: '状态',
-      value: statusLabel,
+      key: 'latest-status',
+      statusLabel,
       rawStatus: st || '',
+      agentDisplay,
+      agentVersionTone: resolveAgentVersionTone(agentRaw),
+      onlineUsers: node.value.online_users,
       icon: 'CircleCheck',
       color: 'primary'
     },
-    { key: 'users', label: '在线用户', value: node.value.online_users ?? 0, icon: 'User', color: 'success' },
     { key: 'number', label: '节点号', value: node.value.node_number || '-', icon: 'Coin', color: 'warning' },
-    { key: 'agent', label: 'Agent 版本', value: node.value.agent_version || '-', icon: 'Cpu', color: 'info' }
+    {
+      key: 'tunnels',
+      label: '相关隧道',
+      value: tunnels.value?.length ?? 0,
+      icon: 'Connection',
+      color: 'info'
+    }
   ]
 })
 
@@ -669,11 +750,25 @@ const load = async ({ refresh = false } = {}) => {
   if (refresh) refreshing.value = true
   else loading.value = true
   try {
-    const [nodeRes, statusRes, nodesRes] = await Promise.all([
+    const upgradeReq = http
+      .get('/api/nodes/upgrade-status', {
+        validateStatus: (s) => (s >= 200 && s < 300) || s === 404
+      })
+      .catch(() => ({ status: 404, data: {} }))
+
+    const [nodeRes, statusRes, nodesRes, upgradeRes] = await Promise.all([
       http.get(`/api/nodes/${nodeId}`),
       http.get(`/api/nodes/${nodeId}/status`),
-      http.get('/api/nodes')
+      http.get('/api/nodes'),
+      upgradeReq
     ])
+
+    if (upgradeRes.status !== 404 && upgradeRes.data?.latest_version) {
+      latestAgentVersion.value = displayAgentVersion(upgradeRes.data.latest_version)
+    } else {
+      latestAgentVersion.value = ''
+    }
+
     node.value = nodeRes.data.node || {}
     instances.value = nodeRes.data.instances || []
     segments.value = nodeRes.data.segments || []
@@ -684,6 +779,9 @@ const load = async ({ refresh = false } = {}) => {
     }
     tunnels.value = statusRes.data.tunnels || []
     node.value.online_users = statusRes.data.online_users
+    if (statusRes.data?.agent_version !== undefined && statusRes.data?.agent_version !== null) {
+      node.value.agent_version = statusRes.data.agent_version
+    }
     const m = {}
     for (const it of nodesRes.data.items || []) {
       if (it.node?.id) m[it.node.id] = it.node.name || ''
@@ -880,9 +978,28 @@ onMounted(() => {
 .node-page-header {
   margin-bottom: var(--spacing-lg);
 }
+/* 返回区、竖线、自定义标题行与右侧按钮垂直居中对齐 */
+.node-page-header :deep(.el-page-header__header) {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.node-page-header :deep(.el-page-header__left) {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 0;
+}
+.node-page-header :deep(.el-page-header__back) {
+  display: inline-flex;
+  align-items: center;
+}
 .node-page-header :deep(.el-page-header__content) {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
 }
 .detail-header-row {
   display: flex;
@@ -902,6 +1019,11 @@ onMounted(() => {
 .detail-header-name {
   font-size: 18px;
   font-weight: 600;
+}
+.detail-header-node-num {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-secondary);
 }
 .detail-header-tag {
   margin-left: 0;
@@ -1049,6 +1171,96 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
 }
+
+/* 运行概况：主数字与标签在卡内靠左对齐（自适应宽度） */
+.node-overview .stat-card .stat-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  min-height: 56px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+.node-overview .stat-label--overview {
+  width: 100%;
+  text-align: left;
+}
+
+.node-overview .stat-value--overview-num {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  align-items: center;
+  text-align: left;
+}
+
+.node-overview .stat-value--overview-num .stat-value-text {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.stat-latest {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  text-align: left;
+}
+
+.stat-value--latest {
+  white-space: normal;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: baseline;
+  width: 100%;
+}
+
+.stat-inline-online-num {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.stat-agent-version-display {
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.45;
+  font-family: ui-monospace, 'Cascadia Code', 'Consolas', monospace;
+  word-break: break-all;
+}
+
+.stat-agent-version-display--latest {
+  color: var(--el-color-success);
+  font-weight: 600;
+}
+
+.stat-agent-version-display--stale {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
+
+.stat-agent-version-display--warn {
+  color: var(--el-color-warning);
+  font-weight: 500;
+}
+
+.stat-agent-version-display--empty {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.stat-label--overview {
+  margin-top: 4px;
+}
+
 .node-kv-wg {
   display: flex;
   flex-wrap: wrap;
@@ -1116,10 +1328,6 @@ onMounted(() => {
     width: 100%;
   }
 }
-.mono-text {
-  font-family: ui-monospace, 'Cascadia Code', monospace;
-  font-size: 13px;
-}
 .wg-key-inline {
   display: inline-flex;
   flex-wrap: wrap;
@@ -1150,68 +1358,168 @@ onMounted(() => {
   width: 100%;
   box-sizing: border-box;
 }
-.node-data-table {
+.instance-cards-wrap {
   width: 100%;
 }
-.node-data-table :deep(.el-table__cell) {
-  padding: 12px 10px;
-  vertical-align: middle;
-}
-.node-data-table :deep(th.el-table__cell) {
-  background: var(--el-fill-color-light);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.node-data-table :deep(.el-table__row) {
-  font-size: 13px;
-}
-.node-instances-table-wrap {
+
+.instance-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 252px), 320px));
+  gap: 12px;
   width: 100%;
+  align-items: stretch;
 }
-.node-instances-table.node-data-table {
+
+.node-instances-card .instance-card.record-card {
   width: 100%;
+  min-width: 0;
+  max-width: 320px;
+  justify-self: start;
+  box-sizing: border-box;
+  padding: 10px 12px 8px;
 }
-.node-instances-table.node-data-table :deep(.el-table__cell) {
-  padding: 8px 10px;
-  vertical-align: middle;
+
+.node-instances-card .instance-card .record-card__head {
+  margin-bottom: 8px;
 }
-.node-instances-table.node-data-table :deep(.el-table__body .el-table__cell) {
-  white-space: nowrap;
+
+.node-instances-card .instance-card .record-card__actions {
+  margin-top: 8px;
+  padding-top: 8px;
 }
-.node-instances-table :deep(.inst-segment-cell) {
+
+.instance-card__head {
+  align-items: center !important;
+}
+.inst-segment-cell {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 1;
   min-width: 0;
-  max-width: 100%;
 }
-.node-instances-table :deep(.inst-segment-text) {
+.inst-segment-text {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
 }
-.node-instances-table :deep(.inst-segment-copy) {
+.inst-segment-copy {
   flex-shrink: 0;
   padding: 2px 4px;
   margin: 0;
 }
-.node-instances-table :deep(.inst-select-proto) {
-  width: 100%;
-  max-width: 96px;
+.instance-card__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.node-instances-table :deep(.inst-input-port) {
-  width: 100%;
-  max-width: 124px;
+
+.inst-field-row--top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(76px, 100px) minmax(102px, 118px);
+  gap: 8px 8px;
+  align-items: end;
 }
-.node-instances-table :deep(.inst-input-cidr) {
+
+/* 与 small 控件底边对齐：纯文本模式行高与输入框可视高度一致 */
+.inst-field-row--top .inst-field__ctl--text {
+  min-height: var(--el-component-size-small);
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.inst-field--stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.inst-field--stack .inst-select-proto,
+.inst-field--stack .inst-input-port {
+  width: 100%;
+  max-width: none;
+}
+
+.inst-field--row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 6px 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.inst-field__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.inst-field--row .inst-field__label {
+  padding-top: 1px;
+}
+
+.inst-field__ctl {
+  width: 100%;
+  min-width: 0;
+}
+
+.inst-field__ctl--text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+}
+
+.instance-card--readonly .instance-card__fields {
+  gap: 8px;
+}
+
+.inst-select-proto {
+  max-width: none;
+}
+
+.inst-input-port {
+  max-width: none;
+}
+
+.inst-input-cidr {
   width: 100%;
 }
-.node-instances-table :deep(.inst-select-exit) {
+
+.inst-select-exit {
   width: 100%;
-  min-width: 220px;
-  max-width: 100%;
+}
+
+@media (max-width: 720px) {
+  .instance-cards-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .node-instances-card .instance-card.record-card {
+    max-width: none;
+    justify-self: stretch;
+  }
+
+  .tunnel-cards-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tunnel-section .tunnel-card {
+    max-width: none;
+    justify-self: stretch;
+  }
+
+  .inst-field-row--top {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
 }
 .mesh-summary-section {
   margin-bottom: 10px;
@@ -1287,6 +1595,26 @@ onMounted(() => {
 .tunnel-section__head {
   margin-bottom: var(--spacing-md);
 }
+
+.tunnel-cards-wrap {
+  width: 100%;
+}
+
+.tunnel-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 268px), 400px));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.tunnel-section .tunnel-card.record-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 400px;
+  justify-self: start;
+  box-sizing: border-box;
+}
+
 .tunnel-empty {
   padding: 8px 0 4px;
 }

@@ -53,7 +53,7 @@ EXTERNAL_URL=http://127.0.0.1:56700
 # EXTERNAL_URL_LAN=http://192.168.1.10:56700
 # CORS_ALLOWED_ORIGINS=https://vpn-admin.example.com
 AGENT_LATEST_VERSION=${AGENT_RELEASE_VERSION}
-# IPLIST_DUAL_ENABLED=true
+# IPLIST_DUAL_ENABLED 已废弃（双库始终开启）
 VPN_AGENT_BIN_DIR=/opt/vpn-api/bin
 EOF
 
