@@ -90,6 +90,47 @@ ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
 fail() { echo -e "  ${RED}✗${NC} $*"; }
 
+# 每行一条 CIDR：ipset restore（flush + add）比逐条 ipset add 快数量级。失败返回 1。
+vpn_ipset_flush_and_restore_from_cidr_file() {
+  local set_name="$1"
+  local list_file="$2"
+  local batch lines
+  [[ -s "$list_file" ]] || return 1
+  batch="$(mktemp)" || return 1
+  {
+    echo "flush ${set_name}"
+    awk -v s="$set_name" '
+      /^[[:space:]]*#/ { next }
+      {
+        gsub(/\r/, "", $0)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        if ($0 != "") print "add", s, $0
+      }
+    ' "$list_file"
+  } > "$batch" || { rm -f "$batch"; return 1; }
+  lines="$(wc -l < "$batch" | tr -d ' ')"
+  lines="${lines:-0}"
+  if [[ "$lines" -lt 2 ]]; then
+    rm -f "$batch"
+    return 1
+  fi
+  if ipset restore -exist < "$batch" 2>/dev/null; then
+    rm -f "$batch"
+    return 0
+  fi
+  rm -f "$batch"
+  return 1
+}
+
+vpn_ipset_per_line_add_from_cidr_file() {
+  local set_name="$1"
+  local list_file="$2"
+  while IFS= read -r cidr || [[ -n "$cidr" ]]; do
+    [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+    ipset add "$set_name" "$cidr" -exist 2>/dev/null || true
+  done < "$list_file"
+}
+
 TOTAL_STEPS=9
 LEGACY_OPENVPN_UNITS=(
   "openvpn-server@server.service"
@@ -1649,10 +1690,22 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       LOCAL_DEV="$(ip route show default | awk '{print $5; exit}')"
 
       if [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
+        ROUTE_BATCH="$(mktemp)"
         while IFS= read -r cidr; do
           [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-          ip route add "$cidr" via "$LOCAL_GW" dev "$LOCAL_DEV" table $TABLE_NUM 2>/dev/null || true
+          cidr="${cidr//$'\r'/}"
+          printf 'route add %s via %s dev %s table %s\n' "$cidr" "$LOCAL_GW" "$LOCAL_DEV" "$TABLE_NUM" >> "$ROUTE_BATCH"
         done < /etc/vpn-agent/cn-ip-list.txt
+        if [[ -s "$ROUTE_BATCH" ]]; then
+          if ! ip -force -batch "$ROUTE_BATCH" 2>/dev/null; then
+            while IFS= read -r cidr; do
+              [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+              cidr="${cidr//$'\r'/}"
+              ip route add "$cidr" via "$LOCAL_GW" dev "$LOCAL_DEV" table "$TABLE_NUM" 2>/dev/null || true
+            done < /etc/vpn-agent/cn-ip-list.txt
+          fi
+        fi
+        rm -f "$ROUTE_BATCH"
       fi
 
       ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
@@ -1718,33 +1771,46 @@ download_china_list() {
   curl -fsSL --connect-timeout 8 --max-time 30 --retry 2 --retry-delay 1 "$url" -o "$CHINA_LIST" 2>/dev/null
 }
 
-DEFAULT_REACHABLE=0
-MIRROR_REACHABLE=0
-probe_url "$CHINA_LIST_URL_DEFAULT" && DEFAULT_REACHABLE=1
-probe_url "$CHINA_LIST_URL_MIRROR" && MIRROR_REACHABLE=1
+download_china_list_from_cp() {
+  [[ -z "${API_URL:-}" ]] && return 1
+  curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 1 \
+    "${API_URL%/}/api/ip-lists/download/domestic" -o "$CHINA_LIST" 2>/dev/null
+}
 
-if [[ "$DEFAULT_REACHABLE" -eq 1 && "$MIRROR_REACHABLE" -eq 1 ]]; then
-  log "  Both default and CN mirror are reachable; if downloads are unstable, consider using a proxy."
-  show_proxy_help
-fi
-
-if download_china_list "$CHINA_LIST_URL_DEFAULT"; then
-  log "  china_ip_list downloaded from default source"
-elif download_china_list "$CHINA_LIST_URL_MIRROR"; then
-  log "  default source unavailable, switched to CN mirror"
+if download_china_list_from_cp && [[ -s "$CHINA_LIST" ]]; then
+  log "  china_ip_list downloaded from control plane"
 else
-  log "  WARNING: could not download china_ip_list from default or CN mirror"
-  show_proxy_help
+  DEFAULT_REACHABLE=0
+  MIRROR_REACHABLE=0
+  probe_url "$CHINA_LIST_URL_DEFAULT" && DEFAULT_REACHABLE=1
+  probe_url "$CHINA_LIST_URL_MIRROR" && MIRROR_REACHABLE=1
+
+  if [[ "$DEFAULT_REACHABLE" -eq 1 && "$MIRROR_REACHABLE" -eq 1 ]]; then
+    log "  Both default and CN mirror are reachable; if downloads are unstable, consider using a proxy."
+    show_proxy_help
+  fi
+
+  if download_china_list "$CHINA_LIST_URL_DEFAULT"; then
+    log "  china_ip_list downloaded from default source"
+  elif download_china_list "$CHINA_LIST_URL_MIRROR"; then
+    log "  default source unavailable, switched to CN mirror"
+  else
+    log "  WARNING: could not download china_ip_list from control plane or public mirrors"
+    show_proxy_help
+  fi
 fi
 
 if [[ -s "$CHINA_LIST" ]]; then
-  while IFS= read -r cidr; do
-    [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-    ipset add china-ip "$cidr" -exist
-  done < "$CHINA_LIST"
+  if vpn_ipset_flush_and_restore_from_cidr_file "china-ip" "$CHINA_LIST"; then
+    log "  china-ip ipset loaded (ipset restore)"
+  else
+    warn "  china-ip: ipset restore failed, using slower per-line add"
+    ipset flush china-ip 2>/dev/null || true
+    vpn_ipset_per_line_add_from_cidr_file "china-ip" "$CHINA_LIST"
+    log "  china-ip ipset loaded (per-line fallback)"
+  fi
   cp "$CHINA_LIST" /etc/vpn-agent/cn-ip-list.txt
   rm -f "$CHINA_LIST"
-  log "  china-ip ipset loaded"
 else
   rm -f "$CHINA_LIST"
   log "  WARNING: china_ip_list is empty, skipped ipset population"
@@ -1801,10 +1867,11 @@ if [[ -s "$OVERSEAS_LIST" ]]; then
   fi
   ipset flush overseas-ip 2>/dev/null || true
   if [[ -s "$OVERSEAS_LIST_V4" ]]; then
-    while IFS= read -r cidr; do
-      [[ -z "$cidr" ]] && continue
-      ipset add overseas-ip "$cidr" -exist 2>/dev/null || true
-    done < "$OVERSEAS_LIST_V4"
+    if ! vpn_ipset_flush_and_restore_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
+      warn "  overseas-ip: ipset restore failed, using slower per-line add"
+      ipset flush overseas-ip 2>/dev/null || true
+      vpn_ipset_per_line_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"
+    fi
   fi
   cp "$OVERSEAS_LIST_V4" /etc/vpn-agent/overseas-ip-list.txt
   rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
