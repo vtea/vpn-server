@@ -307,9 +307,10 @@ func normalizeOpenVPNProto(s string) string {
 
 // instanceRow matches bootstrap / control-plane instance JSON.
 type instanceRow struct {
-	Mode  string `json:"mode"`
-	Proto string `json:"proto"`
-	Port  int    `json:"port"`
+	Mode    string `json:"mode"`
+	Proto   string `json:"proto"`
+	Port    int    `json:"port"`
+	Enabled *bool  `json:"enabled,omitempty"` // nil 或未写字段视为启用
 }
 
 // parseInstancesFromNodeConfigJSON extracts instances from:
@@ -425,6 +426,45 @@ func mergeInstancesIntoBootstrapDoc(bootstrap []byte, instArray json.RawMessage)
 	return out, nil
 }
 
+// jsonParsedEqual reports whether a and b are the same JSON value (ignores object key ordering and whitespace).
+func jsonParsedEqual(a, b []byte) bool {
+	a = bytes.TrimSpace(a)
+	b = bytes.TrimSpace(b)
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	var va, vb any
+	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
+		return false
+	}
+	na, err1 := json.Marshal(va)
+	nb, err2 := json.Marshal(vb)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return bytes.Equal(na, nb)
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory + rename, reducing torn JSON on crash.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".vpn-cfg-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
 // mergeBootstrapInstancesFromLastConfigPayload writes instances from the control-plane payload into
 // /etc/vpn-agent/bootstrap-node.json so policy-routing.sh / nat-rules.sh see the same rows as last-config,
 // then restarts vpn-routing.service (policy + NAT). No-op if payload has no instances, array is empty,
@@ -448,11 +488,18 @@ func mergeBootstrapInstancesFromLastConfigPayload(payload []byte) error {
 		}
 		return err
 	}
+	var existing map[string]json.RawMessage
+	if err := json.Unmarshal(data, &existing); err != nil {
+		log.Printf("config update: bootstrap JSON parse failed (skip unchanged-check): %v", err)
+	} else if prev, ok := existing["instances"]; ok && jsonParsedEqual([]byte(prev), []byte(instRaw)) {
+		log.Printf("config update: instances unchanged vs %s, skip bootstrap rewrite and vpn-routing restart", path)
+		return nil
+	}
 	out, err := mergeInstancesIntoBootstrapDoc(data, instRaw)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, out, 0600); err != nil {
+	if err := writeFileAtomic(path, out, 0o600); err != nil {
 		return err
 	}
 	log.Printf("config update: merged %d instance(s) into %s", len(instElems), path)
@@ -568,7 +615,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			log.Printf("config update: invalid JSON payload, ignored")
 			return
 		}
-		if err := os.WriteFile("/etc/vpn-agent/last-config.json", msg.Payload, 0600); err != nil {
+		if err := writeFileAtomic("/etc/vpn-agent/last-config.json", msg.Payload, 0o600); err != nil {
 			log.Printf("config update: write last-config.json: %v", err)
 			return
 		}
@@ -1637,13 +1684,13 @@ func mergeBootstrapTunnelsJSON(tunnels []wgRefreshTunnel) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o600)
+	return writeFileAtomic(path, out, 0o600)
 }
 
 func restartVpnRoutingAfterTunnelChange() {
 	out, err := exec.Command("systemctl", "restart", "vpn-routing.service").CombinedOutput()
 	if err != nil {
-		log.Printf("wg-refresh: restart vpn-routing.service: %v %s", err, strings.TrimSpace(string(out)))
+		log.Printf("vpn-routing: systemctl restart failed: %v %s", err, strings.TrimSpace(string(out)))
 	}
 }
 
@@ -1933,12 +1980,14 @@ func ensureUDPExplicitExitNotify(lines []string) []string {
 	return lines
 }
 
-func applyOpenVPNServerConf(mode string, port int, proto string) error {
+// applyOpenVPNServerConf rewrites port/proto (and UDP explicit-exit-notify) in server.conf when needed.
+// Returns (changed, err): changed is true only when the file was written.
+func applyOpenVPNServerConf(mode string, port int, proto string) (bool, error) {
 	proto = normalizeOpenVPNProto(proto)
 	confPath := filepath.Join("/etc/openvpn/server", mode, "server.conf")
 	b, err := os.ReadFile(confPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	raw := strings.ReplaceAll(string(b), "\r\n", "\n")
 	lines := strings.Split(raw, "\n")
@@ -1965,12 +2014,16 @@ func applyOpenVPNServerConf(mode string, port int, proto string) error {
 	}
 	newContent := strings.Join(out, "\n")
 	if newContent == raw {
-		return nil
+		return false, nil
 	}
-	return os.WriteFile(confPath, []byte(newContent), 0644)
+	if err := writeFileAtomic(confPath, []byte(newContent), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// applyOpenVPNServerFromInstancesPayload updates each mode's server.conf port/proto from control-plane instance rows, then try-restarts units.
+// applyOpenVPNServerFromInstancesPayload updates each mode's server.conf port/proto from control-plane instance rows,
+// then restarts units only when server.conf was actually modified (avoids noop update_config disrupting OpenVPN).
 func applyOpenVPNServerFromInstancesPayload(payload []byte) {
 	rows := parseInstancesFromNodeConfigJSON(payload)
 	if len(rows) == 0 {
@@ -1982,13 +2035,27 @@ func applyOpenVPNServerFromInstancesPayload(payload []byte) {
 			log.Printf("openvpn apply: skip row (mode=%q port=%d)", mode, row.Port)
 			continue
 		}
-		if err := applyOpenVPNServerConf(mode, row.Port, row.Proto); err != nil {
+		if row.Enabled != nil && !*row.Enabled {
+			log.Printf("openvpn apply: stopping disabled instance openvpn-%s", mode)
+			out, err := exec.Command("systemctl", "stop", "openvpn-"+mode).CombinedOutput()
+			s := strings.TrimSpace(string(out))
+			if err != nil && !strings.Contains(strings.ToLower(s), "not loaded") && !strings.Contains(strings.ToLower(s), "not found") {
+				log.Printf("openvpn apply: stop openvpn-%s: %v %s", mode, err, s)
+			}
+			continue
+		}
+		changed, err := applyOpenVPNServerConf(mode, row.Port, row.Proto)
+		if err != nil {
 			log.Printf("openvpn apply: mode=%s: %v", mode, err)
 			continue
 		}
-		out, err := exec.Command("systemctl", "try-restart", "openvpn-"+mode).CombinedOutput()
+		if !changed {
+			continue
+		}
+		// 使用 restart 而非 try-restart：try-restart 在单元非 active 时不会启动，会导致已写盘的新配置永远不生效。
+		out, err := exec.Command("systemctl", "restart", "openvpn-"+mode).CombinedOutput()
 		if err != nil {
-			log.Printf("openvpn apply: try-restart openvpn-%s: %v %s", mode, err, strings.TrimSpace(string(out)))
+			log.Printf("openvpn apply: restart openvpn-%s: %v %s", mode, err, strings.TrimSpace(string(out)))
 		}
 	}
 }
@@ -2125,8 +2192,15 @@ func applyExceptions(rules []exceptionRule) {
 		}
 	}
 
-	rulesJSON, _ := json.Marshal(rules)
-	os.WriteFile("/etc/vpn-agent/exceptions.json", rulesJSON, 0600)
+	rulesJSON, err := json.Marshal(rules)
+	if err != nil {
+		log.Printf("apply exceptions: marshal rules: %v", err)
+		return
+	}
+	if err := writeFileAtomic("/etc/vpn-agent/exceptions.json", rulesJSON, 0o600); err != nil {
+		log.Printf("apply exceptions: write exceptions.json: %v", err)
+		return
+	}
 
 	cmd := exec.Command("bash", "-c", script.String())
 	out, err := cmd.CombinedOutput()
@@ -2164,13 +2238,15 @@ func generateDnsmasqConfig(rules []exceptionRule) {
 	}
 
 	confPath := "/etc/dnsmasq.d/vpn-exceptions.conf"
-	if err := os.WriteFile(confPath, []byte(conf.String()), 0644); err != nil {
+	if err := writeFileAtomic(confPath, []byte(conf.String()), 0o644); err != nil {
 		log.Printf("write dnsmasq config failed: %v", err)
 		return
 	}
 
 	if out, err := exec.Command("systemctl", "reload", "dnsmasq").CombinedOutput(); err != nil {
-		exec.Command("systemctl", "restart", "dnsmasq").CombinedOutput()
+		if rOut, rErr := exec.Command("systemctl", "restart", "dnsmasq").CombinedOutput(); rErr != nil {
+			log.Printf("dnsmasq reload failed (%v), restart also failed: %v\n%s", err, rErr, strings.TrimSpace(string(rOut)))
+		}
 		_ = out
 	}
 	log.Printf("dnsmasq config updated with domain exceptions")

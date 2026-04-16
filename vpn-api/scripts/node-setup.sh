@@ -12,6 +12,8 @@ OPEN_HOST_FIREWALL_MODE="auto"
 OPENVPN_PROTO_OVERRIDE=""
 # 端口冲突策略：prompt(交互询问) / abort(直接中止) / cleanup(自动清理白名单进程)
 PORT_CONFLICT_POLICY=""
+# 1=跳过 Step 7 海外列表下载与 overseas-ip 灌表（保留空集与占位列表文件）
+SKIP_OVERSEAS_IPSET=0
 FIREWALL_BACKEND="none"
 FIREWALL_ACTIVE=0
 SKIPPED_OPENVPN_MODES=()
@@ -19,7 +21,7 @@ SKIPPED_OPENVPN_MODES=()
 usage() {
   cat <<'EOF'
 Usage:
-  node-setup.sh --api-url <url> --token <node-token> [--apply] [--non-interactive] [--force-reinstall] [--open-host-firewall|--no-open-host-firewall] [--openvpn-proto udp|tcp] [--port-conflict-policy prompt|abort|cleanup]
+  node-setup.sh --api-url <url> --token <node-token> [--apply] [--non-interactive] [--force-reinstall] [--open-host-firewall|--no-open-host-firewall] [--openvpn-proto udp|tcp] [--port-conflict-policy prompt|abort|cleanup] [--skip-overseas-ipset]
 
 无参数或缺少 URL/Token 时，若在 TTY 下运行将显示交互菜单（查看信息 / 卸载 / 部署）。
 
@@ -42,6 +44,7 @@ Default mode is dry-run. Use --apply to execute.
                             交互式且未加本参数时，注册后会询问是否改为全 UDP / 全 TCP
   --port-conflict-policy   端口冲突处理策略：prompt(询问管理员) / abort(直接中止) / cleanup(自动清理白名单进程)
                             默认：交互模式 prompt；非交互模式 abort
+  --skip-overseas-ipset    跳过海外 IP 列表下载与 overseas-ip ipset 灌表（仍创建空集合并写入占位 overseas-ip-list.txt）
 
 提示：curl … | bash 时 stdin 为管道；若需交互询问「是否重装」，脚本会从 /dev/tty 读取。
 无人值守或 CI 请使用 --force-reinstall。
@@ -65,6 +68,7 @@ while [[ $# -gt 0 ]]; do
       PORT_CONFLICT_POLICY="${2:-}"
       shift 2
       ;;
+    --skip-overseas-ipset) SKIP_OVERSEAS_IPSET=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     *)          echo "Unknown: $1"; usage; exit 1 ;;
   esac
@@ -712,7 +716,8 @@ collect_required_ports_from_bootstrap_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
   local ic i inst_en mode port p tc wgport
-  ic="$(jq '.instances | length' "$f")"
+  ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
     if ! is_enabled_value "$inst_en"; then
@@ -841,7 +846,7 @@ verify_required_ports_listening_file() {
     listeners=""
     tries=0
     # openvpn 刚启动后监听建立可能有短暂延迟；vpn-agent 重启后 try-restart OpenVPN 也会短暂无监听
-    while [[ "$tries" -lt 15 ]]; do
+    while [[ "$tries" -lt 28 ]]; do
       if [[ "$proto" == "tcp" ]]; then
         listeners="$(ss -H -tlnp "( sport = :${port} )" 2>/dev/null || true)"
       else
@@ -887,7 +892,8 @@ post_deploy_health_check() {
     errors=$((errors + 1))
   fi
 
-  ic="$(jq '.instances | length' "$f")"
+  ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
     if ! is_enabled_value "$inst_en"; then
@@ -899,7 +905,7 @@ post_deploy_health_check() {
       continue
     fi
     ov_ok=0
-    for j in $(seq 1 25); do
+    for j in $(seq 1 50); do
       if systemctl is-active --quiet "openvpn-${mode}.service"; then
         ov_ok=1
         break
@@ -909,7 +915,7 @@ post_deploy_health_check() {
     if [[ "$ov_ok" -eq 1 ]]; then
       ok "服务健康: openvpn-${mode}.service"
     else
-      fail "服务异常: openvpn-${mode}.service（25s 内未变为 active，可能因 vpn-agent 收到 update_config 后 try-restart 较慢）"
+      fail "服务异常: openvpn-${mode}.service（50s 内未变为 active；若刚部署请查 journalctl -u openvpn-${mode} 与 vpn-agent 日志）"
       errors=$((errors + 1))
     fi
   done
@@ -943,7 +949,8 @@ print_external_firewall_reminder() {
   log "════════════════ 外部放行清单（云安全组 / 路由器 / 上游防火墙）════════════════"
   log "以下端口需在「公网入站」方向对本机公网 IP 放行（本机未启用 ufw/firewalld 时亦须配置）："
   local ic i port p inst_mode pup
-  ic="$(echo "$json" | jq '.instances | length')"
+  ic="$(echo "$json" | jq '.instances | length' 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(echo "$json" | jq -r ".instances[$i].enabled // true")"
     if ! is_enabled_value "$inst_en"; then
@@ -957,7 +964,8 @@ print_external_firewall_reminder() {
     log "  - OpenVPN [${inst_mode}]  ${pup} ${port}   （协议 ${p}，端口 ${port}）"
   done
   local tc wgport
-  tc="$(echo "$json" | jq '.tunnels | length')"
+  tc="$(echo "$json" | jq '.tunnels | length' 2>/dev/null || echo 0)"
+  [[ "$tc" =~ ^[0-9]+$ ]] || tc=0
   if [[ "$tc" -gt 0 ]]; then
     wgport="$(echo "$json" | jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty')"
     if [[ -n "$wgport" ]]; then
@@ -973,7 +981,8 @@ prompt_openvpn_proto_interactive() {
   [[ "$NON_INTERACTIVE" -eq 1 ]] && return 0
   [[ -n "${OPENVPN_PROTO_OVERRIDE:-}" ]] && return 0
   local ic
-  ic="$(echo "$NODE_JSON" | jq '.instances | length')"
+  ic="$(echo "$NODE_JSON" | jq '.instances | length' 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
   [[ "$ic" -eq 0 ]] && return 0
   echo ""
   log "OpenVPN 传输协议（以下为控制面当前下发）"
@@ -1337,9 +1346,11 @@ rm -f "$REG_TMP"
 NODE_ID="$(echo "$NODE_JSON" | jq -r '.node_id')"
 NODE_NUMBER="$(echo "$NODE_JSON" | jq -r '.node_number')"
 PUBLIC_IP="$(echo "$NODE_JSON" | jq -r '.public_ip')"
-INSTANCE_COUNT="$(echo "$NODE_JSON" | jq '.instances | length')"
+INSTANCE_COUNT="$(echo "$NODE_JSON" | jq '.instances | length' 2>/dev/null || echo 0)"
+[[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || INSTANCE_COUNT=0
 ENABLED_INSTANCE_COUNT="$(count_enabled_instances_from_json "$NODE_JSON")"
-TUNNEL_COUNT="$(echo "$NODE_JSON" | jq '.tunnels | length')"
+TUNNEL_COUNT="$(echo "$NODE_JSON" | jq '.tunnels | length' 2>/dev/null || echo 0)"
+[[ "$TUNNEL_COUNT" =~ ^[0-9]+$ ]] || TUNNEL_COUNT=0
 
 log "  Node ID:     $NODE_ID"
 log "  Node Number: $NODE_NUMBER"
@@ -1667,6 +1678,7 @@ grep -q "^net.ipv4.ip_forward" /etc/sysctl.conf 2>/dev/null || \
 cat > /etc/vpn-agent/policy-routing.sh <<'POLROUTE'
 #!/bin/bash
 set -euo pipefail
+shopt -s nullglob
 
 # 与 node-setup.sh 中逻辑一致（本文件由 heredoc 生成，不会继承父脚本的函数）
 is_enabled_value() {
@@ -1689,7 +1701,7 @@ INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE")"
 TUNNEL_COUNT="$(jq '.tunnels | length' "$NODE_JSON_FILE")"
 
 PEER_MAP_DIR="$(mktemp -d)"
-trap "rm -rf $PEER_MAP_DIR" EXIT
+trap 'rm -rf "$PEER_MAP_DIR"' EXIT
 
 for t in $(seq 0 $((TUNNEL_COUNT - 1))); do
   PEER_ID="$(jq -r ".tunnels[$t].peer_node_id" "$NODE_JSON_FILE")"
@@ -1741,11 +1753,11 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       if [[ -z "$EXIT_NODE" ]]; then
         continue
       fi
-      TABLE_NUM=$((TABLE_NUM + 1))
       PEER_IP="$(get_peer_ip "$EXIT_NODE")"
       [[ -z "$PEER_IP" ]] && { echo "No tunnel peer for node-direct exit_node=$EXIT_NODE"; continue; }
       PEER_DEV="$(pick_wg_dev "$EXIT_NODE" "")"
       [[ -z "$PEER_DEV" ]] && { echo "No wg dev for node-direct exit_node=$EXIT_NODE"; continue; }
+      TABLE_NUM=$((TABLE_NUM + 1))
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
         echo "${TABLE_NUM} vpn_local_exit" >> /etc/iproute2/rt_tables
@@ -1753,12 +1765,13 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       ip route flush table $TABLE_NUM 2>/dev/null || true
       ip route add default via "$PEER_IP" dev "$PEER_DEV" table $TABLE_NUM 2>/dev/null || true
 
-      ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
-      ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
+      # 控制台合并/重排 instances 后 TABLE_NUM 会变；仅 del「当前表号」会留下指向旧表的 ip rule，导致分流错乱或断网
+      while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+      # 每实例唯一 pref，避免多子网同 prio 时内核排序与排障困难
+      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio $((3200 + i))
       echo "node-direct+exit table $TABLE_NUM: all->$PEER_IP ($PEER_DEV) exit_node=$EXIT_NODE"
       ;;
     cn-split)
-      TABLE_NUM=$((TABLE_NUM + 1))
       if [[ -n "$EXIT_NODE" ]]; then
         HK_IP="$(get_peer_ip "$EXIT_NODE")"
       else
@@ -1771,6 +1784,8 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       else
         HK_DEV="$(pick_wg_dev "hongkong" "hong-kong")"
       fi
+      [[ -z "$HK_DEV" ]] && { echo "No wg dev for cn-split (exit_node=${EXIT_NODE:-legacy})"; continue; }
+      TABLE_NUM=$((TABLE_NUM + 1))
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
         echo "${TABLE_NUM} vpn_hk_split" >> /etc/iproute2/rt_tables
@@ -1778,10 +1793,11 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       ip route flush table $TABLE_NUM 2>/dev/null || true
       ip route add default via "$HK_IP" dev "$HK_DEV" table $TABLE_NUM 2>/dev/null || true
 
-      LOCAL_GW="$(ip route show default | awk '{print $3; exit}')"
-      LOCAL_DEV="$(ip route show default | awk '{print $5; exit}')"
+      # 双栈/策略路由下用「全族 default」可能拿到 v6 或错误出口；国内回程须稳定走本机 IPv4 默认路由
+      LOCAL_GW="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+      LOCAL_DEV="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
 
-      if [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
+      if [[ -f /etc/vpn-agent/cn-ip-list.txt && -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]]; then
         ROUTE_BATCH="$(mktemp)"
         while IFS= read -r cidr; do
           [[ -z "$cidr" || "$cidr" == \#* ]] && continue
@@ -1798,14 +1814,15 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
           fi
         fi
         rm -f "$ROUTE_BATCH"
+      elif [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
+        echo "WARN: cn-split domestic routes skipped (no IPv4 default gw/dev for LOCAL_GW/LOCAL_DEV)"
       fi
 
-      ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
-      ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
+      while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio $((3200 + i))
       echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
       ;;
     global)
-      TABLE_NUM=$((TABLE_NUM + 1))
       if [[ -n "$EXIT_NODE" ]]; then
         HK_IP="$(get_peer_ip "$EXIT_NODE")"
       else
@@ -1818,6 +1835,8 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       else
         HK_DEV="$(pick_wg_dev "hongkong" "hong-kong")"
       fi
+      [[ -z "$HK_DEV" ]] && { echo "No wg dev for global (exit_node=${EXIT_NODE:-legacy})"; continue; }
+      TABLE_NUM=$((TABLE_NUM + 1))
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
         echo "${TABLE_NUM} vpn_hk_global" >> /etc/iproute2/rt_tables
@@ -1825,8 +1844,8 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       ip route flush table $TABLE_NUM 2>/dev/null || true
       ip route add default via "$HK_IP" dev "$HK_DEV" table $TABLE_NUM 2>/dev/null || true
 
-      ip rule del from "$SUBNET" lookup $TABLE_NUM 2>/dev/null || true
-      ip rule add from "$SUBNET" lookup $TABLE_NUM prio 100
+      while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio $((3200 + i))
       echo "global table $TABLE_NUM: all->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
       ;;
   esac
@@ -1970,52 +1989,60 @@ vpn_filter_overseas_list_to_v4_file() {
   ' "$src" > "$dst"
 }
 
-rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
-if download_overseas_from_cp && [[ -s "$OVERSEAS_LIST" ]]; then
-  log "  overseas ip list downloaded from control plane"
-elif download_overseas_public "$OVERSEAS_URL_PRIMARY" && [[ -s "$OVERSEAS_LIST" ]]; then
-  log "  overseas ip list downloaded from primary public mirror"
-elif download_overseas_public "$OVERSEAS_URL_MIRROR" && [[ -s "$OVERSEAS_LIST" ]]; then
-  log "  overseas ip list downloaded from mirror"
+if [[ "${SKIP_OVERSEAS_IPSET:-0}" == "1" ]]; then
+  log "  skipping overseas ip list download and ipset population (--skip-overseas-ipset)"
+  mkdir -p /etc/vpn-agent
+  ipset create overseas-ip hash:net family inet hashsize 65536 maxelem 2621440 -exist 2>/dev/null || true
+  ipset flush overseas-ip 2>/dev/null || true
+  printf '%s\n' '# skipped: overseas list not downloaded (--skip-overseas-ipset)' > /etc/vpn-agent/overseas-ip-list.txt
 else
-  log "  WARNING: could not download overseas ip list (API or public mirrors)"
-fi
-
-if [[ -s "$OVERSEAS_LIST" ]]; then
-  vpn_filter_overseas_list_to_v4_file "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
-  orig_n="$(wc -l < "$OVERSEAS_LIST" | tr -d ' ')"
-  v4_n="$(wc -l < "$OVERSEAS_LIST_V4" 2>/dev/null | tr -d ' ')"
-  v4_n="${v4_n:-0}"
-  if [[ "${v4_n:-0}" -eq 0 && "${orig_n:-0}" -gt 0 ]]; then
-    log "  WARNING: overseas list had content but no valid IPv4 CIDR for ipset (e.g. IPv6-only source); overseas-ip cleared"
+  rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
+  if download_overseas_from_cp && [[ -s "$OVERSEAS_LIST" ]]; then
+    log "  overseas ip list downloaded from control plane"
+  elif download_overseas_public "$OVERSEAS_URL_PRIMARY" && [[ -s "$OVERSEAS_LIST" ]]; then
+    log "  overseas ip list downloaded from primary public mirror"
+  elif download_overseas_public "$OVERSEAS_URL_MIRROR" && [[ -s "$OVERSEAS_LIST" ]]; then
+    log "  overseas ip list downloaded from mirror"
+  else
+    log "  WARNING: could not download overseas ip list (API or public mirrors)"
   fi
-  if [[ -s "$OVERSEAS_LIST_V4" ]]; then
-    ipset destroy overseas-ip_tmpnst 2>/dev/null || true
-    if vpn_ipset_flush_and_restore_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
-      :
-    else
-      warn "  overseas-ip: swap-restore failed; trying destroy+recreate + chunked restore"
+
+  if [[ -s "$OVERSEAS_LIST" ]]; then
+    vpn_filter_overseas_list_to_v4_file "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
+    orig_n="$(wc -l < "$OVERSEAS_LIST" | tr -d ' ')"
+    v4_n="$(wc -l < "$OVERSEAS_LIST_V4" 2>/dev/null | tr -d ' ')"
+    v4_n="${v4_n:-0}"
+    if [[ "${v4_n:-0}" -eq 0 && "${orig_n:-0}" -gt 0 ]]; then
+      log "  WARNING: overseas list had content but no valid IPv4 CIDR for ipset (e.g. IPv6-only source); overseas-ip cleared"
+    fi
+    if [[ -s "$OVERSEAS_LIST_V4" ]]; then
       ipset destroy overseas-ip_tmpnst 2>/dev/null || true
-      if vpn_ipset_recreate_hash_net_large overseas-ip; then
+      if vpn_ipset_flush_and_restore_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
         :
       else
-        ipset flush overseas-ip 2>/dev/null || true
+        warn "  overseas-ip: swap-restore failed; trying destroy+recreate + chunked restore"
+        ipset destroy overseas-ip_tmpnst 2>/dev/null || true
+        if vpn_ipset_recreate_hash_net_large overseas-ip; then
+          :
+        else
+          ipset flush overseas-ip 2>/dev/null || true
+        fi
+        if ! vpn_ipset_chunked_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
+          warn "  overseas-ip: chunked restore failed, per-line add (very slow)"
+          ipset flush overseas-ip 2>/dev/null || true
+          vpn_ipset_per_line_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"
+        fi
       fi
-      if ! vpn_ipset_chunked_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
-        warn "  overseas-ip: chunked restore failed, per-line add (very slow)"
-        ipset flush overseas-ip 2>/dev/null || true
-        vpn_ipset_per_line_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"
-      fi
+    else
+      ipset flush overseas-ip 2>/dev/null || true
     fi
+    cp "$OVERSEAS_LIST_V4" /etc/vpn-agent/overseas-ip-list.txt
+    rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
+    log "  overseas-ip ipset loaded (${v4_n} IPv4 prefixes)"
   else
-    ipset flush overseas-ip 2>/dev/null || true
+    rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
+    log "  WARNING: overseas ip list empty, skipped overseas-ip ipset population"
   fi
-  cp "$OVERSEAS_LIST_V4" /etc/vpn-agent/overseas-ip-list.txt
-  rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
-  log "  overseas-ip ipset loaded (${v4_n} IPv4 prefixes)"
-else
-  rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
-  log "  WARNING: overseas ip list empty, skipped overseas-ip ipset population"
 fi
 
 cat > /etc/vpn-agent/nat-rules.sh <<'NATRULES'
@@ -2036,9 +2063,12 @@ is_enabled_value() {
   esac
 }
 
-DEFAULT_IF="$(ip route show default | awk '/default/ {print $5; exit}')"
+DEFAULT_IF="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
 [[ -z "$DEFAULT_IF" ]] && DEFAULT_IF="eth0"
-LOCAL_IP="$(ip -4 addr show "$DEFAULT_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)"
+# 不用 grep -P：BusyBox/精简环境无 Perl 正则时 SNAT 会静默失败
+LOCAL_IP="$(ip -4 addr show "$DEFAULT_IF" 2>/dev/null | awk '/inet / && $2 !~ /^127\./ { split($2,a,"/"); print a[1]; exit}')"
+[[ -z "$LOCAL_IP" ]] && LOCAL_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src / { for (i=1;i<=NF;i++) if ($i=="src") { print $(i+1); exit } }')"
+[[ -z "$LOCAL_IP" ]] && { echo "nat-rules: could not determine LOCAL_IP for dev=$DEFAULT_IF" >&2; exit 1; }
 
 iptables -t nat -F VPN_POSTROUTING 2>/dev/null || iptables -t nat -N VPN_POSTROUTING
 iptables -t nat -C POSTROUTING -j VPN_POSTROUTING 2>/dev/null || \
@@ -2243,6 +2273,20 @@ UNIT
 systemctl daemon-reload
 systemctl enable vpn-agent.service
 systemctl restart vpn-agent.service || log "  WARNING: vpn-agent failed to start/restart"
+
+# 给 vpn-agent 首连 / update_config 留出时间；再显式拉起 OpenVPN，避免与部署末尾健康检查竞态
+sleep 4
+for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
+  MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
+  INST_EN="$(echo "$NODE_JSON" | jq -r ".instances[$i].enabled // true")"
+  if ! is_enabled_value "$INST_EN"; then
+    continue
+  fi
+  if is_mode_skipped "$MODE"; then
+    continue
+  fi
+  systemctl restart "openvpn-${MODE}.service" 2>/dev/null || true
+done
 
 if ! post_deploy_health_check "/etc/vpn-agent/bootstrap-node.json"; then
   exit 1

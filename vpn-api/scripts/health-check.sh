@@ -48,6 +48,9 @@ if [[ "$ROLE" != "control-plane" && "$ROLE" != "node" ]]; then
   exit 2
 fi
 
+HC_TMP="$(mktemp -d)"
+trap 'rm -rf "$HC_TMP"' EXIT
+
 PASS=0
 WARN=0
 FAIL=0
@@ -59,11 +62,11 @@ err() { echo "[FAIL] $*"; FAIL=$((FAIL+1)); }
 check_cmd() {
   local title="$1"
   local cmd="$2"
-  if bash -lc "$cmd" >/tmp/.hc.out 2>/tmp/.hc.err; then
+  if bash -lc "$cmd" >"$HC_TMP/out" 2>"$HC_TMP/err"; then
     ok "$title"
   else
     err "$title"
-    sed -n '1,10p' /tmp/.hc.err | sed 's/^/       /'
+    sed -n '1,10p' "$HC_TMP/err" | sed 's/^/       /'
   fi
 }
 
