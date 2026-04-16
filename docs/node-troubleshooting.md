@@ -201,7 +201,7 @@ sudo /usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/cn-spl
 | `CRL` / `crl.pem` | CRL 过期或未下发 |
 | `TLS Error` / `cannot read` / `tls-crypt` | 密钥路径或权限 |
 | `TUN` / `Device or resource busy` | `tun-cn-split` 残留或内核 tun 泄漏 |
-| `sd_notify` / 长期无 ready 且 `Type=notify` | 与发行版 OpenVPN 的 systemd notify 能力不匹配（需有证据再改 `Type=`） |
+| `sd_notify` / 长期无 ready 且 `Type=notify` | 与发行版 OpenVPN 的 systemd notify 能力不匹配；当前 `node-setup.sh` 生成的 unit 已默认 **`Type=simple`**，若你手工改回 `notify` 仍失败可对照此条 |
 
 将含 `FATAL` / `Error` / `cannot` 的几行作为下一步修改依据（模板在 `node-setup.sh` 生成的 `server.conf` 或控制面 PKI 流程）。
 

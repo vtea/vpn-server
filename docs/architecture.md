@@ -329,7 +329,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart=/usr/sbin/openvpn --config /etc/openvpn/server/node-direct/server.conf
 Restart=always
 RestartSec=5

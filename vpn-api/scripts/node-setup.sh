@@ -1373,6 +1373,13 @@ else
   log "  PKI already exists, skipping"
 fi
 
+# 已有 CA 但缺少 crl.pem 时 OpenVPN 会在 crl-verify 处立即退出（常见于旧机/手工删文件）
+if [[ -f "$EASYRSA_DIR/pki/ca.crt" && ! -f "$EASYRSA_DIR/pki/crl.pem" ]]; then
+  cd "$EASYRSA_DIR"
+  ./easyrsa gen-crl
+  log "  Generated missing crl.pem (required by server.conf crl-verify)"
+fi
+
 SERVER_CN="server-${NODE_ID}"
 if [[ ! -f "$EASYRSA_DIR/pki/issued/${SERVER_CN}.crt" ]]; then
   cd "$EASYRSA_DIR"
@@ -1386,14 +1393,22 @@ if [[ ! -f "$EASYRSA_DIR/pki/dh.pem" ]]; then
   log "  DH params generated"
 fi
 
-if [[ ! -f "$EASYRSA_DIR/pki/private/easyrsa-tls.key" ]]; then
+TLS_CRYPT_KEY="$EASYRSA_DIR/pki/private/easyrsa-tls.key"
+if [[ ! -f "$TLS_CRYPT_KEY" ]]; then
   mkdir -p "$EASYRSA_DIR/pki/private"
-  openvpn --genkey secret "$EASYRSA_DIR/pki/private/easyrsa-tls.key" 2>/dev/null || \
-  openvpn --genkey tls-crypt-v2-server "$EASYRSA_DIR/pki/private/easyrsa-tls.key" 2>/dev/null || {
-    log "  WARNING: could not generate TLS key, creating placeholder"
-    head -c 256 /dev/urandom | base64 > "$EASYRSA_DIR/pki/private/easyrsa-tls.key"
-  }
+  if ! openvpn --genkey secret "$TLS_CRYPT_KEY" 2>/dev/null && ! openvpn --genkey tls-crypt-v2-server "$TLS_CRYPT_KEY" 2>/dev/null; then
+    fail "openvpn --genkey secret 失败，无法生成 tls-crypt 密钥（请确认已安装 openvpn 且 Step 2 已成功）"
+    exit 1
+  fi
   log "  TLS key generated"
+fi
+# 历史脚本曾写入随机 base64 占位文件，OpenVPN 无法解析，会导致两实例同时启动失败
+if ! grep -qF "BEGIN OpenVPN Static key V1" "$TLS_CRYPT_KEY" 2>/dev/null; then
+  log "  Replacing invalid tls-crypt key (not OpenVPN static key format)"
+  if ! openvpn --genkey secret "$TLS_CRYPT_KEY" 2>/dev/null && ! openvpn --genkey tls-crypt-v2-server "$TLS_CRYPT_KEY" 2>/dev/null; then
+    fail "无法重写 tls-crypt 密钥，请删除 $TLS_CRYPT_KEY 后重跑 node-setup.sh --apply"
+    exit 1
+  fi
 fi
 
 # ── Step 4: Render per-instance OpenVPN server.conf ──────────────────────────
@@ -1828,12 +1843,34 @@ ipset create overseas-ip hash:net -exist
 
 download_overseas_from_cp() {
   [[ -z "${API_URL:-}" ]] && return 1
-  curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 1 \
+  curl -fsSL --connect-timeout 8 --max-time 90 --retry 1 --retry-delay 1 \
     "${API_URL%/}/api/ip-lists/download/overseas" -o "$OVERSEAS_LIST" 2>/dev/null
 }
 
 download_overseas_public() {
-  curl -fsSL --connect-timeout 8 --max-time 120 --retry 2 --retry-delay 1 "$1" -o "$OVERSEAS_LIST" 2>/dev/null
+  # 公网 zone 文件可达数万行；缩短单次超时、减少重试，失败由下一镜像承接
+  curl -fsSL --connect-timeout 8 --max-time 90 --retry 1 --retry-delay 1 "$1" -o "$OVERSEAS_LIST" 2>/dev/null
+}
+
+# 从 overseas 原始文本筛出 IPv4 CIDR（供 hash:net）。勿用 shell 逐行 sed：公网 zone 极大时会卡数分钟。
+vpn_filter_overseas_list_to_v4_file() {
+  local src="$1"
+  local dst="$2"
+  awk '
+    /^[[:space:]]*#/ { next }
+    {
+      line = $0
+      sub(/#.*/, "", line)
+      gsub(/\r/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line == "" || index(line, ":") > 0) next
+      if (line ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}\/[0-9]+$/) {
+        pfx = line
+        sub(/^.*\//, "", pfx)
+        if (pfx ~ /^[0-9]+$/ && pfx + 0 <= 32) print line
+      }
+    }
+  ' "$src" > "$dst"
 }
 
 rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
@@ -1848,17 +1885,7 @@ else
 fi
 
 if [[ -s "$OVERSEAS_LIST" ]]; then
-  : > "$OVERSEAS_LIST_V4"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    cidr="$(echo "$line" | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [[ -z "$cidr" ]] && continue
-    [[ "$cidr" == *:* ]] && continue
-    [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]+$ ]] || continue
-    m="${cidr#*/}"
-    [[ "$m" =~ ^[0-9]+$ ]] || continue
-    [[ "$m" -le 32 ]] 2>/dev/null || continue
-    echo "$cidr" >> "$OVERSEAS_LIST_V4"
-  done < "$OVERSEAS_LIST"
+  vpn_filter_overseas_list_to_v4_file "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
   orig_n="$(wc -l < "$OVERSEAS_LIST" | tr -d ' ')"
   v4_n="$(wc -l < "$OVERSEAS_LIST_V4" 2>/dev/null | tr -d ' ')"
   v4_n="${v4_n:-0}"
@@ -2019,7 +2046,8 @@ StartLimitIntervalSec=120
 StartLimitBurst=5
 
 [Service]
-Type=notify
+# simple：兼容未编译 sd_notify 的 OpenVPN；notify 在部分发行版上会超时或立即失败导致重启风暴
+Type=simple
 ExecStart=/usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/${MODE}/server.conf
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
