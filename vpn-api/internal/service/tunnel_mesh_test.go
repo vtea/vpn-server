@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -113,5 +114,97 @@ func TestEnsureFullMeshTunnels_nodeAIsLowerNodeNumber(t *testing.T) {
 	}
 	if tun.IPA != "172.16.0.1" || tun.IPB != "172.16.0.2" {
 		t.Fatalf("unexpected ips %q %q", tun.IPA, tun.IPB)
+	}
+}
+
+func TestBuildTunnelConfigsForNode_allowedIPsIncludesDefaultWhenExitPeer(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Node{}, &model.Tunnel{}, &model.Instance{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Node{
+		ID: "entry", Name: "E", NodeNumber: 1, Region: "r", PublicIP: "203.0.113.1",
+		WGPublicKey: "YFEntryPubKeyBase64MustBe44CharsLongTest0=",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Node{
+		ID: "exit", Name: "X", NodeNumber: 2, Region: "r", PublicIP: "203.0.113.2",
+		WGPublicKey: "YFExitPubKeyBase64MustBe44CharsLongTest00=",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Tunnel{
+		NodeA: "entry", NodeB: "exit",
+		Subnet: "172.16.0.0/30", IPA: "172.16.0.1", IPB: "172.16.0.2",
+		WGPort: wgPort, Status: "pending",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Instance{
+		NodeID: "entry", SegmentID: "default", Mode: "cn-split",
+		Port: 1194, Proto: "udp", Subnet: "10.8.0.0/24", ExitNode: "exit", Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cfgs, err := BuildTunnelConfigsForNode(db, "entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfgs) != 1 {
+		t.Fatalf("expected 1 tunnel config, got %d", len(cfgs))
+	}
+	if !strings.Contains(cfgs[0].AllowedIPs, "0.0.0.0/0") {
+		t.Fatalf("AllowedIPs must include 0.0.0.0/0 for exit relay, got %q", cfgs[0].AllowedIPs)
+	}
+}
+
+func TestBuildTunnelConfigsForNode_noDefaultRouteWithoutExitNode(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Node{}, &model.Tunnel{}, &model.Instance{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Node{
+		ID: "entry", Name: "E", NodeNumber: 1, Region: "r", PublicIP: "203.0.113.1",
+		WGPublicKey: "YFEntryPubKeyBase64MustBe44CharsLongTest0=",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Node{
+		ID: "exit", Name: "X", NodeNumber: 2, Region: "r", PublicIP: "203.0.113.2",
+		WGPublicKey: "YFExitPubKeyBase64MustBe44CharsLongTest00=",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Tunnel{
+		NodeA: "entry", NodeB: "exit",
+		Subnet: "172.16.0.0/30", IPA: "172.16.0.1", IPB: "172.16.0.2",
+		WGPort: wgPort, Status: "pending",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Instance{
+		NodeID: "entry", SegmentID: "default", Mode: "cn-split",
+		Port: 1194, Proto: "udp", Subnet: "10.8.0.0/24", ExitNode: "", Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cfgs, err := BuildTunnelConfigsForNode(db, "entry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfgs) != 1 {
+		t.Fatalf("expected 1 tunnel config, got %d", len(cfgs))
+	}
+	if strings.Contains(cfgs[0].AllowedIPs, "0.0.0.0/0") {
+		t.Fatalf("without exit_node UUID, should not add 0.0.0.0/0 (legacy script may still use tunnel): %q", cfgs[0].AllowedIPs)
 	}
 }

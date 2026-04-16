@@ -141,3 +141,83 @@ systemctl --no-pager -l status 'wg-quick@wg-*'
 - `peer_pubkey` 为空：属于配置问题，控制面会标记 `invalid_config`；
 - `wg-quick` 报 `PublicKey=` 解析错误：通常由空公钥下发引起；
 - `transfer` 持续为 0 且无 `latest handshake`：多为端口/路由/对端不可达。
+
+## 八、`openvpn-cn-split` 反复失败、`ipset` 刷屏与 `StartLimit` 警告
+
+现象常为三条**独立**问题链叠加：控制面仍下发旧 `node-setup.sh`（`StartLimit*` 写在 `[Service]`）、`overseas` 制品仍为 IPv6 导致 `hash:net` 海量报错、以及 OpenVPN 自身 `exit 1` 需看日志定因。
+
+### 1) 控制面与制品对齐（必须先做）
+
+1. **部署并重启**运行中的 `vpn-api`，确保二进制包含：海外源迁移（将误配的 `china6.txt` 改为 IPv4 段列表）、`refreshIPListArtifact("overseas")` 仅保留 IPv4 CIDR、以及磁盘上的 [`vpn-api/scripts/node-setup.sh`](../vpn-api/scripts/node-setup.sh) 与当前仓库一致（`ServeNodeSetupScript` 从部署目录读取该脚本）。
+2. 在 Web **「分流规则」**执行一次 **「全网立即更新」**，且列表中**包含 `overseas`**，以便重建仅 IPv4 的 overseas 制品；否则节点 `curl .../api/ip-lists/download/overseas` 仍可能拉到旧 IPv6 内容，Step 7 会继续刷屏。
+3. **验收（在任意可访问控制面的机器上）**：
+
+```bash
+# node-setup：StartLimit* 必须落在 [Unit]…[Service] 之间（勿仅在 [Service] 段内）
+curl -fsSL "http://<控制面>/api/node-setup.sh" | awk '/^\[Unit\]/{p=1} /^\[Service\]/{p=0} p && /StartLimit/{print NR ":" $0}'
+
+# overseas 制品不应再是大段 2001:/2400: 等 IPv6（hash:net 仅支持 IPv4）
+curl -fsSL "http://<控制面>/api/ip-lists/download/overseas" | head -n 20
+```
+
+若上一行 `awk` **无输出**，说明拉到的脚本里 `StartLimit*` 仍不在 `[Unit]` 段（或脚本过旧），说明控制面进程或部署目录脚本**未升级**，节点 `curl` 重跑也不会自愈。
+
+### 2) 故障节点重跑部署脚本
+
+与现有一致，在节点执行（参数按实际替换）：
+
+```bash
+curl -fsSL "http://<控制面>/api/node-setup.sh" | bash -s -- --api-url "http://<控制面>" --token "<节点令牌>" --apply
+systemctl daemon-reload
+```
+
+**核对 systemd 单元**（仓库模板已将 `StartLimitIntervalSec` / `StartLimitBurst` 放在 `[Unit]`）：
+
+```bash
+grep -n StartLimit /etc/systemd/system/openvpn-cn-split.service
+systemctl cat openvpn-cn-split.service | sed -n '1,25p'
+```
+
+期望：`StartLimit*` 出现在 **`[Unit]`** 段内；`journalctl` 中不应再出现 `Unknown key 'StartLimitIntervalSec' in section 'Service'`。
+
+### 3) OpenVPN 仍为 `exit 1` 时（脚本对齐后必做）
+
+按顺序只读诊断：
+
+```bash
+journalctl -u openvpn-cn-split.service -n 80 --no-pager -o cat
+tail -n 120 /var/log/openvpn/cn-split.log
+sudo /usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/cn-split/server.conf
+```
+
+（最后一行前台运行，看到 `FATAL`/`Error` 后 `Ctrl+C` 退出。）
+
+**常见关键字对照**：
+
+| 日志线索 | 可能原因 |
+|----------|----------|
+| `Address already in use` / `management` / `bind` | management 端口（如脚本中的高位端口）被占用 |
+| `Cannot load DH` / `dh.pem` | DH 文件缺失或权限 |
+| `CRL` / `crl.pem` | CRL 过期或未下发 |
+| `TLS Error` / `cannot read` / `tls-crypt` | 密钥路径或权限 |
+| `TUN` / `Device or resource busy` | `tun-cn-split` 残留或内核 tun 泄漏 |
+| `sd_notify` / 长期无 ready 且 `Type=notify` | 与发行版 OpenVPN 的 systemd notify 能力不匹配（需有证据再改 `Type=`） |
+
+将含 `FATAL` / `Error` / `cannot` 的几行作为下一步修改依据（模板在 `node-setup.sh` 生成的 `server.conf` 或控制面 PKI 流程）。
+
+### 4) 整体验收
+
+- `systemctl cat openvpn-cn-split.service`：`StartLimitIntervalSec` 在 **`[Unit]`**，且无 Unknown key 警告。
+- 部署 Step 7：**无**大规模 `ipset ... IPv6` / prefix 超范围报错；`overseas-ip` 正常加载或为空并有清晰 WARNING。
+- `systemctl is-active openvpn-cn-split.service` 为 **active**；`/var/log/openvpn/cn-split.log` 无持续 Fatal。
+
+### 5) WireGuard `AllowedIPs` 与 `exit_node`（数据面深入）
+
+Linux 上 WireGuard 把 **`AllowedIPs` 同时当作「发往该 peer 的明文目的地址」路由表**：策略路由把客户端流量送到 `wg-<对端ID>` 后，若目的公网 IP **不在**该 peer 的 `AllowedIPs` 内，内核往往**选不中 peer**，表现为经隧道出网全断或随机不通。
+
+控制面在生成隧道配置时：若本节点某**已启用**实例的 **`exit_node` 等于该对端节点 ID**，且模式为 **`cn-split` / `global` / `node-direct`（且带出口）**，则为该 peer **追加 `0.0.0.0/0`**（见 `vpn-api/internal/service/tunnel_service.go` 中 `BuildTunnelConfigsForNode`）。
+
+**运维要点**：
+
+- 入口做 cn-split/global 且走指定出口时，务必在实例上填写 **`exit_node` = 出口节点 UUID**（勿留空依赖 legacy 隧道名），否则不会注入 `0.0.0.0/0`，与 `policy-routing.sh` 里「默认走隧道」可能不一致。
+- 修改实例或隧道后，应触发 **WG 配置刷新**（或待 Agent 同步），再 `wg show` / 抓包验证。
