@@ -90,16 +90,22 @@ ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
 fail() { echo -e "  ${RED}✗${NC} $*"; }
 
-# 每行一条 CIDR：ipset restore（flush + add）比逐条 ipset add 快数量级。失败返回 1。
+# 每行一条 CIDR：先灌入临时集合并 swap/rename 到目标名，避免旧 NAT 仍引用目标集时 ipset destroy 失败（create 报「已存在」）。
 vpn_ipset_flush_and_restore_from_cidr_file() {
   local set_name="$1"
   local list_file="$2"
-  local batch lines
+  local batch lines tmp
+  tmp="${set_name}_tmpnst"
   [[ -s "$list_file" ]] || return 1
   batch="$(mktemp)" || return 1
+  ipset destroy "$tmp" 2>/dev/null || true
+  if ! ipset create "$tmp" hash:net family inet hashsize 65536 maxelem 2621440 2>/dev/null; then
+    rm -f "$batch"
+    return 1
+  fi
   {
-    echo "flush ${set_name}"
-    awk -v s="$set_name" '
+    echo "flush ${tmp}"
+    awk -v s="$tmp" '
       /^[[:space:]]*#/ { next }
       {
         gsub(/\r/, "", $0)
@@ -107,19 +113,33 @@ vpn_ipset_flush_and_restore_from_cidr_file() {
         if ($0 != "") print "add", s, $0
       }
     ' "$list_file"
-  } > "$batch" || { rm -f "$batch"; return 1; }
+  } > "$batch" || { rm -f "$batch"; ipset destroy "$tmp" 2>/dev/null; return 1; }
   lines="$(wc -l < "$batch" | tr -d ' ')"
   lines="${lines:-0}"
   if [[ "$lines" -lt 2 ]]; then
     rm -f "$batch"
+    ipset destroy "$tmp" 2>/dev/null || true
     return 1
   fi
-  if ipset restore -exist < "$batch" 2>/dev/null; then
+  if ! ipset restore -exist < "$batch" 2>/dev/null; then
     rm -f "$batch"
-    return 0
+    ipset destroy "$tmp" 2>/dev/null || true
+    return 1
   fi
   rm -f "$batch"
-  return 1
+  if ipset list "$set_name" &>/dev/null; then
+    if ! ipset swap "$set_name" "$tmp" 2>/dev/null; then
+      ipset destroy "$tmp" 2>/dev/null || true
+      return 1
+    fi
+    ipset destroy "$tmp" 2>/dev/null || true
+  else
+    if ! ipset rename "$tmp" "$set_name" 2>/dev/null; then
+      ipset destroy "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  return 0
 }
 
 vpn_ipset_per_line_add_from_cidr_file() {
@@ -131,11 +151,22 @@ vpn_ipset_per_line_add_from_cidr_file() {
   done < "$list_file"
 }
 
-# hash:net 默认 maxelem 常为 65536；完整 us.zone 过滤后可达 7 万+，整批 restore 会因集合满失败。
+# 清空本脚本生成的链，解除对 ipset 的引用（重跑 node-setup 时 destroy 否则会失败）
+vpn_ipset_clear_vpn_iptables_chains_for_reload() {
+  command -v iptables >/dev/null 2>&1 || return 0
+  iptables -t nat -F VPN_POSTROUTING 2>/dev/null || true
+  iptables -F VPN_FORWARD 2>/dev/null || true
+}
+
+# 仅在 swap/rename 不可行时的兜底：先清链再 destroy+create（失败返回 1，勿在 set -e 下裸跑 create）
 vpn_ipset_recreate_hash_net_large() {
   local set_name="$1"
+  vpn_ipset_clear_vpn_iptables_chains_for_reload
   ipset destroy "$set_name" 2>/dev/null || true
-  ipset create "$set_name" hash:net family inet hashsize 65536 maxelem 2621440
+  if ipset create "$set_name" hash:net family inet hashsize 65536 maxelem 2621440 2>/dev/null; then
+    return 0
+  fi
+  return 1
 }
 
 # 仅 add 行，分块 ipset restore；比 shell 逐条 ipset add 快数量级
@@ -1808,7 +1839,8 @@ bash /etc/vpn-agent/policy-routing.sh || log "  WARNING: policy routing setup in
 
 log "Step 7/${TOTAL_STEPS}: Configuring NAT rules ..."
 
-vpn_ipset_recreate_hash_net_large china-ip
+# 先摘 NAT/FORWARD 中对 china-ip/overseas-ip 的 match，避免后续 destroy/swap 异常；nat-rules.sh 末尾会重建规则
+vpn_ipset_clear_vpn_iptables_chains_for_reload
 
 CHINA_LIST="/tmp/china_ip_list.txt"
 CHINA_LIST_URL_DEFAULT="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
@@ -1863,10 +1895,16 @@ fi
 
 if [[ -s "$CHINA_LIST" ]]; then
   if vpn_ipset_flush_and_restore_from_cidr_file "china-ip" "$CHINA_LIST"; then
-    log "  china-ip ipset loaded (ipset restore)"
+    log "  china-ip ipset loaded (ipset restore + swap)"
   else
-    warn "  china-ip: full restore failed, trying chunked restore"
-    ipset flush china-ip 2>/dev/null || true
+    warn "  china-ip: swap-restore failed, trying destroy+recreate + chunked restore"
+    ipset destroy china-ip_tmpnst 2>/dev/null || true
+    if vpn_ipset_recreate_hash_net_large china-ip; then
+      :
+    else
+      warn "  china-ip: recreate failed, flush in place"
+      ipset flush china-ip 2>/dev/null || true
+    fi
     if vpn_ipset_chunked_add_from_cidr_file "china-ip" "$CHINA_LIST"; then
       log "  china-ip ipset loaded (chunked restore)"
     else
@@ -1952,12 +1990,17 @@ if [[ -s "$OVERSEAS_LIST" ]]; then
     log "  WARNING: overseas list had content but no valid IPv4 CIDR for ipset (e.g. IPv6-only source); overseas-ip cleared"
   fi
   if [[ -s "$OVERSEAS_LIST_V4" ]]; then
-    vpn_ipset_recreate_hash_net_large overseas-ip
+    ipset destroy overseas-ip_tmpnst 2>/dev/null || true
     if vpn_ipset_flush_and_restore_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
       :
     else
-      warn "  overseas-ip: full restore failed; trying chunked restore (avoid default maxelem 65536)"
-      ipset flush overseas-ip 2>/dev/null || true
+      warn "  overseas-ip: swap-restore failed; trying destroy+recreate + chunked restore"
+      ipset destroy overseas-ip_tmpnst 2>/dev/null || true
+      if vpn_ipset_recreate_hash_net_large overseas-ip; then
+        :
+      else
+        ipset flush overseas-ip 2>/dev/null || true
+      fi
       if ! vpn_ipset_chunked_add_from_cidr_file "overseas-ip" "$OVERSEAS_LIST_V4"; then
         warn "  overseas-ip: chunked restore failed, per-line add (very slow)"
         ipset flush overseas-ip 2>/dev/null || true
