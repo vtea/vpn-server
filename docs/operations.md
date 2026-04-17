@@ -92,7 +92,36 @@
 iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
 ```
 
-应能看到每条隧道对应一条 `-i wg-<节点ID> -o <网卡> -j MASQUERADE`。在入口 A 上仍可用 §4 的 `ip route get 8.8.8.8`（结合客户端 VPN 源地址）确认海外走隧道。
+应能看到每条隧道对应一条 `-i wg-<节点ID> -o <网卡> -j MASQUERADE`。在入口 A 上仍可用第 4 节中的 `ip route get 8.8.8.8`（结合客户端 VPN 源地址）确认海外走隧道。
+
+#### 3.2.2 策略路由固定表号与验收（`policy-routing.sh`）
+
+新版 `node-setup.sh` 生成的 **`/etc/vpn-agent/policy-routing.sh`** 对 IPv4 策略路由使用**固定表号**（不随 `instances` 在 JSON 中的顺序链式递增），避免 **`ip route flush` 误伤其它模式**或两段子网误指同一张表：
+
+| `mode` | 路由表号 | `/etc/iproute2/rt_tables` 名称 | `ip rule` 优先级（约） |
+|--------|----------|--------------------------------|-------------------------|
+| `cn-split` | **101** | `vpn_hk_split` | 3210 |
+| `global` | **102** | `vpn_hk_global` | 3220 |
+| `node-direct` 且配置了 `exit_node` | **103** | `vpn_local_exit` | 3200 |
+
+**部署 / 变更出口前在入口节点上核对**：
+
+1. **`/etc/vpn-agent/bootstrap-node.json`**（或与控制面一致的 bootstrap）中，对应模式的 **`enabled`**、**`subnet`**、**`exit_node`** 符合预期；`exit_node` 须为本节点某隧道的对端节点 ID（或留空走 legacy 名）。
+2. **隧道就绪**：`wg show` 中到出口对端的接口为 `up`；可 `ping` 对端隧道内网 IP。
+3. **重跑策略路由与 NAT**（在线节点也可由新版 Agent 触发 `vpn-routing`）：
+   ```bash
+   bash /etc/vpn-agent/policy-routing.sh && bash /etc/vpn-agent/nat-rules.sh
+   ```
+   若磁盘上的 `policy-routing.sh` 仍是旧模板（无固定表号逻辑），请在节点上**重跑 `node-setup.sh` 中生成该脚本的一步**，使脚本与仓库版本一致后再执行上述命令。
+4. **验收**（入口节点上）：
+   ```bash
+   ip -4 rule show
+   ip route show table 101 | head -5
+   ip route show table 102 | head -5
+   ```
+   - **`10.1.x.0/24`（第三段为 1）** 的 `cn-split` 子网应 **`lookup vpn_hk_split`（表 101）**；**第三段为 2** 的 **`global`** 子网应 **`lookup vpn_hk_global`（表 102）**。
+   - 表 **101** 至少应有 **`default via … dev wg-…`**；若已部署国内列表，还会有大量国内网段。
+   - 表 **102** 在启用 **`global`** 时应至少有 **一条 IPv4 `default`** 经出口 WG；脚本末尾自检失败时会 **非零退出**（`journalctl -u vpn-routing` 可见）。
 
 ### 3.3 新建节点默认启用与存量升级
 
@@ -143,9 +172,9 @@ iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
 **排查步骤**：
 1. 确认 ipset 已加载：`ipset list china-ip | head`
 2. 确认策略路由存在：`ip rule show`
-3. 确认路由表有内容：`ip route show table 101`
+3. 确认路由表有内容：`cn-split` 查 **表 101**（`ip route show table 101`），`global` 查 **表 102**（`ip route show table 102`）；参见 **3.2.2 节**。
 4. 手动测试分流：`ip route get 114.114.114.114`（应走本地）、`ip route get 8.8.8.8`（应走隧道）
-5. 重新应用规则：`bash /etc/vpn-agent/policy-routing.sh && bash /etc/vpn-agent/nat-rules.sh`
+5. 重新应用规则：`bash /etc/vpn-agent/policy-routing.sh && bash /etc/vpn-agent/nat-rules.sh`（若仍异常，比对节点上 `policy-routing.sh` 是否已为**固定表号**新版，必要时重跑 `node-setup.sh` 再生脚本）
 
 ## 5. WireGuard 隧道断开
 

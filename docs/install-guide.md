@@ -447,9 +447,10 @@ wg show
 # 查看 ipset 规则
 ipset list china-ip | head -20
 
-# 查看策略路由
+# 查看策略路由（cn-split 表 101，global 表 102；详见 operations.md 3.2.2 节）
 ip rule show
 ip route show table 101
+ip route show table 102
 
 # 查看在线 VPN 用户
 echo "status" | nc 127.0.0.1 56730

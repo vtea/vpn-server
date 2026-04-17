@@ -1787,7 +1787,70 @@ pick_wg_dev() {
   echo ""
 }
 
-TABLE_NUM=100
+# 固定策略路由表号与 ip rule 优先级，不随 instances 数组顺序链式递增，避免误 flush 或两段子网指向同一表。
+# cn-split -> 101 (vpn_hk_split)，global -> 102 (vpn_hk_global)，node-direct+exit -> 103 (vpn_local_exit)
+policy_table_num_for_mode() {
+  case "$1" in
+    node-direct) echo 103 ;;
+    cn-split) echo 101 ;;
+    global) echo 102 ;;
+    *) echo "" ;;
+  esac
+}
+
+policy_rt_table_name_for_mode() {
+  case "$1" in
+    node-direct) echo vpn_local_exit ;;
+    cn-split) echo vpn_hk_split ;;
+    global) echo vpn_hk_global ;;
+    *) echo "" ;;
+  esac
+}
+
+policy_prio_for_mode() {
+  case "$1" in
+    node-direct) echo 3200 ;;
+    cn-split) echo 3210 ;;
+    global) echo 3220 ;;
+    *) echo 3290 ;;
+  esac
+}
+
+policy_routing_self_check() {
+  local i inst_en mode exit_node need_err=0
+  for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
+    inst_en="$(jq -r ".instances[$i].enabled // true" "$NODE_JSON_FILE")"
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
+    mode="$(jq -r ".instances[$i].mode" "$NODE_JSON_FILE")"
+    case "$mode" in
+      global)
+        if ! ip route show table 102 2>/dev/null | grep -qE '^default '; then
+          echo "policy-routing: ERROR: global enabled but routing table 102 (vpn_hk_global) has no IPv4 default" >&2
+          need_err=1
+        fi
+        ;;
+      cn-split)
+        if ! ip route show table 101 2>/dev/null | grep -qE '^default '; then
+          echo "policy-routing: ERROR: cn-split enabled but routing table 101 (vpn_hk_split) has no IPv4 default" >&2
+          need_err=1
+        fi
+        ;;
+      node-direct)
+        exit_node="$(jq -r ".instances[$i].exit_node // \"\"" "$NODE_JSON_FILE")"
+        [[ "$exit_node" == "null" ]] && exit_node=""
+        if [[ -n "$exit_node" ]]; then
+          if ! ip route show table 103 2>/dev/null | grep -qE '^default '; then
+            echo "policy-routing: ERROR: node-direct+exit enabled but routing table 103 (vpn_local_exit) has no IPv4 default" >&2
+            need_err=1
+          fi
+        fi
+        ;;
+    esac
+  done
+  return "$need_err"
+}
 
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   INST_EN="$(jq -r ".instances[$i].enabled // true" "$NODE_JSON_FILE")"
@@ -1810,18 +1873,19 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       [[ -z "$PEER_IP" ]] && { echo "No tunnel peer for node-direct exit_node=$EXIT_NODE"; continue; }
       PEER_DEV="$(pick_wg_dev "$EXIT_NODE" "")"
       [[ -z "$PEER_DEV" ]] && { echo "No wg dev for node-direct exit_node=$EXIT_NODE"; continue; }
-      TABLE_NUM=$((TABLE_NUM + 1))
+      TABLE_NUM="$(policy_table_num_for_mode "$MODE")"
+      RT_NAME="$(policy_rt_table_name_for_mode "$MODE")"
+      PRIO="$(policy_prio_for_mode "$MODE")"
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
-        echo "${TABLE_NUM} vpn_local_exit" >> /etc/iproute2/rt_tables
+        echo "${TABLE_NUM} ${RT_NAME}" >> /etc/iproute2/rt_tables
 
       ip route flush table $TABLE_NUM 2>/dev/null || true
       ip route add default via "$PEER_IP" dev "$PEER_DEV" table $TABLE_NUM 2>/dev/null || true
 
-      # 控制台合并/重排 instances 后 TABLE_NUM 会变；仅 del「当前表号」会留下指向旧表的 ip rule，导致分流错乱或断网
+      # 控制台合并/重排 instances 后仅 del「当前子网」；表号固定为 103，避免遗留 rule 指向旧表
       while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
-      # 每实例唯一 pref，避免多子网同 prio 时内核排序与排障困难
-      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio $((3200 + i))
+      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
       echo "node-direct+exit table $TABLE_NUM: all->$PEER_IP ($PEER_DEV) exit_node=$EXIT_NODE"
       ;;
     cn-split)
@@ -1838,10 +1902,12 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
         HK_DEV="$(pick_wg_dev "hongkong" "hong-kong")"
       fi
       [[ -z "$HK_DEV" ]] && { echo "No wg dev for cn-split (exit_node=${EXIT_NODE:-legacy})"; continue; }
-      TABLE_NUM=$((TABLE_NUM + 1))
+      TABLE_NUM="$(policy_table_num_for_mode "$MODE")"
+      RT_NAME="$(policy_rt_table_name_for_mode "$MODE")"
+      PRIO="$(policy_prio_for_mode "$MODE")"
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
-        echo "${TABLE_NUM} vpn_hk_split" >> /etc/iproute2/rt_tables
+        echo "${TABLE_NUM} ${RT_NAME}" >> /etc/iproute2/rt_tables
 
       ip route flush table $TABLE_NUM 2>/dev/null || true
       ip route add default via "$HK_IP" dev "$HK_DEV" table $TABLE_NUM 2>/dev/null || true
@@ -1872,7 +1938,7 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       fi
 
       while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
-      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio $((3200 + i))
+      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
       echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
       ;;
     global)
@@ -1889,20 +1955,24 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
         HK_DEV="$(pick_wg_dev "hongkong" "hong-kong")"
       fi
       [[ -z "$HK_DEV" ]] && { echo "No wg dev for global (exit_node=${EXIT_NODE:-legacy})"; continue; }
-      TABLE_NUM=$((TABLE_NUM + 1))
+      TABLE_NUM="$(policy_table_num_for_mode "$MODE")"
+      RT_NAME="$(policy_rt_table_name_for_mode "$MODE")"
+      PRIO="$(policy_prio_for_mode "$MODE")"
 
       grep -q "^${TABLE_NUM} " /etc/iproute2/rt_tables 2>/dev/null || \
-        echo "${TABLE_NUM} vpn_hk_global" >> /etc/iproute2/rt_tables
+        echo "${TABLE_NUM} ${RT_NAME}" >> /etc/iproute2/rt_tables
 
       ip route flush table $TABLE_NUM 2>/dev/null || true
       ip route add default via "$HK_IP" dev "$HK_DEV" table $TABLE_NUM 2>/dev/null || true
 
       while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
-      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio $((3200 + i))
+      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
       echo "global table $TABLE_NUM: all->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
       ;;
   esac
 done
+
+policy_routing_self_check || exit 1
 POLROUTE
 chmod +x /etc/vpn-agent/policy-routing.sh
 bash /etc/vpn-agent/policy-routing.sh || log "  WARNING: policy routing setup incomplete (tunnels may not be ready)"
