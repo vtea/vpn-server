@@ -8,6 +8,25 @@
         </el-button>
       </div>
 
+      <el-alert
+        v-if="scopedWithoutNodesHint"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      >
+        {{ scopedWithoutNodesHint }}
+      </el-alert>
+      <el-alert
+        v-if="scopedNodeHint"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      >
+        {{ scopedNodeHint }}
+      </el-alert>
+
       <div class="action-bar">
         <div class="filter-group">
           <el-input
@@ -45,16 +64,38 @@
             <el-button size="small" plain type="primary" @click="openGrants(row)">
               <el-icon><Key /></el-icon> 授权
             </el-button>
-            <el-button size="small" plain type="primary" @click="openEdit(row)">
-              <el-icon><Edit /></el-icon> 编辑
-            </el-button>
-            <el-popconfirm title="删除用户并吊销所有证书？" @confirm="deleteUser(row.id)">
-              <template #reference>
-                <el-button size="small" plain type="danger">
-                  <el-icon><Delete /></el-icon> 删除
+            <el-tooltip
+              :disabled="!row.cross_scope_edit_blocked"
+              content="该用户在其它节点仍有有效 VPN 授权，无法在此编辑整户资料；请联系超级管理员。"
+              placement="top"
+            >
+              <span class="action-tooltip-wrap">
+                <el-button
+                  size="small"
+                  plain
+                  type="primary"
+                  :disabled="!!row.cross_scope_edit_blocked"
+                  @click="openEdit(row)"
+                >
+                  <el-icon><Edit /></el-icon> 编辑
                 </el-button>
-              </template>
-            </el-popconfirm>
+              </span>
+            </el-tooltip>
+            <el-tooltip
+              :disabled="!row.cross_scope_edit_blocked"
+              content="该用户在其它节点仍有有效 VPN 授权，无法在此删除整户；请联系超级管理员。"
+              placement="top"
+            >
+              <span class="action-tooltip-wrap">
+                <el-popconfirm title="删除用户并吊销所有证书？" @confirm="deleteUser(row.id)">
+                  <template #reference>
+                    <el-button size="small" plain type="danger" :disabled="!!row.cross_scope_edit_blocked">
+                      <el-icon><Delete /></el-icon> 删除
+                    </el-button>
+                  </template>
+                </el-popconfirm>
+              </span>
+            </el-tooltip>
           </div>
         </div>
         <el-empty v-if="!loading && !filteredRows.length" description="暂无用户" :image-size="60" />
@@ -224,7 +265,25 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
+import { getAdminProfile } from '../utils/adminSession'
 import { getStatusInfo, recordCardToneClass } from '../utils'
+
+/** 已选「按节点」但未分配任何节点时：授权列表恒为空，需超管配置 */
+const scopedWithoutNodesHint = computed(() => {
+  const p = getAdminProfile()
+  if (p?.node_scope !== 'scoped') return ''
+  const ids = Array.isArray(p.node_ids) ? p.node_ids : []
+  if (ids.length > 0) return ''
+  return '当前账号未分配任何节点，无法查看或新增 VPN 授权；请联系超级管理员在「管理员管理」中为您勾选可管辖节点。'
+})
+
+/** 运维仅能管部分节点时，说明列表与「整户编辑/删除」限制 */
+const scopedNodeHint = computed(() => {
+  const p = getAdminProfile()
+  if (p?.node_scope !== 'scoped') return ''
+  if (!Array.isArray(p.node_ids) || p.node_ids.length === 0) return ''
+  return '列表已隐藏「仅在其它节点存在未结授权、且与您管辖节点无任何授权记录」的用户（超级管理员仍可见全量）。您仅能管理所选节点上的 VPN 授权；外区授权在已吊销、吊销中或失败状态下不计入跨区占用；若仍存在其它跨区未结授权，对其「编辑」或「删除」将被禁用，请联系超级管理员处理。'
+})
 
 const rows = ref([])
 const loading = ref(false)
@@ -401,6 +460,7 @@ const doGrant = async () => {
     ElMessage.success(data.reissued ? '已重新发起证书签发' : '授权成功')
     newGrantInstanceId.value = null
     grants.value = (await http.get(`/api/users/${grantUser.value.id}/grants`)).data.items || []
+    await loadUsers()
   } catch {
     // http 拦截器已提示 error 文案
   } finally {
@@ -465,6 +525,7 @@ const revokeGrant = async (id) => {
       }
     }
     grants.value = (await http.get(`/api/users/${grantUser.value.id}/grants`)).data.items || []
+    await loadUsers()
   } catch {
     // 用户取消或 http.js 已处理
   }
@@ -480,6 +541,7 @@ const purgeGrant = async (id) => {
     await http.delete(`/api/grants/${id}/purge`)
     ElMessage.success('已删除记录')
     grants.value = (await http.get(`/api/users/${grantUser.value.id}/grants`)).data.items || []
+    await loadUsers()
   } catch {
     // 用户取消或 http.js 已处理
   }
@@ -490,6 +552,7 @@ const retryIssue = async (id) => {
     await http.post(`/api/grants/${id}/retry-issue`)
     ElMessage.success('已重新向节点下发签发任务，请稍后刷新查看状态')
     grants.value = (await http.get(`/api/users/${grantUser.value.id}/grants`)).data.items || []
+    await loadUsers()
   } catch {
     // http 拦截器已提示
   }
@@ -499,6 +562,11 @@ onMounted(() => void loadUsers().catch(() => {}))
 </script>
 
 <style scoped>
+.action-tooltip-wrap {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
 .grant-dialog-header {
   display: flex;
   align-items: center;

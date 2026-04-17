@@ -115,6 +115,19 @@ func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
 		log.Printf("agent upgrade defaults: list online nodes: %v", err)
 		online = nil
 	}
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	if !admScope.Unrestricted {
+		filtered := make([]model.Node, 0, len(online))
+		for _, n := range online {
+			if admScope.AllowsNode(n.ID) {
+				filtered = append(filtered, n)
+			}
+		}
+		online = filtered
+	}
 	amdCount, armCount := 0, 0
 	for _, n := range online {
 		a := strings.TrimSpace(strings.ToLower(n.AgentArch))
@@ -182,6 +195,10 @@ func fileSHA256Hex(path string) (string, error) {
 }
 
 func (h *Handler) CreateAgentUpgradeTask(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	var req createAgentUpgradeReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -206,6 +223,9 @@ func (h *Handler) CreateAgentUpgradeTask(c *gin.Context) {
 	online := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if h.hub != nil && h.hub.IsOnline(n.ID) {
+			if !admScope.Unrestricted && !admScope.AllowsNode(n.ID) {
+				continue
+			}
 			online = append(online, n)
 		}
 	}
@@ -226,7 +246,7 @@ func (h *Handler) CreateAgentUpgradeTask(c *gin.Context) {
 		}
 	}
 	if !canaryFound {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "canary node must be online"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "canary node must be online in your allowed scope"})
 		return
 	}
 
@@ -279,11 +299,24 @@ func (h *Handler) GetAgentUpgradeTask(c *gin.Context) {
 }
 
 func (h *Handler) ListAgentUpgradeTaskItems(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	id := c.Param("id")
 	var items []model.AgentUpgradeTaskItem
 	if err := h.db.Where("task_id = ?", id).Order("id asc").Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if !admScope.Unrestricted {
+		filtered := make([]model.AgentUpgradeTaskItem, 0, len(items))
+		for _, it := range items {
+			if admScope.AllowsNode(it.NodeID) {
+				filtered = append(filtered, it)
+			}
+		}
+		items = filtered
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
@@ -334,6 +367,10 @@ ORDER BY i.updated_at DESC;
 		UpdatedAt     string `json:"updated_at"`
 		NeedsUpdate   bool   `json:"needs_update"`
 	}
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	latest := h.effectiveLatestAgentVersion()
 	out := make([]item, 0, len(rows))
 	for _, r := range rows {
@@ -355,6 +392,15 @@ ORDER BY i.updated_at DESC;
 			UpdatedAt:     r.UpdatedAt.Format(time.RFC3339),
 			NeedsUpdate:   compareSemver(cur, latest) < 0,
 		})
+	}
+	if !admScope.Unrestricted {
+		filtered := make([]item, 0, len(out))
+		for _, it := range out {
+			if admScope.AllowsNode(it.NodeID) {
+				filtered = append(filtered, it)
+			}
+		}
+		out = filtered
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"latest_version": latest,

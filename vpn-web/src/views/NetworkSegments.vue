@@ -3,7 +3,7 @@
     <div class="page-card">
       <div class="page-card-header">
         <span class="page-card-title">组网网段</span>
-        <el-button type="primary" @click="openAdd">
+        <el-button v-if="canManageSegments" type="primary" @click="openAdd">
           <el-icon><Plus /></el-icon> 新建网段
         </el-button>
       </div>
@@ -36,7 +36,7 @@
             </div>
           </div>
           <div class="record-card__actions">
-            <template v-if="row.id !== 'default'">
+            <template v-if="row.id !== 'default' && canManageSegments">
               <el-button size="small" type="primary" plain @click="openEdit(row)">编辑</el-button>
               <el-button size="small" type="danger" plain @click="removeSeg(row)">删除</el-button>
             </template>
@@ -147,8 +147,14 @@ import { ref, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import http from '../api/http'
+import { getAdminProfile } from '../utils/adminSession'
 
 const PORT_MIN = 56714
+
+const canManageSegments = computed(() => {
+  const p = getAdminProfile()
+  return p?.role === 'admin' || p?.permissions === '*' || p?.node_scope === 'all'
+})
 
 const rows = ref([])
 const loading = ref(false)

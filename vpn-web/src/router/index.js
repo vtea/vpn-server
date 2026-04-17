@@ -1,4 +1,6 @@
 ﻿import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { isSuperAdminSession } from '../utils/adminSession'
 import Dashboard from '../views/Dashboard.vue'
 import Nodes from '../views/Nodes.vue'
 import NodeDetail from '../views/NodeDetail.vue'
@@ -15,7 +17,7 @@ import NetworkSegments from '../views/NetworkSegments.vue'
 const routes = [
   { path: '/login', component: Login },
   { path: '/self-service', component: SelfService, meta: { noAuth: true } },
-  { path: '/settings/api', component: ApiConfig },
+  { path: '/settings/api', component: ApiConfig, meta: { requiresSuperAdmin: true } },
   { path: '/', component: Dashboard },
   { path: '/network-segments', component: NetworkSegments },
   { path: '/nodes', component: Nodes },
@@ -36,6 +38,10 @@ router.beforeEach((to) => {
   if (to.path === '/login' || to.meta?.noAuth) return true
   const token = localStorage.getItem('token')
   if (!token) return '/login'
+  if (to.meta?.requiresSuperAdmin && !isSuperAdminSession()) {
+    ElMessage.warning('仅超级管理员可访问 API 连接')
+    return { path: '/', replace: true }
+  }
   return true
 })
 

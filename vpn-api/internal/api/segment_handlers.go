@@ -68,6 +68,9 @@ type createSegmentReq struct {
 }
 
 func (h *Handler) CreateNetworkSegment(c *gin.Context) {
+	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+		return
+	}
 	var req createSegmentReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -150,6 +153,9 @@ type patchSegmentReq struct {
 }
 
 func (h *Handler) PatchNetworkSegment(c *gin.Context) {
+	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+		return
+	}
 	id := c.Param("id")
 	if id == "default" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot modify the built-in default segment via API"})
@@ -213,6 +219,9 @@ func (h *Handler) PatchNetworkSegment(c *gin.Context) {
 }
 
 func (h *Handler) DeleteNetworkSegment(c *gin.Context) {
+	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+		return
+	}
 	id := c.Param("id")
 	if id == "default" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete the built-in default segment"})

@@ -39,6 +39,9 @@ func main() {
 	if err := autoMigrateAndSeed(db); err != nil {
 		log.Fatalf("init db failed: %v", err)
 	}
+	if err := migrateAdminNodeScopesBackfill(db); err != nil {
+		log.Fatalf("admin node scope backfill failed: %v", err)
+	}
 	if err := migrateLegacyModeIDs(db); err != nil {
 		log.Fatalf("mode migration failed: %v", err)
 	}
@@ -109,6 +112,7 @@ func main() {
 
 	secured.GET("/me", h.GetCurrentAdmin)
 	secured.POST("/me/password", h.ChangePassword)
+	secured.GET("/dashboard/stats", h.GetDashboardStats)
 
 	nodes := secured.Group("", middleware.RequirePermission("nodes"))
 	nodes.GET("/network-segments", h.ListNetworkSegments)
@@ -256,6 +260,7 @@ func sqliteDSN(path string) string {
 func autoMigrateAndSeed(db *gorm.DB) error {
 	if err := db.AutoMigrate(
 		&model.Admin{},
+		&model.AdminNodeScope{},
 		&model.NetworkSegment{},
 		&model.Node{},
 		&model.NodeSegment{},
@@ -324,6 +329,39 @@ func autoMigrateAndSeed(db *gorm.DB) error {
 			return err
 		}
 		db.Create(&model.AuditLog{AdminUser: "system", Action: "seed_admin", Target: "admin", Detail: "created default admin account"})
+	}
+	return nil
+}
+
+// migrateAdminNodeScopesBackfill 为已存在的非超级管理员一次性赋予「全部当前节点」，避免升级后运维账号突然无法操作任何节点。
+func migrateAdminNodeScopesBackfill(db *gorm.DB) error {
+	var nodes []model.Node
+	if err := db.Model(&model.Node{}).Select("id").Find(&nodes).Error; err != nil {
+		return err
+	}
+	if len(nodes) == 0 {
+		return nil
+	}
+	var admins []model.Admin
+	if err := db.Find(&admins).Error; err != nil {
+		return err
+	}
+	for _, a := range admins {
+		if api.AdminIsUnrestricted(&a) {
+			continue
+		}
+		var cnt int64
+		if err := db.Model(&model.AdminNodeScope{}).Where("admin_id = ?", a.ID).Count(&cnt).Error; err != nil {
+			return err
+		}
+		if cnt > 0 {
+			continue
+		}
+		for _, n := range nodes {
+			if err := db.Create(&model.AdminNodeScope{AdminID: a.ID, NodeID: n.ID}).Error; err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

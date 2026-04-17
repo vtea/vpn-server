@@ -78,7 +78,7 @@ http.interceptors.response.use(
       } else {
         clearAuthSession()
         router.push('/login')
-        ElMessage.error('登录已过期，请重新登录')
+        ElMessage.error(msg || '登录已过期，请重新登录')
       }
     } else if (status === 403) {
       ElMessage.error(msg || '没有操作权限')

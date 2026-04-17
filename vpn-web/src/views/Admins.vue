@@ -43,6 +43,9 @@
                 {{ permLabel(p) }}
               </el-tag>
             </template>
+            <el-tag v-if="row.node_scope === 'scoped'" size="small" type="info" style="margin-left: 4px">
+              节点 {{ (row.node_ids && row.node_ids.length) || 0 }} 个
+            </el-tag>
           </div>
           <div class="record-card__actions">
             <el-button size="small" plain type="primary" @click="openEdit(row)" :disabled="!isAdmin">
@@ -61,7 +64,7 @@
     </div>
 
     <!-- 创建/编辑对话框 -->
-    <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑管理员' : '添加管理员'" width="500px" destroy-on-close>
+    <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑管理员' : '添加管理员'" width="560px" destroy-on-close>
       <el-form :model="form" label-width="80px">
         <el-form-item label="用户名">
           <el-input v-model="form.username" :disabled="isEditing" placeholder="请输入用户名" />
@@ -80,6 +83,28 @@
           <el-checkbox-group v-model="form.permList">
             <el-checkbox v-for="m in allModules" :key="m.value" :label="m.value">{{ m.label }}</el-checkbox>
           </el-checkbox-group>
+        </el-form-item>
+        <el-form-item v-if="form.role !== 'admin'" label="节点范围">
+          <el-select
+            v-model="form.nodeIds"
+            multiple
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="选择可管理的节点（不选则列表为空）"
+            style="width: 100%"
+            :loading="nodeOptsLoading"
+          >
+            <el-option
+              v-for="n in nodeOptions"
+              :key="n.id"
+              :label="`${n.name} (${n.id})`"
+              :value="n.id"
+            />
+          </el-select>
+          <el-text type="info" size="small" style="display: block; margin-top: 6px">
+            决定「节点管理」「授权」等可见的节点；超级管理员不受此限制。
+          </el-text>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -114,6 +139,8 @@ import { formatDate, recordCardToneFromTagType } from '../utils'
 import { parseJwtPayload } from '../utils/jwt'
 
 const admins = ref([])
+const nodeOptions = ref([])
+const nodeOptsLoading = ref(false)
 const loading = ref(false)
 const dialogVisible = ref(false)
 const isEditing = ref(false)
@@ -137,7 +164,7 @@ const roleOptions = [
   { value: 'viewer', label: '只读查看 - 仅查看指定模块', tagType: 'info' },
 ]
 
-const form = ref({ username: '', password: '', role: 'operator', permList: [] })
+const form = ref({ username: '', password: '', role: 'operator', permList: [], nodeIds: [] })
 const resetForm = ref({ id: null, username: '', newPassword: '' })
 
 const currentAdmin = computed(() => {
@@ -181,7 +208,20 @@ const fetchAdmins = async () => {
   }
 }
 
-const openCreate = () => {
+const loadNodeOptions = async () => {
+  if (!isAdmin.value) return
+  nodeOptsLoading.value = true
+  try {
+    const { data } = await http.get('/api/nodes')
+    nodeOptions.value = (data.items || []).map((item) => item.node).filter(Boolean)
+  } catch {
+    nodeOptions.value = []
+  } finally {
+    nodeOptsLoading.value = false
+  }
+}
+
+const openCreate = async () => {
   isEditing.value = false
   editingId.value = null
   form.value = {
@@ -189,15 +229,19 @@ const openCreate = () => {
     password: '',
     role: 'operator',
     permList: ['nodes', 'users', 'rules', 'tunnels', 'audit'],
+    nodeIds: [],
   }
+  await loadNodeOptions()
   dialogVisible.value = true
 }
 
-const openEdit = (row) => {
+const openEdit = async (row) => {
   isEditing.value = true
   editingId.value = row.id
   const perms = row.permissions === '*' ? allModules.map(m => m.value) : parsePerms(row.permissions)
-  form.value = { username: row.username, password: '', role: row.role, permList: perms }
+  const nids = row.node_scope === 'scoped' && Array.isArray(row.node_ids) ? [...row.node_ids] : []
+  form.value = { username: row.username, password: '', role: row.role, permList: perms, nodeIds: nids }
+  await loadNodeOptions()
   dialogVisible.value = true
 }
 
@@ -206,7 +250,11 @@ const handleSave = async () => {
   if (isEditing.value) {
     saving.value = true
     try {
-      await http.patch(`/api/admins/${editingId.value}`, { role: form.value.role, permissions })
+      const body = { role: form.value.role, permissions }
+      if (form.value.role !== 'admin') {
+        body.node_ids = form.value.nodeIds || []
+      }
+      await http.patch(`/api/admins/${editingId.value}`, body)
       ElMessage.success('更新成功')
       dialogVisible.value = false
       fetchAdmins()
@@ -224,12 +272,16 @@ const handleSave = async () => {
     }
     saving.value = true
     try {
-      await http.post('/api/admins', {
+      const payload = {
         username: form.value.username,
         password: form.value.password,
         role: form.value.role,
         permissions,
-      })
+      }
+      if (form.value.role !== 'admin') {
+        payload.node_ids = form.value.nodeIds || []
+      }
+      await http.post('/api/admins', payload)
       ElMessage.success('创建成功')
       dialogVisible.value = false
       fetchAdmins()

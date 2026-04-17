@@ -227,15 +227,21 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	adminPayload := gin.H{
+		"id":          admin.ID,
+		"username":    admin.Username,
+		"role":        admin.Role,
+		"permissions": admin.Permissions,
+		"created_at":  admin.CreatedAt,
+	}
+	if sc, err := h.adminScopeForUsername(admin.Username); err == nil && sc != nil {
+		for k, v := range sc.ScopeJSON() {
+			adminPayload[k] = v
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
-		"admin": gin.H{
-			"id":          admin.ID,
-			"username":    admin.Username,
-			"role":        admin.Role,
-			"permissions": admin.Permissions,
-			"created_at":  admin.CreatedAt,
-		},
+		"admin": adminPayload,
 	})
 }
 
@@ -247,7 +253,19 @@ func (h *Handler) GetCurrentAdmin(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "admin not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"admin": admin})
+	payload := gin.H{
+		"id":          admin.ID,
+		"username":    admin.Username,
+		"role":        admin.Role,
+		"permissions": admin.Permissions,
+		"created_at":  admin.CreatedAt,
+	}
+	if sc, err := h.adminScopeForUsername(admin.Username); err == nil && sc != nil {
+		for k, v := range sc.ScopeJSON() {
+			payload[k] = v
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"admin": payload})
 }
 
 type changePasswordReq struct {
@@ -338,6 +356,9 @@ func normalizeNodePublicHost(raw string) (string, error) {
 }
 
 func (h *Handler) CreateNode(c *gin.Context) {
+	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+		return
+	}
 	var req createNodeReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -464,8 +485,20 @@ func (h *Handler) CreateNode(c *gin.Context) {
 }
 
 func (h *Handler) ListNodes(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	q := h.db.Model(&model.Node{})
+	if !scope.Unrestricted {
+		if len(scope.AllowedNodeIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{"items": []gin.H{}})
+			return
+		}
+		q = q.Where("id IN ?", scope.AllowedNodeIDs)
+	}
 	var nodes []model.Node
-	if err := h.db.Find(&nodes).Error; err != nil {
+	if err := q.Find(&nodes).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -541,10 +574,17 @@ func (h *Handler) ListNodes(c *gin.Context) {
 }
 
 func (h *Handler) GetNode(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	id := c.Param("id")
 	var node model.Node
 	if err := h.db.Where("id = ?", id).First(&node).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, node.ID) {
 		return
 	}
 	var instances []model.Instance
@@ -609,10 +649,17 @@ type patchNodeReq struct {
 
 // PatchNode 更新节点展示字段（名称、地域、公网 IP）。
 func (h *Handler) PatchNode(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	id := c.Param("id")
 	var node model.Node
 	if err := h.db.Where("id = ?", id).First(&node).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, node.ID) {
 		return
 	}
 	prevPublicIP := strings.TrimSpace(node.PublicIP)
@@ -684,10 +731,17 @@ func (h *Handler) deployHintsForBootstrapToken(c *gin.Context, bootstrapToken st
 
 // RotateNodeBootstrapToken 作废旧 bootstrap 令牌并签发新令牌（用于重装 / 误用一次性注册后）。
 func (h *Handler) RotateNodeBootstrapToken(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	id := c.Param("id")
 	var node model.Node
 	if err := h.db.Where("id = ?", id).First(&node).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, node.ID) {
 		return
 	}
 	tok, err := service.NewBootstrapToken()
@@ -719,6 +773,10 @@ type patchTunnelReq struct {
 
 // PatchTunnel 高级：调整 WireGuard /30 与端点 IP；会递增两端节点 config_version。
 func (h *Handler) PatchTunnel(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	tid, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tunnel id"})
@@ -727,6 +785,10 @@ func (h *Handler) PatchTunnel(c *gin.Context) {
 	var tun model.Tunnel
 	if err := h.db.First(&tun, uint(tid)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tunnel not found"})
+		return
+	}
+	if !scope.Unrestricted && (!scope.AllowsNode(tun.NodeA) || !scope.AllowsNode(tun.NodeB)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this tunnel"})
 		return
 	}
 	var req patchTunnelReq
@@ -793,13 +855,124 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"user": u})
 }
 
+// ensureVPNUserVisibleToScopedAdmin 受限管理员仅能访问列表中出现的 VPN 用户；不可见时返回 403 及 code，便于前端区分「不存在」与「存在但不在可见范围」。
+func (h *Handler) ensureVPNUserVisibleToScopedAdmin(c *gin.Context, scope *AdminScope, userID uint) bool {
+	if scope.Unrestricted {
+		return true
+	}
+	vis, err := h.userVisibleToScopedList(scope, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	if !vis {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "该用户不在当前账号的可见范围内（与授权管理列表一致）",
+			"code":  "user_not_in_scope",
+		})
+		return false
+	}
+	return true
+}
+
+// userListItemJSON 用户列表单项（与 model.User 序列化字段一致，并统一附带 cross_scope_edit_blocked）。
+func userListItemJSON(u model.User, crossScopeEditBlocked bool) gin.H {
+	return gin.H{
+		"id":                       u.ID,
+		"username":                 u.Username,
+		"display_name":             u.DisplayName,
+		"group_name":               u.GroupName,
+		"status":                   u.Status,
+		"created_at":               u.CreatedAt,
+		"cross_scope_edit_blocked": crossScopeEditBlocked,
+	}
+}
+
 func (h *Handler) ListUsers(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	var users []model.User
-	if err := h.db.Find(&users).Error; err != nil {
+	if err := h.db.Order("username ASC").Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": users})
+	var blocked map[uint]struct{}
+	if !scope.Unrestricted {
+		var err error
+		blocked, err = h.userIDsWithCrossScopeEditBlocked(scope)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		inScope, err := h.userIDsWithAnyGrantOnAllowedNodes(scope)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		filtered := make([]model.User, 0, len(users))
+		for _, u := range users {
+			if userVisibleToScopedFromSets(u.ID, inScope, blocked) {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
+	items := make([]gin.H, 0, len(users))
+	for _, u := range users {
+		flag := false
+		if !scope.Unrestricted {
+			_, flag = blocked[u.ID]
+		}
+		items = append(items, userListItemJSON(u, flag))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// GetDashboardStats 仪表盘用户数字段：users_total 为库中用户总数；users_visible 为当前账号在授权管理列表中可见的数量（超管二者相同）。
+func (h *Handler) GetDashboardStats(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	var usersTotal int64
+	if err := h.db.Model(&model.User{}).Count(&usersTotal).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if scope.Unrestricted {
+		c.JSON(http.StatusOK, gin.H{
+			"users_total":   usersTotal,
+			"users_visible": usersTotal,
+		})
+		return
+	}
+	blocked, err := h.userIDsWithCrossScopeEditBlocked(scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	inScope, err := h.userIDsWithAnyGrantOnAllowedNodes(scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var userIDs []uint
+	if err := h.db.Model(&model.User{}).Pluck("id", &userIDs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var usersVisible int64
+	for _, id := range userIDs {
+		if userVisibleToScopedFromSets(id, inScope, blocked) {
+			usersVisible++
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"users_total":   usersTotal,
+		"users_visible": usersVisible,
+	})
 }
 
 func (h *Handler) ListAuditLogs(c *gin.Context) {
@@ -838,8 +1011,20 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 }
 
 func (h *Handler) ListTunnels(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	q := h.db.Model(&model.Tunnel{})
+	if !scope.Unrestricted {
+		if len(scope.AllowedNodeIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{"items": []model.Tunnel{}})
+			return
+		}
+		q = q.Where("node_a IN ? AND node_b IN ?", scope.AllowedNodeIDs, scope.AllowedNodeIDs)
+	}
 	var tunnels []model.Tunnel
-	if err := h.db.Find(&tunnels).Error; err != nil {
+	if err := q.Find(&tunnels).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -848,6 +1033,9 @@ func (h *Handler) ListTunnels(c *gin.Context) {
 
 // RepairTunnelMesh 补全任意两节点之间缺失的隧道记录（全互联缺边修复），并递增受影响节点的 config_version。
 func (h *Handler) RepairTunnelMesh(c *gin.Context) {
+	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+		return
+	}
 	created, err := service.EnsureFullMeshTunnels(h.db)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -873,9 +1061,22 @@ func (h *Handler) RepairTunnelMesh(c *gin.Context) {
 }
 
 func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	if !h.ipListDualEnabled {
+		q := h.db.Model(&model.Node{})
+		if !admScope.Unrestricted {
+			if len(admScope.AllowedNodeIDs) == 0 {
+				h.audit(c, "trigger_iplist_update", "scoped", "legacy sent_to=0 (no allowed nodes)")
+				c.JSON(http.StatusOK, gin.H{"sent_to": 0, "total_nodes": 0})
+				return
+			}
+			q = q.Where("id IN ?", admScope.AllowedNodeIDs)
+		}
 		var nodes []model.Node
-		if err := h.db.Find(&nodes).Error; err != nil {
+		if err := q.Find(&nodes).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -916,20 +1117,20 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 			return
 		}
 	}
-	scope := normalizeIPListScope(req.Scope)
-	if scope == "all" {
-		scope = "all"
+	listScope := normalizeIPListScope(req.Scope)
+	if listScope == "all" {
+		listScope = "all"
 	}
 
 	synced := []string{}
-	if scope == "all" || scope == "domestic" {
+	if listScope == "all" || listScope == "domestic" {
 		if _, err := h.refreshIPListArtifact("domestic"); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "refresh domestic ip list failed: " + err.Error()})
 			return
 		}
 		synced = append(synced, "domestic")
 	}
-	if scope == "all" || scope == "overseas" {
+	if listScope == "all" || listScope == "overseas" {
 		if _, err := h.refreshIPListArtifact("overseas"); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "refresh overseas ip list failed: " + err.Error()})
 			return
@@ -937,8 +1138,17 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		synced = append(synced, "overseas")
 	}
 
+	nq := h.db.Model(&model.Node{})
+	if !admScope.Unrestricted {
+		if len(admScope.AllowedNodeIDs) == 0 {
+			h.audit(c, "trigger_iplist_update", "scoped", "sent_to=0 (no allowed nodes)")
+			c.JSON(http.StatusOK, gin.H{"scope": listScope, "synced": synced, "sent_to": 0, "total_nodes": 0})
+			return
+		}
+		nq = nq.Where("id IN ?", admScope.AllowedNodeIDs)
+	}
 	var nodes []model.Node
-	if err := h.db.Find(&nodes).Error; err != nil {
+	if err := nq.Find(&nodes).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -949,7 +1159,7 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 	sent := 0
 	for _, n := range nodes {
 		if h.hub != nil && h.hub.IsOnline(n.ID) {
-			scopePayload, merr := json.Marshal(gin.H{"scope": scope})
+			scopePayload, merr := json.Marshal(gin.H{"scope": listScope})
 			if merr != nil {
 				log.Printf("TriggerIPListUpdate: marshal iplist scope: %v", merr)
 			} else {
@@ -970,13 +1180,29 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 			sent++
 		}
 	}
-	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s sent_to=%d nodes exceptions=%d", scope, sent, len(exceptions)))
-	c.JSON(http.StatusOK, gin.H{"scope": scope, "synced": synced, "sent_to": sent, "total_nodes": len(nodes)})
+	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s sent_to=%d nodes exceptions=%d", listScope, sent, len(exceptions)))
+	c.JSON(http.StatusOK, gin.H{"scope": listScope, "synced": synced, "sent_to": sent, "total_nodes": len(nodes)})
 }
 
 func (h *Handler) IPListStatus(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	nq := h.db.Model(&model.Node{})
+	if !admScope.Unrestricted {
+		if len(admScope.AllowedNodeIDs) == 0 {
+			if !h.ipListDualEnabled {
+				c.JSON(http.StatusOK, gin.H{"items": []any{}})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"items": []any{}, "artifacts": gin.H{}})
+			return
+		}
+		nq = nq.Where("id IN ?", admScope.AllowedNodeIDs)
+	}
 	var nodes []model.Node
-	if err := h.db.Find(&nodes).Error; err != nil {
+	if err := nq.Find(&nodes).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1357,11 +1583,19 @@ func normalizeCertNamePart(s string) string {
 	return v
 }
 
-func buildGrantCertCN(nodeName, username string, now time.Time) string {
+// buildGrantCertCN 生成用户授权证书的 CN：节点名-组网模式-用户名-YYYYMMDD。
+//
+// 参数：
+//   - nodeName: 节点展示名；
+//   - instanceMode: 实例组网模式（如 node-direct、cn-split、global），经 NormalizeInstanceMode 规范化；
+//   - username: 用户登录名；
+//   - now: 日期部分，取服务器时区下的日历日 YYYYMMDD。
+func buildGrantCertCN(nodeName, instanceMode, username string, now time.Time) string {
 	nodePart := normalizeCertNamePart(nodeName)
+	modePart := normalizeCertNamePart(service.NormalizeInstanceMode(instanceMode))
 	userPart := normalizeCertNamePart(username)
-	tsPart := now.Format("20060102150405")
-	return fmt.Sprintf("%s-%s-%s", nodePart, userPart, tsPart)
+	datePart := now.Format("20060102")
+	return fmt.Sprintf("%s-%s-%s-%s", nodePart, modePart, userPart, datePart)
 }
 
 func (h *Handler) CreateUserGrant(c *gin.Context) {
@@ -1389,13 +1623,21 @@ func (h *Handler) CreateUserGrant(c *gin.Context) {
 		return
 	}
 
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, inst.NodeID) {
+		return
+	}
+
 	var node model.Node
 	if err := h.db.First(&node, "id = ?", inst.NodeID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 		return
 	}
 
-	certCN := buildGrantCertCN(node.Name, user.Username, time.Now())
+	certCN := buildGrantCertCN(node.Name, inst.Mode, user.Username, time.Now())
 
 	var existing model.UserGrant
 	err = h.db.Where("user_id = ? AND instance_id = ?", user.ID, inst.ID).First(&existing).Error
@@ -1454,8 +1696,12 @@ func (h *Handler) ListUserGrants(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
 		return
 	}
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	var grants []model.UserGrant
-	if err := h.db.Where("user_id = ?", uint(userID)).Find(&grants).Error; err != nil {
+	if err := h.scopedUserGrantsQuery(scope, uint(userID)).Find(&grants).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1479,9 +1725,12 @@ func (h *Handler) DownloadGrantOVPN(c *gin.Context) {
 		}
 	}
 
-	var grant model.UserGrant
-	if err := h.db.First(&grant, uint(grantID)).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "grant not found"})
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	grant, ok := h.ensureGrantAllowed(c, scope, uint(grantID))
+	if !ok {
 		return
 	}
 	var inst model.Instance
@@ -1490,7 +1739,7 @@ func (h *Handler) DownloadGrantOVPN(c *gin.Context) {
 		return
 	}
 	protoQ := c.Query("proto")
-	data, err := service.GrantOVPNForDownload(&grant, inst.Proto, protoQ)
+	data, err := service.GrantOVPNForDownload(grant, inst.Proto, protoQ)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "配置未就绪或该协议暂无文件，请确认已签发成功"})
 		return
@@ -1506,11 +1755,15 @@ func (h *Handler) RevokeGrant(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid grant id"})
 		return
 	}
-	var grant model.UserGrant
-	if err := h.db.First(&grant, uint(grantID)).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "grant not found"})
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
 		return
 	}
+	grantPtr, ok := h.ensureGrantAllowed(c, scope, uint(grantID))
+	if !ok {
+		return
+	}
+	grant := *grantPtr
 	grant.CertStatus = "revoking"
 	if err := h.db.Save(&grant).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1546,11 +1799,15 @@ func (h *Handler) PurgeGrant(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid grant id"})
 		return
 	}
-	var grant model.UserGrant
-	if err := h.db.First(&grant, uint(grantID)).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "grant not found"})
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
 		return
 	}
+	grantPtr, ok := h.ensureGrantAllowed(c, scope, uint(grantID))
+	if !ok {
+		return
+	}
+	grant := *grantPtr
 	if grant.CertStatus == "active" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请先吊销该授权，再删除记录"})
 		return
@@ -1570,11 +1827,15 @@ func (h *Handler) RetryIssueGrant(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid grant id"})
 		return
 	}
-	var grant model.UserGrant
-	if err := h.db.First(&grant, uint(grantID)).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "grant not found"})
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
 		return
 	}
+	grantPtr, ok := h.ensureGrantAllowed(c, scope, uint(grantID))
+	if !ok {
+		return
+	}
+	grant := *grantPtr
 	if grant.CertStatus != "pending" && grant.CertStatus != "failed" && grant.CertStatus != "placeholder" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "仅「待签发」「占位配置」或「签发失败」的授权可重试"})
 		return
@@ -1596,7 +1857,7 @@ func (h *Handler) RetryIssueGrant(c *gin.Context) {
 		return
 	}
 
-	certCN := buildGrantCertCN(node.Name, user.Username, time.Now())
+	certCN := buildGrantCertCN(node.Name, inst.Mode, user.Username, time.Now())
 	if grant.CertCN != certCN {
 		grant.CertCN = certCN
 	}
@@ -1667,6 +1928,18 @@ type deleteNodePasswordReq struct {
 // DeleteNodeWithPassword 删除节点前校验当前登录管理员密码，防止误删。
 func (h *Handler) DeleteNodeWithPassword(c *gin.Context) {
 	id := c.Param("id")
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	var node model.Node
+	if err := h.db.Where("id = ?", id).First(&node).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, node.ID) {
+		return
+	}
 	username, _ := c.Get("admin")
 	usernameStr, _ := username.(string)
 	var admin model.Admin
@@ -1743,13 +2016,23 @@ func (h *Handler) GetUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
 		return
 	}
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	var user model.User
 	if err := h.db.First(&user, uint(userID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
+	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
+		return
+	}
 	var grants []model.UserGrant
-	h.db.Where("user_id = ?", user.ID).Find(&grants)
+	if err := h.scopedUserGrantsQuery(scope, user.ID).Find(&grants).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"user": user, "grants": grants})
 }
 
@@ -1765,9 +2048,23 @@ func (h *Handler) UpdateUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
 		return
 	}
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	var user model.User
 	if err := h.db.First(&user, uint(userID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
+		return
+	}
+	if outside, err := h.userHasOutOfScopeGrants(scope, user.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	} else if outside {
+		c.JSON(http.StatusForbidden, gin.H{"error": "该用户在您可管辖的节点范围外仍有 VPN 授权，无法修改资料；请联系超级管理员"})
 		return
 	}
 	var req updateUserReq
@@ -1795,9 +2092,23 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
 		return
 	}
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	var user model.User
 	if err := h.db.First(&user, uint(userID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
+		return
+	}
+	if outside, err := h.userHasOutOfScopeGrants(scope, user.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	} else if outside {
+		c.JSON(http.StatusForbidden, gin.H{"error": "该用户在您可管辖的节点范围外仍有 VPN 授权，无法删除；请联系超级管理员"})
 		return
 	}
 	var grants []model.UserGrant
@@ -1808,13 +2119,27 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 			h.db.Save(&g)
 		}
 	}
-	h.db.Delete(&user)
-	h.audit(c, "delete_user", fmt.Sprintf("user:%s", user.Username), fmt.Sprintf("revoked %d grants", len(grants)))
+	if err := h.db.Where("user_id = ?", user.ID).Delete(&model.UserGrant{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.db.Delete(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.audit(c, "delete_user", fmt.Sprintf("user:%s", user.Username), fmt.Sprintf("removed %d grant rows", len(grants)))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (h *Handler) ListNodeInstances(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	nodeID := c.Param("id")
+	if !h.ensureNodeAllowed(c, scope, nodeID) {
+		return
+	}
 	var instances []model.Instance
 	h.db.Where("node_id = ?", nodeID).Find(&instances)
 	c.JSON(http.StatusOK, gin.H{"items": instances})
@@ -1830,10 +2155,17 @@ type createInstanceReq struct {
 }
 
 func (h *Handler) CreateInstance(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	nodeID := c.Param("id")
 	var node model.Node
 	if err := h.db.Where("id = ?", nodeID).First(&node).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, node.ID) {
 		return
 	}
 	var req createInstanceReq
@@ -1910,16 +2242,20 @@ func (h *Handler) tunnelConnectsPeers(nodeID, peerID string) bool {
 }
 
 func (h *Handler) PatchInstance(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	instID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid instance id"})
 		return
 	}
-	var inst model.Instance
-	if err := h.db.First(&inst, uint(instID)).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "instance not found"})
+	instPtr, ok := h.ensureInstanceAllowed(c, scope, uint(instID))
+	if !ok {
 		return
 	}
+	inst := *instPtr
 	var req patchInstanceReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2013,10 +2349,17 @@ func (h *Handler) pushInstancesConfigToNode(nodeID string) {
 }
 
 func (h *Handler) GetNodeStatus(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	id := c.Param("id")
 	var node model.Node
 	if err := h.db.Where("id = ?", id).First(&node).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, node.ID) {
 		return
 	}
 	var tunnels []model.Tunnel
@@ -2031,9 +2374,16 @@ func (h *Handler) GetNodeStatus(c *gin.Context) {
 }
 
 func (h *Handler) RefreshNodeWG(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	nodeID := strings.TrimSpace(c.Param("id"))
 	if nodeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing node id"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, scope, nodeID) {
 		return
 	}
 	if !nodeSupportsCapability(h.db, nodeID, "wg_refresh_v1") {
@@ -2073,8 +2423,23 @@ func (h *Handler) RefreshNodeWG(c *gin.Context) {
 }
 
 func (h *Handler) GetNodeStateConsistency(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	q := h.db.Model(&model.Node{})
+	if !scope.Unrestricted {
+		if len(scope.AllowedNodeIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"total": 0, "mismatch": 0, "consistent": true,
+				"items": []gin.H{},
+			})
+			return
+		}
+		q = q.Where("id IN ?", scope.AllowedNodeIDs)
+	}
 	var nodes []model.Node
-	if err := h.db.Find(&nodes).Error; err != nil {
+	if err := q.Find(&nodes).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -2110,9 +2475,22 @@ func (h *Handler) GetNodeStateConsistency(c *gin.Context) {
 }
 
 func (h *Handler) GetTunnelMetrics(c *gin.Context) {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	tunnelID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tunnel id"})
+		return
+	}
+	var tun model.Tunnel
+	if err := h.db.First(&tun, uint(tunnelID)).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tunnel not found"})
+		return
+	}
+	if !scope.Unrestricted && (!scope.AllowsNode(tun.NodeA) || !scope.AllowsNode(tun.NodeB)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this tunnel"})
 		return
 	}
 	var metrics []model.TunnelMetric
@@ -2305,18 +2683,45 @@ func (h *Handler) BroadcastToAdmins(eventType string, data any) {
 }
 
 func (h *Handler) PrometheusMetrics(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	scopedNodesQuery := func() *gorm.DB {
+		q := h.db.Model(&model.Node{})
+		if !admScope.Unrestricted {
+			if len(admScope.AllowedNodeIDs) == 0 {
+				return q.Where("1 = 0")
+			}
+			return q.Where("id IN ?", admScope.AllowedNodeIDs)
+		}
+		return q
+	}
+	if !admScope.Unrestricted && len(admScope.AllowedNodeIDs) == 0 {
+		c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte("vpn_nodes_total 0\nvpn_nodes_online 0\nvpn_users_total 0\nvpn_tunnels_total 0\nvpn_grants_total 0\nvpn_online_users 0\n"))
+		return
+	}
 	var nodeCount, userCount, tunnelCount, grantCount int64
-	h.db.Model(&model.Node{}).Count(&nodeCount)
+	scopedNodesQuery().Count(&nodeCount)
 	h.db.Model(&model.User{}).Count(&userCount)
-	h.db.Model(&model.Tunnel{}).Count(&tunnelCount)
-	h.db.Model(&model.UserGrant{}).Count(&grantCount)
+	tunQ := h.db.Model(&model.Tunnel{})
+	if !admScope.Unrestricted {
+		tunQ = tunQ.Where("node_a IN ? AND node_b IN ?", admScope.AllowedNodeIDs, admScope.AllowedNodeIDs)
+	}
+	tunQ.Count(&tunnelCount)
+	grantQ := h.db.Model(&model.UserGrant{})
+	if !admScope.Unrestricted {
+		grantQ = grantQ.Joins("JOIN instances ON instances.id = user_grants.instance_id").
+			Where("instances.node_id IN ?", admScope.AllowedNodeIDs)
+	}
+	grantQ.Count(&grantCount)
 
 	var onlineNodes int64
-	h.db.Model(&model.Node{}).Where("status = ?", "online").Count(&onlineNodes)
+	scopedNodesQuery().Where("status = ?", "online").Count(&onlineNodes)
 
 	var totalOnlineUsers int
 	var nodes []model.Node
-	h.db.Find(&nodes)
+	scopedNodesQuery().Find(&nodes)
 	for _, n := range nodes {
 		totalOnlineUsers += n.OnlineUsers
 	}
@@ -2327,10 +2732,24 @@ func (h *Handler) PrometheusMetrics(c *gin.Context) {
 }
 
 func (h *Handler) ListConfigVersions(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	nodeID := c.Query("node_id")
+	if nodeID != "" && !admScope.Unrestricted && !admScope.AllowsNode(nodeID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this node"})
+		return
+	}
 	q := h.db.Order("created_at desc").Limit(50)
 	if nodeID != "" {
 		q = q.Where("node_id = ?", nodeID)
+	} else if !admScope.Unrestricted {
+		if len(admScope.AllowedNodeIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{"items": []model.ConfigVersion{}})
+			return
+		}
+		q = q.Where("node_id IN ?", admScope.AllowedNodeIDs)
 	}
 	var versions []model.ConfigVersion
 	q.Find(&versions)
@@ -2338,6 +2757,10 @@ func (h *Handler) ListConfigVersions(c *gin.Context) {
 }
 
 func (h *Handler) RollbackConfig(c *gin.Context) {
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
 	versionID, err := strconv.ParseUint(c.Param("version"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version id"})
@@ -2346,6 +2769,9 @@ func (h *Handler) RollbackConfig(c *gin.Context) {
 	var ver model.ConfigVersion
 	if err := h.db.First(&ver, uint(versionID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
+		return
+	}
+	if !h.ensureNodeAllowed(c, admScope, ver.NodeID) {
 		return
 	}
 	if h.hub != nil && h.hub.IsOnline(ver.NodeID) {
@@ -2364,15 +2790,21 @@ func (h *Handler) RollbackConfig(c *gin.Context) {
 
 func (h *Handler) ListAdmins(c *gin.Context) {
 	var admins []model.Admin
-	h.db.Find(&admins)
-	c.JSON(http.StatusOK, gin.H{"items": admins})
+	h.db.Order("id asc").Find(&admins)
+	items, err := h.adminsToPublicItems(admins)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 type createAdminReq struct {
-	Username    string `json:"username" binding:"required"`
-	Password    string `json:"password" binding:"required"`
-	Role        string `json:"role"`
-	Permissions string `json:"permissions"`
+	Username    string   `json:"username" binding:"required"`
+	Password    string   `json:"password" binding:"required"`
+	Role        string   `json:"role"`
+	Permissions string   `json:"permissions"`
+	NodeIDs     []string `json:"node_ids"`
 }
 
 func (h *Handler) CreateAdmin(c *gin.Context) {
@@ -2408,13 +2840,33 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !AdminIsUnrestricted(&admin) {
+		if err := validateNodeIDsExist(h.db, req.NodeIDs); err != nil {
+			h.db.Delete(&admin)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := h.replaceAdminNodeScopes(h.db, admin.ID, req.NodeIDs); err != nil {
+			h.db.Delete(&admin)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	h.audit(c, "create_admin", fmt.Sprintf("admin:%s", req.Username), fmt.Sprintf("role=%s perms=%s", req.Role, req.Permissions))
-	c.JSON(http.StatusCreated, gin.H{"admin": admin})
+	items, _ := h.adminsToPublicItems([]model.Admin{admin})
+	var out gin.H
+	if len(items) > 0 {
+		out = items[0]
+	} else {
+		out = gin.H{"id": admin.ID, "username": admin.Username, "role": admin.Role, "permissions": admin.Permissions, "created_at": admin.CreatedAt}
+	}
+	c.JSON(http.StatusCreated, gin.H{"admin": out})
 }
 
 type updateAdminReq struct {
-	Role        *string `json:"role"`
-	Permissions *string `json:"permissions"`
+	Role        *string   `json:"role"`
+	Permissions *string   `json:"permissions"`
+	NodeIDs     *[]string `json:"node_ids"`
 }
 
 func (h *Handler) UpdateAdmin(c *gin.Context) {
@@ -2444,9 +2896,35 @@ func (h *Handler) UpdateAdmin(c *gin.Context) {
 	if req.Permissions != nil {
 		admin.Permissions = *req.Permissions
 	}
-	h.db.Save(&admin)
+	if err := h.db.Save(&admin).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if AdminIsUnrestricted(&admin) {
+		_ = h.db.Where("admin_id = ?", admin.ID).Delete(&model.AdminNodeScope{}).Error
+	} else if req.NodeIDs != nil {
+		if err := validateNodeIDsExist(h.db, *req.NodeIDs); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := h.replaceAdminNodeScopes(h.db, admin.ID, *req.NodeIDs); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	h.audit(c, "update_admin", fmt.Sprintf("admin:%s", admin.Username), fmt.Sprintf("role=%s perms=%s", admin.Role, admin.Permissions))
-	c.JSON(http.StatusOK, gin.H{"admin": admin})
+	items, err := h.adminsToPublicItems([]model.Admin{admin})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var out gin.H
+	if len(items) > 0 {
+		out = items[0]
+	} else {
+		out = gin.H{"id": admin.ID, "username": admin.Username, "role": admin.Role, "permissions": admin.Permissions, "created_at": admin.CreatedAt}
+	}
+	c.JSON(http.StatusOK, gin.H{"admin": out})
 }
 
 type resetPasswordReq struct {
@@ -2509,6 +2987,7 @@ func (h *Handler) DeleteAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete default admin"})
 		return
 	}
+	h.db.Where("admin_id = ?", admin.ID).Delete(&model.AdminNodeScope{})
 	h.db.Delete(&admin)
 	h.audit(c, "delete_admin", fmt.Sprintf("admin:%s", admin.Username), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})

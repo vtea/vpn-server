@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { parseJwtPayload } from './jwt'
 
 const TOKEN_KEY = 'token'
 const ADMIN_PROFILE_KEY = 'admin_profile'
@@ -52,4 +53,34 @@ export function clearAuthSession() {
   localStorage.removeItem(ADMIN_PROFILE_KEY)
   tokenRef.value = ''
   adminProfileRef.value = null
+}
+
+/**
+ * 从 `/me` 或 JWT payload 对象解析 role / perms（与 App.vue 中 normalize 逻辑一致）。
+ * @param {Record<string, unknown> | null | undefined} info
+ * @returns {{ role: string, perms: string }}
+ */
+function normalizeRolePerms(info) {
+  if (!info || typeof info !== 'object') return { role: '', perms: '' }
+  const roleRaw = typeof info.role === 'string' ? info.role.trim() : ''
+  const role = roleRaw.toLowerCase()
+  const permsSource = 'perms' in info ? info.perms : info.permissions
+  const perms = typeof permsSource === 'string' ? permsSource.trim() : ''
+  return { role, perms }
+}
+
+/**
+ * 当前会话是否为超级管理员（role=admin 或 permissions=*），供路由守卫与侧栏使用。
+ * 优先读已缓存的 admin 资料，否则从 JWT 解析，避免仅带 token 时误判。
+ * @returns {boolean}
+ */
+export function isSuperAdminSession() {
+  let info = getAdminProfile()
+  if (!info || (!info.role && !info.permissions && !info.perms)) {
+    const token = getSessionToken()
+    const payload = token ? parseJwtPayload(token) : null
+    info = payload && typeof payload === 'object' ? payload : null
+  }
+  const { role, perms } = normalizeRolePerms(info)
+  return role === 'admin' || perms === '*'
 }

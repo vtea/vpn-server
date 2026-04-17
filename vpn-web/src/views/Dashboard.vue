@@ -16,7 +16,8 @@
           </div>
           <div class="stat-content">
             <div class="stat-value">{{ stats[item.key] }}</div>
-            <div class="stat-label">{{ item.label }}</div>
+            <div class="stat-label">{{ item.key === 'users' ? userStatLabel : item.label }}</div>
+            <div v-if="item.key === 'users' && userStatHint" class="stat-hint">{{ userStatHint }}</div>
           </div>
         </div>
       </el-col>
@@ -97,29 +98,55 @@
 </template>
 
 <script setup>
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted } from 'vue'
 import http from '../api/http'
 import { getStatusInfo, formatRelativeTime, recordCardToneClass } from '../utils'
 
 const stats = reactive({ nodes: 0, onlineNodes: 0, users: 0, tunnels: 0 })
+/** 仪表盘 /api/dashboard/stats 返回的原始计数，用于标签与副文案 */
+const dashboardUserStats = reactive({ users_total: null, users_visible: null })
 const nodeRows = ref([])
 const recentLogs = ref([])
 
 const statCards = [
   { key: 'nodes', label: '节点总数', icon: 'Monitor', color: 'primary' },
   { key: 'onlineNodes', label: '在线节点', icon: 'CircleCheck', color: 'success' },
-  { key: 'users', label: '用户总数', icon: 'User', color: 'warning' },
+  { key: 'users', label: '用户', icon: 'User', color: 'warning' },
   { key: 'tunnels', label: '隧道数', icon: 'Connection', color: 'info' },
 ]
 
-const safeFetch = async (url, params) => {
-  try { return await http.get(url, params) } catch { return null }
+/** 用户卡片主标签：超管为「用户总数」，受限运维为「可见用户」 */
+const userStatLabel = computed(() => {
+  const t = dashboardUserStats.users_total
+  const v = dashboardUserStats.users_visible
+  if (t != null && v != null && t !== v) return '可见用户'
+  return '用户总数'
+})
+
+/** 当可见数小于全库总数时展示副说明 */
+const userStatHint = computed(() => {
+  const t = dashboardUserStats.users_total
+  const v = dashboardUserStats.users_visible
+  if (t == null || v == null || t === v) return ''
+  return `全平台共 ${t} 名`
+})
+
+/** 仪表盘统计为「尽力而为」：旧后端缺路由等返回 404 时不弹全局 404，避免每次进首页都报错 */
+const safeFetch = async (url, config = {}) => {
+  try {
+    return await http.get(url, {
+      ...config,
+      meta: { ...config.meta, suppress404: true }
+    })
+  } catch {
+    return null
+  }
 }
 
 onMounted(async () => {
-  const [nodesRes, usersRes, tunnelsRes, logsRes] = await Promise.all([
+  const [nodesRes, dashStatsRes, tunnelsRes, logsRes] = await Promise.all([
     safeFetch('/api/nodes'),
-    safeFetch('/api/users'),
+    safeFetch('/api/dashboard/stats'),
     safeFetch('/api/tunnels'),
     safeFetch('/api/audit-logs'),
   ])
@@ -129,7 +156,17 @@ onMounted(async () => {
     stats.nodes = items.length
     stats.onlineNodes = items.filter(i => i.node?.status === 'online').length
   }
-  if (usersRes) stats.users = (usersRes.data.items || []).length
+  if (dashStatsRes?.data) {
+    const d = dashStatsRes.data
+    const vis = d.users_visible
+    const tot = d.users_total
+    dashboardUserStats.users_total = typeof tot === 'number' ? tot : null
+    dashboardUserStats.users_visible = typeof vis === 'number' ? vis : null
+    stats.users = typeof vis === 'number' ? vis : (typeof tot === 'number' ? tot : 0)
+  } else {
+    const usersRes = await safeFetch('/api/users')
+    if (usersRes) stats.users = (usersRes.data.items || []).length
+  }
   if (tunnelsRes) stats.tunnels = (tunnelsRes.data.items || []).length
   if (logsRes) recentLogs.value = (logsRes.data.items || []).slice(0, 8)
 })
@@ -144,6 +181,13 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.stat-hint {
+  font-size: 11px;
+  color: var(--text-secondary, #909399);
+  margin-top: 2px;
+  line-height: 1.3;
 }
 
 .timeline-user {

@@ -11,6 +11,12 @@ type Admin struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// AdminNodeScope 运维/只读管理员的可见节点白名单；超级管理员（role=admin 或 permissions=*）不使用此表。
+type AdminNodeScope struct {
+	AdminID uint   `json:"admin_id" gorm:"primaryKey"`
+	NodeID  string `json:"node_id" gorm:"primaryKey;size:191"`
+}
+
 // Permissions is a comma-separated list of module keys.
 // "*" means full access. Available modules:
 //

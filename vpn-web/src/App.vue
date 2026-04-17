@@ -55,7 +55,7 @@
             <el-icon><Setting /></el-icon>
             <template #title>管理员管理</template>
           </el-menu-item>
-          <el-menu-item index="/settings/api">
+          <el-menu-item index="/settings/api" v-if="isSuperAdmin">
             <el-icon><Link /></el-icon>
             <template #title>API 连接</template>
           </el-menu-item>
@@ -150,7 +150,8 @@ import {
   getAdminProfile,
   getSessionToken,
   setAdminProfile,
-  clearAuthSession
+  clearAuthSession,
+  isSuperAdminSession
 } from './utils/adminSession'
 
 const route = useRoute()
@@ -209,7 +210,9 @@ const normalizeAdminInfo = (info) => {
         : ''
   const permsSource = info.perms ?? info.permissions ?? ''
   const perms = typeof permsSource === 'string' ? permsSource.trim() : ''
-  return { username, role, perms }
+  const nodeScope = typeof info.node_scope === 'string' ? info.node_scope.trim() : ''
+  const nodeIds = Array.isArray(info.node_ids) ? info.node_ids.filter((x) => typeof x === 'string') : []
+  return { username, role, perms, node_scope: nodeScope, node_ids: nodeIds }
 }
 
 const adminInfo = computed(() => {
@@ -245,6 +248,9 @@ const hasPerm = (module) => {
   return info.perms.split(',').map(s => s.trim()).includes(module)
 }
 
+/** 侧栏「API 连接」仅超级管理员可见（与后端 AdminIsUnrestricted 一致） */
+const isSuperAdmin = computed(() => isSuperAdminSession())
+
 const toggleSidebar = () => {
   isCollapsed.value = !isCollapsed.value
 }
@@ -273,10 +279,19 @@ onMounted(async () => {
   const token = getSessionToken()
   if (!token) return
   try {
-    const res = await http.get('/api/me')
+    // 刷新时拉取资料：404（账号已删/库不一致）勿走全局 404 提示，改为清会话并回登录页
+    const res = await http.get('/api/me', { meta: { suppress404: true } })
     setAdminProfile(res.data?.admin || null)
-  } catch {
-    // http.js handles error display
+  } catch (err) {
+    const st = err.response?.status
+    if (st === 404) {
+      clearAuthSession()
+      if (router.currentRoute.value.path !== '/login') {
+        router.push('/login')
+        ElMessage.warning('登录状态无效（账号不存在或已变更），请重新登录')
+      }
+    }
+    // 401 等仍由 http 拦截器统一处理
   }
 })
 

@@ -4,8 +4,8 @@
       <div class="page-card-header">
         <span class="page-card-title">节点管理</span>
         <div style="display:flex;gap:8px;">
-          <el-button @click="openUpgradeDialog">批量升级 Agent</el-button>
-          <el-button type="primary" @click="showAdd = true">
+          <el-button v-if="canManageAllNodes" @click="openUpgradeDialog">批量升级 Agent</el-button>
+          <el-button v-if="canManageAllNodes" type="primary" @click="showAdd = true">
             <el-icon><Plus /></el-icon> 添加节点
           </el-button>
         </div>
@@ -115,7 +115,7 @@
             </el-button>
           </div>
         </div>
-        <el-empty v-if="!loading && !filteredRows.length" description="暂无节点" :image-size="60" />
+        <el-empty v-if="!loading && !filteredRows.length" :description="nodesEmptyDescription" :image-size="60" />
       </div>
     </div>
 
@@ -247,6 +247,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, EditPen } from '@element-plus/icons-vue'
 import http from '../api/http'
+import { getAdminProfile } from '../utils/adminSession'
 import { getStatusInfo, recordCardToneClass, recordCardToneFromTagType } from '../utils'
 
 const rows = ref([])
@@ -304,6 +305,20 @@ const agentVersionTooltip = (node) => {
   const lat = latestAgentVersion.value ? `仓库参考：${latestAgentVersion.value}` : ''
   return [verLine, arch, lat].filter(Boolean).join('\n')
 }
+
+/** 仅超级管理员（全局）可新建节点、发起全量 Agent 升级 */
+const canManageAllNodes = computed(() => {
+  const p = getAdminProfile()
+  return p?.role === 'admin' || p?.permissions === '*' || p?.node_scope === 'all'
+})
+
+const nodesEmptyDescription = computed(() => {
+  const p = getAdminProfile()
+  if (p?.node_scope === 'scoped' && Array.isArray(p.node_ids) && p.node_ids.length === 0) {
+    return '当前账号未分配任何可管理节点，请联系超级管理员在「管理员管理」中配置节点范围'
+  }
+  return '暂无节点'
+})
 
 const filteredRows = computed(() => {
   let list = rows.value
