@@ -976,32 +976,6 @@ func sendResult(conn *websocket.Conn, msgType string, payload any) {
 	}
 }
 
-func precheckDownloadURLs(urls []string) (bool, string, error) {
-	lastErr := ""
-	for _, u := range urls {
-		u = strings.TrimSpace(u)
-		if u == "" {
-			continue
-		}
-		// Some CDNs / reverse proxies reject HEAD while GET works.
-		// Treat HEAD probe as preferred fast path and fall back to a tiny ranged GET.
-		cmd := exec.Command("bash", "-lc", fmt.Sprintf("curl -m 5 -fsSI %q >/dev/null || curl -m 8 -fsS --range 0-0 %q -o /dev/null || wget -T 8 --spider -q %q", u, u, u))
-		if out, err := cmd.CombinedOutput(); err == nil {
-			return true, u, nil
-		} else {
-			lastErr = strings.TrimSpace(string(out))
-			if lastErr == "" {
-				lastErr = err.Error()
-			}
-			lastErr = fmt.Sprintf("%s (%s)", lastErr, u)
-		}
-	}
-	if lastErr == "" {
-		lastErr = "no valid download url"
-	}
-	return false, "", fmt.Errorf(lastErr)
-}
-
 type upgradeExecResult struct {
 	Success    bool
 	Step       string
@@ -1068,11 +1042,15 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 	var lastErr string
 	usedURL := ""
 	result.Step = "download"
+	dlClient := downloadClientFollowRedirects()
 	for _, u := range urls {
-		dlCmd := exec.Command("bash", "-lc", fmt.Sprintf("curl -fsSL %q -o %q || wget -qO %q %q", u, tmpPath, tmpPath, u))
-		if out, err := dlCmd.CombinedOutput(); err != nil {
-			lastErr = fmt.Sprintf("download_failed[%s]: %v %s", u, err, strings.TrimSpace(string(out)))
-			result.StderrTail = tailText(string(out), 700)
+		if err := os.Truncate(tmpPath, 0); err != nil {
+			lastErr = fmt.Sprintf("download_failed[%s]: truncate tmp: %v", u, err)
+			continue
+		}
+		if err := downloadURLToFile(dlClient, u, tmpPath); err != nil {
+			lastErr = fmt.Sprintf("download_failed[%s]: %v", u, err)
+			result.StderrTail = tailText(err.Error(), 700)
 			continue
 		}
 		usedURL = u
@@ -1115,7 +1093,7 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 
 	if restartService {
 		result.Step = "restart"
-		// Delay restart slightly so this process can send upgrade_result first.
+		// Delay restart so this process can send upgrade_result before the service restarts.
 		upgradeLog, lerr := os.CreateTemp("", "vpn-agent-upgrade-*.log")
 		if lerr != nil {
 			result.ErrorCode = "restart_log_failed"
@@ -1124,13 +1102,15 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 		}
 		logPath := upgradeLog.Name()
 		_ = upgradeLog.Close()
-		reCmd := exec.Command("bash", "-lc", fmt.Sprintf("nohup sh -c 'sleep 1; systemctl restart vpn-agent' >%q 2>&1 &", logPath))
-		if out, err := reCmd.CombinedOutput(); err != nil {
-			result.ErrorCode = "restart_launch_failed"
-			result.Error = fmt.Sprintf("restart launch failed: %v", err)
-			result.StderrTail = tailText(string(out), 700)
-			return result
-		}
+		go func(path string) {
+			time.Sleep(time.Second)
+			out, err := exec.Command("systemctl", "restart", "vpn-agent").CombinedOutput()
+			if err != nil {
+				msg := fmt.Sprintf("systemctl restart: %v\n%s", err, strings.TrimSpace(string(out)))
+				_ = os.WriteFile(path, []byte(msg), 0600)
+				log.Printf("post-upgrade systemctl: %s", msg)
+			}
+		}(logPath)
 	}
 	result.Success = true
 	return result
