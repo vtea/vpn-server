@@ -837,6 +837,9 @@ type createUserReq struct {
 }
 
 func (h *Handler) CreateUser(c *gin.Context) {
+	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+		return
+	}
 	var req createUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -900,20 +903,10 @@ func (h *Handler) ListUsers(c *gin.Context) {
 	}
 	var blocked map[uint]struct{}
 	if !scope.Unrestricted {
-		var err error
-		blocked, err = h.userIDsWithCrossScopeEditBlocked(scope)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		inScope, err := h.userIDsWithAnyGrantOnAllowedNodes(scope)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		filtered := make([]model.User, 0, len(users))
+		adminName := strings.TrimSpace(scope.Admin.Username)
+		filtered := make([]model.User, 0, 1)
 		for _, u := range users {
-			if userVisibleToScopedFromSets(u.ID, inScope, blocked) {
+			if strings.EqualFold(strings.TrimSpace(u.Username), adminName) {
 				filtered = append(filtered, u)
 			}
 		}
@@ -948,25 +941,14 @@ func (h *Handler) GetDashboardStats(c *gin.Context) {
 		})
 		return
 	}
-	blocked, err := h.userIDsWithCrossScopeEditBlocked(scope)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	inScope, err := h.userIDsWithAnyGrantOnAllowedNodes(scope)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	var userIDs []uint
-	if err := h.db.Model(&model.User{}).Pluck("id", &userIDs).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
+	adminName := strings.TrimSpace(scope.Admin.Username)
 	var usersVisible int64
-	for _, id := range userIDs {
-		if userVisibleToScopedFromSets(id, inScope, blocked) {
-			usersVisible++
+	if adminName != "" {
+		if err := h.db.Model(&model.User{}).
+			Where("LOWER(TRIM(username)) = LOWER(?)", adminName).
+			Count(&usersVisible).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{

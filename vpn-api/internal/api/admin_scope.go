@@ -289,62 +289,25 @@ func (h *Handler) userIDsWithCrossScopeEditBlocked(scope *AdminScope) (map[uint]
 	return out, nil
 }
 
-// userIDsWithAnyGrantOnAllowedNodes 在管辖节点上至少有一条授权（任意 cert_status）的用户 ID，用于列表过滤批量计算。
-func (h *Handler) userIDsWithAnyGrantOnAllowedNodes(scope *AdminScope) (map[uint]struct{}, error) {
-	out := make(map[uint]struct{})
-	if scope == nil || scope.Unrestricted || len(scope.AllowedNodeIDs) == 0 {
-		return out, nil
-	}
-	var ids []uint
-	if err := h.db.Model(&model.UserGrant{}).
-		Joins("JOIN instances ON instances.id = user_grants.instance_id").
-		Where("instances.node_id IN ?", scope.AllowedNodeIDs).
-		Distinct("user_grants.user_id").
-		Pluck("user_grants.user_id", &ids).Error; err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		out[id] = struct{}{}
-	}
-	return out, nil
-}
-
-// userVisibleToScopedFromSets 与 userVisibleToScopedList 语义一致：可见当且仅当「在管辖内有任意授权行」或「不存在跨区非终态授权」。
-func userVisibleToScopedFromSets(userID uint, inScopeSet map[uint]struct{}, blocked map[uint]struct{}) bool {
-	if _, ok := inScopeSet[userID]; ok {
-		return true
-	}
-	_, bl := blocked[userID]
-	return !bl
-}
-
-// userVisibleToScopedList 受限管理员用户列表是否应包含该用户：隐藏「管辖内无任何授权行、但在其它节点仍有非终态授权」的纯外区用户；超管列表不过滤。
-// 单用户校验（GetUser 等）使用按 user_id 的查询，避免全表 Pluck。
+// userVisibleToScopedList 非超级管理员仅可见与当前登录管理员「用户名一致」的 VPN 用户一行；超级管理员可见全部。
+// 单用户校验（GetUser 等）与此一致。
 func (h *Handler) userVisibleToScopedList(scope *AdminScope, userID uint) (bool, error) {
 	if scope == nil || scope.Unrestricted {
 		return true, nil
 	}
-	var nInScope int64
-	if len(scope.AllowedNodeIDs) > 0 {
-		if err := h.db.Model(&model.UserGrant{}).
-			Joins("JOIN instances ON instances.id = user_grants.instance_id").
-			Where("user_grants.user_id = ?", userID).
-			Where("instances.node_id IN ?", scope.AllowedNodeIDs).
-			Count(&nInScope).Error; err != nil {
-			return false, err
+	var u model.User
+	if err := h.db.First(&u, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
 		}
-	}
-	if nInScope > 0 {
-		return true, nil
-	}
-	outside, err := h.userHasOutOfScopeGrants(scope, userID)
-	if err != nil {
 		return false, err
 	}
-	if outside {
+	adminName := strings.TrimSpace(scope.Admin.Username)
+	userName := strings.TrimSpace(u.Username)
+	if adminName == "" || userName == "" {
 		return false, nil
 	}
-	return true, nil
+	return strings.EqualFold(adminName, userName), nil
 }
 
 // replaceAdminNodeScopes 覆盖某管理员的节点白名单（调用方已校验 node_id 存在）。

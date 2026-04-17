@@ -3,7 +3,7 @@
     <div class="page-card">
       <div class="page-card-header">
         <span class="page-card-title">授权管理</span>
-        <el-button type="primary" @click="showAdd = true">
+        <el-button v-if="isSuperAdminSession()" type="primary" @click="showAdd = true">
           <el-icon><Plus /></el-icon> 添加用户
         </el-button>
       </div>
@@ -265,7 +265,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
-import { getAdminProfile } from '../utils/adminSession'
+import { getAdminProfile, isSuperAdminSession } from '../utils/adminSession'
 import { getStatusInfo, recordCardToneClass } from '../utils'
 
 /** 已选「按节点」但未分配任何节点时：授权列表恒为空，需超管配置 */
@@ -277,12 +277,15 @@ const scopedWithoutNodesHint = computed(() => {
   return '当前账号未分配任何节点，无法查看或新增 VPN 授权；请联系超级管理员在「管理员管理」中为您勾选可管辖节点。'
 })
 
-/** 运维仅能管部分节点时，说明列表与「整户编辑/删除」限制 */
+/** 超级管理员按节点管辖时的跨区说明；普通管理员仅能见同名 VPN 用户 */
 const scopedNodeHint = computed(() => {
   const p = getAdminProfile()
-  if (p?.node_scope !== 'scoped') return ''
-  if (!Array.isArray(p.node_ids) || p.node_ids.length === 0) return ''
-  return '列表已隐藏「仅在其它节点存在未结授权、且与您管辖节点无任何授权记录」的用户（超级管理员仍可见全量）。您仅能管理所选节点上的 VPN 授权；外区授权在已吊销、吊销中或失败状态下不计入跨区占用；若仍存在其它跨区未结授权，对其「编辑」或「删除」将被禁用，请联系超级管理员处理。'
+  if (isSuperAdminSession()) {
+    if (p?.node_scope !== 'scoped') return ''
+    if (!Array.isArray(p.node_ids) || p.node_ids.length === 0) return ''
+    return '列表已隐藏「仅在其它节点存在未结授权、且与您管辖节点无任何授权记录」的用户（超级管理员仍可见全量）。您仅能管理所选节点上的 VPN 授权；外区授权在已吊销、吊销中或失败状态下不计入跨区占用；若仍存在其它跨区未结授权，对其「编辑」或「删除」将被禁用，请联系超级管理员处理。'
+  }
+  return '仅超级管理员可查看全部用户并新增 VPN 用户。当前列表仅显示「VPN 用户名与登录管理员用户名一致」的账户；若尚未创建同名 VPN 用户则列表为空。'
 })
 
 const rows = ref([])
