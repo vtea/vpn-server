@@ -874,6 +874,53 @@ is_mode_skipped() {
   return 1
 }
 
+# 部署末尾健康检查：并行等待所有已启用的 OpenVPN 单元同时处于 active。
+# 避免「按 instances 数组顺序各等 50s」导致先检查的实例在后续等待期间已掉线、却仍显示 ✓ 的假阳性。
+wait_all_openvpn_units_active() {
+  local f="$1"
+  local max_wait="${2:-120}"
+  local ic i inst_en mode modes
+  modes=()
+  ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
+  for i in $(seq 0 $((ic - 1))); do
+    inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
+    mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
+    if is_mode_skipped "$mode"; then
+      warn "服务健康跳过: openvpn-${mode}.service（管理员选择跳过）"
+      continue
+    fi
+    modes+=("$mode")
+  done
+  [[ "${#modes[@]}" -eq 0 ]] && return 0
+  local t=0 all_ok
+  while [[ "$t" -lt "$max_wait" ]]; do
+    all_ok=1
+    for mode in "${modes[@]}"; do
+      if ! systemctl is-active --quiet "openvpn-${mode}.service"; then
+        all_ok=0
+        break
+      fi
+    done
+    [[ "$all_ok" -eq 1 ]] && break
+    t=$((t + 1))
+    sleep 1
+  done
+  local errors=0
+  for mode in "${modes[@]}"; do
+    if systemctl is-active --quiet "openvpn-${mode}.service"; then
+      ok "服务健康: openvpn-${mode}.service"
+    else
+      fail "服务异常: openvpn-${mode}.service（${max_wait}s 内未与其它实例同时保持稳定 active；若刚部署请查 journalctl -u openvpn-${mode} 与 vpn-agent 日志）"
+      errors=$((errors + 1))
+    fi
+  done
+  return "$errors"
+}
+
 verify_required_ports_listening_file() {
   local f="$1"
   [[ ! -f "$f" ]] && { warn "无 $f，无法执行监听验收"; return 1; }
@@ -889,13 +936,14 @@ verify_required_ports_listening_file() {
     tries=0
     # openvpn 刚启动后监听建立可能有短暂延迟；vpn-agent 安装/启动后也可能触发 OpenVPN 重启。
     # UDP 监听在 ss 中常为 UNCONN，部分 iproute2 版本上 ( sport = :PORT ) 过滤器不命中，需行级回退。
-    while [[ "$tries" -lt 35 ]]; do
+    while [[ "$tries" -lt 45 ]]; do
       if [[ "$proto" == "tcp" ]]; then
         listeners="$(ss -H -tlnp "( sport = :${port} )" 2>/dev/null || true)"
       else
         listeners="$(ss -H -ulnp "( sport = :${port} )" 2>/dev/null || true)"
         if [[ -z "$listeners" ]]; then
-          listeners="$(ss -H -ulnp 2>/dev/null | grep -E ":${port}[[:space:]]" || true)"
+          # 行尾或无空白分隔时 [[:space:]] 可能不命中，故用端口子串匹配（IPv4 地址:端口 形态下足够唯一）
+          listeners="$(ss -H -ulnp 2>/dev/null | grep -F ":${port}" || true)"
         fi
       fi
       [[ -n "$listeners" ]] && break
@@ -920,7 +968,7 @@ verify_required_ports_listening_file() {
 
 post_deploy_health_check() {
   local f="$1"
-  local errors mode inst_en ic i ov_ok j
+  local errors inst_json
   errors=0
   echo ""
   log "部署后健康检查 ..."
@@ -938,42 +986,24 @@ post_deploy_health_check() {
     errors=$((errors + 1))
   fi
 
-  ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
-  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
-  for i in $(seq 0 $((ic - 1))); do
-    inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
-    if ! is_enabled_value "$inst_en"; then
-      continue
-    fi
-    mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
-    if is_mode_skipped "$mode"; then
-      warn "服务健康跳过: openvpn-${mode}.service（管理员选择跳过）"
-      continue
-    fi
-    ov_ok=0
-    for j in $(seq 1 50); do
-      if systemctl is-active --quiet "openvpn-${mode}.service"; then
-        ov_ok=1
-        break
-      fi
-      sleep 1
-    done
-    if [[ "$ov_ok" -eq 1 ]]; then
-      ok "服务健康: openvpn-${mode}.service"
-    else
-      fail "服务异常: openvpn-${mode}.service（50s 内未变为 active；若刚部署请查 journalctl -u openvpn-${mode} 与 vpn-agent 日志）"
-      errors=$((errors + 1))
-    fi
-  done
+  # 始终优先用磁盘上的 bootstrap（vpn-agent 收到 update_config 后会 merge 写回），与 OpenVPN 实际配置一致
+  inst_json="$f"
+  [[ -f "/etc/vpn-agent/bootstrap-node.json" ]] && inst_json="/etc/vpn-agent/bootstrap-node.json"
 
-  # Step 9 安装/启动 vpn-agent 后可能再次触发 OpenVPN 配置应用，端口就绪略晚于 is-active
-  sleep 3
-  if ! verify_required_ports_listening_file "$f"; then
+  wait_all_openvpn_units_active "$inst_json" 120
+  ov_wait_rc=$?
+  if [[ "$ov_wait_rc" -ne 0 ]]; then
+    errors=$((errors + ov_wait_rc))
+  fi
+
+  # Step 9 安装/启动 vpn-agent 后可能再次触发 OpenVPN 配置应用、merge bootstrap；UDP bind 略晚于 is-active
+  sleep 8
+  if ! verify_required_ports_listening_file "$inst_json"; then
     errors=$((errors + 1))
   fi
 
   if should_apply_host_firewall_open; then
-    if ! verify_host_firewall_rules "$f"; then
+    if ! verify_host_firewall_rules "$inst_json"; then
       errors=$((errors + 1))
     fi
   else

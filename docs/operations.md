@@ -220,6 +220,23 @@ EASYRSA_BATCH=1 ./easyrsa gen-crl
 
 ### 8.2 国内库与海外库在数据面上的作用（cn-split）
 
+**与 8.1 节的关系**：控制面仍会下发并维护 **国内（domestic）+ 海外（overseas）** 两套制品，节点也会拉取两套列表与 ipset（见 8.1 节）。但就 **`cn-split` 在入口节点上的选路逻辑**而言，**只需要「中国 IP 段」这一套库**即可实现「命中则走国内、未命中则走出口」：**不需要**再维护一份「海外 IP 库」来判定「是否经 `exit_node`」——**未命中国内明细的目的地址**会落到策略路由表内的 **`default`**，自然经 **WireGuard 指向出口**。
+
+**cn-split 路由决策（仅国内库）**
+
+```mermaid
+flowchart LR
+  dst[dst_IP]
+  dst --> cnHit{命中China_CIDR}
+  cnHit -->|yes| localWAN[入口本机WAN]
+  cnHit -->|no| defaultRT[表内default]
+  defaultRT --> wgExit[WG到exit_node]
+```
+
+- **命中国内库（`cn-ip-list.txt` 注入表内的明细）**：走 **本机默认 IPv4 网关/网卡**，表现为 **国内直连**；`nat-rules.sh` 中对目的命中 **`china-ip`** 的会话做 **SNAT 到本机 WAN**。
+- **未命中国内明细**：不匹配上述更具体路由，则使用表内 **`default via WG 对端`**，流量经 **`exit_node` 一侧出口**出网；**无需**用海外库再筛一遍目的 IP。
+- **海外库与 `overseas-ip`**：仍由 Agent/安装脚本维护，供健康检查或后续扩展；**当前 `policy-routing.sh` / `nat-rules.sh` 不依据海外库做 `cn-split` 选路**（详见下条）。
+
 - **国内库**：写入 **`china-ip`** ipset；**`policy-routing.sh`** 用 **`cn-ip-list.txt`** 注入策略路由表；**`nat-rules.sh`** 对 `cn-split` 用 **`china-ip`** 匹配目的地址做 SNAT。即 **国内分流主路径依赖国内库**。
 - **海外库**：由 Agent（及安装脚本）维护 **`overseas-ip`** ipset 与列表文件；**当前生成的 `nat-rules.sh` / `policy-routing.sh` 未引用 `overseas-ip`**。若需按「海外列表」进一步改 NAT/路由，需另行设计规则链后再改脚本模板。
 - **海外库与 ipset 类型**：`overseas-ip` 为 **`hash:net`（仅 IPv4 CIDR）**。数据源须为 IPv4 段列表；若误用 **仅含 IPv6** 的文本（例如历史上的 `china6.txt`），`ipset add` 会大量报错且无法入库。控制面默认海外源已改为 **IPv4 国家聚合段**；存量库在控制面 **重启迁移** 时会将仍指向 `china6.txt` 的 `overseas` 源自动升级。控制面与 Agent 在写入制品时会对 **`overseas` 范围**丢弃非 IPv4 CIDR 行。

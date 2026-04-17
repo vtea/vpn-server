@@ -220,6 +220,8 @@ iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 **cn-split 实例**（核心：国内走本地，境外走出口）：
 
+**选路与双库说明**：`cn-split` 在数据面上**仅依赖国内 IP 段列表 + 路由表 default 指向出口**即可实现分流；控制面仍维护国内、海外两套制品，但当前脚本未用海外库参与选路。详见 [operations.md](operations.md) 第 8.2 节「国内库与海外库在数据面上的作用」及其中 **cn-split 路由决策（仅国内库）** 小节。
+
 ```ini
 # /etc/openvpn/server/cn-split/server.conf
 local 0.0.0.0
