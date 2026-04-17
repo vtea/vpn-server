@@ -254,6 +254,11 @@ LEGACY_OPENVPN_UNITS=(
   "openvpn@server.service"
 )
 
+# openvpn-install.sh 等会生成 openvpn-iptables.service，名称形如 openvpn-<后缀> 但不是 VPN 实例 mode，清理遗留单元时勿删。
+OPENVPN_NON_INSTANCE_UNIT_SUFFIXES=(
+  iptables
+)
+
 # 预检：是否运行 ufw / firewalld（仅提示，不修改规则）
 detect_firewall_backend() {
   FIREWALL_BACKEND="none"
@@ -455,12 +460,22 @@ cleanup_legacy_openvpn_units() {
   fi
 }
 
+## 释放本脚本为 OpenVPN management 预留的 TCP 端口（56730–56739，见 mgmt_port_for_mode）。
+## 解决 EADDRINUSE 导致 openvpn 立即退出、systemd 无限重启的问题。
+## 优先 fuser -k（与 apt 锁等待处一致）；否则用 ss 解析 PID，对本段端口强制结束监听进程（非 openvpn 也会杀并告警）。
 cleanup_stale_openvpn_management_ports() {
-  # 与 mgmt_port_for_mode 一致：已知 mode 用 56730–56732；未知 mode 可能落到 56733+
   local port listeners line pid args
   local cleaned=0
   for port in $(seq 56730 56739); do
-    listeners="$(ss -lntp 2>/dev/null | awk -v p="127.0.0.1:${port}" '$4 == p {print}')"
+    if command -v fuser >/dev/null 2>&1; then
+      if fuser -s "${port}/tcp" 2>/dev/null; then
+        warn "  释放占用 management TCP ${port} 的进程（fuser -k）"
+        fuser -k "${port}/tcp" 2>/dev/null && cleaned=1 || true
+      fi
+      continue
+    fi
+    # ss 列格式因版本略有差异，用子串匹配 127.0.0.1:port，避免 awk 全等匹配漏行
+    listeners="$(ss -lntp 2>/dev/null | grep -F "127.0.0.1:${port}" || true)"
     [[ -z "$listeners" ]] && continue
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
@@ -468,10 +483,10 @@ cleanup_stale_openvpn_management_ports() {
       [[ -z "$pid" ]] && continue
       args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
       if [[ "$args" != *"openvpn"* ]]; then
-        warn "  mgmt ${port} 被非 openvpn 进程占用，跳过自动清理: pid=${pid} cmd=${args:-unknown}"
-        continue
+        warn "  management ${port} 被非 openvpn 进程占用，仍将结束以释放预留端口: pid=${pid} cmd=${args:-unknown}"
+      else
+        warn "  清理占用 management ${port} 的旧 openvpn 进程: pid=${pid}"
       fi
-      warn "  清理占用 management ${port} 的旧 openvpn 进程: pid=${pid}"
       kill "$pid" 2>/dev/null || true
       sleep 1
       if kill -0 "$pid" 2>/dev/null; then
@@ -483,6 +498,70 @@ cleanup_stale_openvpn_management_ports() {
   if [[ "$cleaned" -eq 1 ]]; then
     sleep 1
   fi
+}
+
+## 根据当前 NODE_JSON 的 instances[].mode 删除 /var/log/openvpn 下已下线实例遗留的三件套（.log / -status.log / -ipp.txt）。
+## 控制面曾下发 hk-global、us-global 等 mode 时会产生大量文件；实例裁撤后文件不会自动消失，故在部署时收一次尾。
+## 依赖全局 NODE_JSON；instances 为空时不做任何删除，避免误清空。
+prune_stale_openvpn_log_artifacts() {
+  local ic current_modes f b cand seen=" "
+  ic="$(echo "$NODE_JSON" | jq '.instances | length' 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
+  [[ "$ic" -eq 0 ]] && return 0
+  current_modes="$(echo "$NODE_JSON" | jq -r '.instances[].mode' 2>/dev/null | sort -u)"
+  [[ -z "$current_modes" ]] && return 0
+
+  shopt -s nullglob
+  for f in /var/log/openvpn/*.log /var/log/openvpn/*-status.log /var/log/openvpn/*-ipp.txt; do
+    [[ -f "$f" ]] || continue
+    b="$(basename "$f")"
+    if [[ "$b" == *-status.log ]]; then
+      cand="${b%-status.log}"
+    elif [[ "$b" == *-ipp.txt ]]; then
+      cand="${b%-ipp.txt}"
+    elif [[ "$b" == *.log ]]; then
+      cand="${b%.log}"
+    else
+      continue
+    fi
+    echo "$current_modes" | grep -qx "$cand" && continue
+    [[ "$seen" == *" ${cand} "* ]] && continue
+    seen+=" ${cand} "
+    log "  移除已不在当前实例列表中的遗留 OpenVPN 日志: ${cand}（.log / -status / -ipp）"
+    rm -f "/var/log/openvpn/${cand}.log" "/var/log/openvpn/${cand}-status.log" "/var/log/openvpn/${cand}-ipp.txt"
+  done
+  shopt -u nullglob
+}
+
+## 若控制面已从 instances 中删除某 mode，节点上仍可能残留 /etc/systemd/system/openvpn-<mode>.service，
+## systemd 会持续 auto-restart，journal 刷屏且占用 management 端口。按当前 NODE_JSON 的 instances[].mode 收尾。
+## 依赖全局 NODE_JSON；instances 为空时不删（避免误伤）；OPENVPN_NON_INSTANCE_UNIT_SUFFIXES 中的后缀永不删除。
+cleanup_stale_openvpn_instance_units_not_in_bootstrap() {
+  local ic current_modes unit b m x skip
+  ic="$(echo "$NODE_JSON" | jq '.instances | length' 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
+  [[ "$ic" -eq 0 ]] && return 0
+  current_modes="$(echo "$NODE_JSON" | jq -r '.instances[].mode' 2>/dev/null | sort -u)"
+  [[ -z "$current_modes" ]] && return 0
+
+  shopt -s nullglob
+  for unit in /etc/systemd/system/openvpn-*.service; do
+    [[ -f "$unit" ]] || continue
+    b="$(basename "$unit" .service)"
+    m="${b#openvpn-}"
+    skip=0
+    for x in "${OPENVPN_NON_INSTANCE_UNIT_SUFFIXES[@]}"; do
+      [[ "$x" == "$m" ]] && skip=1 && break
+    done
+    [[ "$skip" -eq 1 ]] && continue
+    echo "$current_modes" | grep -qx "$m" && continue
+    log "  移除控制面已删除实例的遗留 systemd 单元: ${b}.service（并 stop/disable）"
+    systemctl disable --now "$b.service" 2>/dev/null || true
+    systemctl stop "$b.service" 2>/dev/null || true
+    rm -f "$unit"
+  done
+  shopt -u nullglob
+  systemctl daemon-reload 2>/dev/null || true
 }
 
 extract_openvpn_conf_port_proto() {
@@ -892,6 +971,7 @@ is_mode_skipped() {
 reset_failed_and_start_openvpn_instances() {
   local f="$1"
   [[ ! -f "$f" ]] && return 0
+  cleanup_stale_openvpn_management_ports
   local ic i inst_en mode modes
   modes=()
   ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
@@ -1572,7 +1652,8 @@ install_easyrsa_manual() {
   rm -f "$tgz"
 }
 
-CORE_PKGS="openvpn wireguard-tools ipset iptables jq curl dnsmasq"
+# psmisc 提供 fuser，用于 apt 锁等待与释放 OpenVPN management 预留 TCP 端口
+CORE_PKGS="openvpn wireguard-tools ipset iptables jq curl dnsmasq psmisc"
 
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
@@ -1678,6 +1759,7 @@ log "Step 4/${TOTAL_STEPS}: Rendering OpenVPN server configs ..."
 
 PKI="$EASYRSA_DIR/pki"
 mkdir -p /var/log/openvpn
+prune_stale_openvpn_log_artifacts
 
 # management 端口按 mode 固定（56730–56733），与 vpn-agent countOnlineUsers 一致，不依赖 instances JSON 顺序
 mgmt_port_for_mode() {
@@ -2418,6 +2500,7 @@ log "Step 8/${TOTAL_STEPS}: Creating systemd services ..."
 # 与 Step2 前清理呼应：若中途有人手工拉起旧 openvpn，或 unit 变更后仍有残留，此处再收一次尾
 cleanup_legacy_openvpn_units
 cleanup_stale_openvpn_management_ports
+cleanup_stale_openvpn_instance_units_not_in_bootstrap
 
 # 先安装并启用 vpn-routing，再拉起 OpenVPN / Agent，避免单元内 After= 指向尚未注册的服务；
 # 重启时策略路由与 NAT 也会先于 OpenVPN 执行。
