@@ -737,6 +737,10 @@ start_openvpn_mode_with_health_check() {
   if ! systemctl restart "$unit"; then
     fail "  Failed to restart $unit"
     journalctl -u "$unit" -n 30 --no-pager -o cat | sed 's/^/    /'
+    if [[ -f "/var/log/openvpn/${mode}.log" ]]; then
+      warn "  ${unit} OpenVPN 日志尾部（/var/log/openvpn/${mode}.log）："
+      tail -n 40 "/var/log/openvpn/${mode}.log" 2>/dev/null | sed 's/^/    /' || true
+    fi
     return 1
   fi
   local tries=0
@@ -750,6 +754,10 @@ start_openvpn_mode_with_health_check() {
   done
   fail "  Service $unit failed health check"
   journalctl -u "$unit" -n 30 --no-pager -o cat | sed 's/^/    /'
+  if [[ -f "/var/log/openvpn/${mode}.log" ]]; then
+    warn "  ${unit} OpenVPN 日志尾部（/var/log/openvpn/${mode}.log）："
+    tail -n 40 "/var/log/openvpn/${mode}.log" 2>/dev/null | sed 's/^/    /' || true
+  fi
   return 1
 }
 
@@ -2342,6 +2350,8 @@ StartLimitBurst=5
 [Service]
 # simple：兼容未编译 sd_notify 的 OpenVPN；notify 在部分发行版上会超时或立即失败导致重启风暴
 Type=simple
+# 卸载/异常退出后 tun-${MODE} 可能残留，导致 ioctl(TUNSETIFF) 报 Device or resource busy；启动前删除同名设备
+ExecStartPre=-/usr/sbin/ip link delete dev tun-${MODE}
 ExecStart=/usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/${MODE}/server.conf
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
