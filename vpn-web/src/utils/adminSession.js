@@ -5,6 +5,7 @@ const TOKEN_KEY = 'token'
 const ADMIN_PROFILE_KEY = 'admin_profile'
 
 function readProfileFromStorage() {
+  if (typeof localStorage === 'undefined') return null
   const raw = localStorage.getItem(ADMIN_PROFILE_KEY)
   if (!raw) return null
   try {
@@ -15,8 +16,12 @@ function readProfileFromStorage() {
   }
 }
 
-const tokenRef = ref(localStorage.getItem(TOKEN_KEY) || '')
-const adminProfileRef = ref(readProfileFromStorage())
+const tokenRef = ref(
+  typeof localStorage !== 'undefined' ? (localStorage.getItem(TOKEN_KEY) || '') : ''
+)
+const adminProfileRef = ref(
+  typeof localStorage !== 'undefined' ? readProfileFromStorage() : null
+)
 
 export function getSessionToken() {
   return tokenRef.value
@@ -28,18 +33,24 @@ export function getAdminProfile() {
 
 export function setSessionToken(token) {
   const safeToken = typeof token === 'string' ? token : ''
-  if (safeToken) localStorage.setItem(TOKEN_KEY, safeToken)
-  else localStorage.removeItem(TOKEN_KEY)
+  if (typeof localStorage !== 'undefined') {
+    if (safeToken) localStorage.setItem(TOKEN_KEY, safeToken)
+    else localStorage.removeItem(TOKEN_KEY)
+  }
   tokenRef.value = safeToken
 }
 
 export function setAdminProfile(profile) {
   if (!profile || typeof profile !== 'object') {
-    localStorage.removeItem(ADMIN_PROFILE_KEY)
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(ADMIN_PROFILE_KEY)
+    }
     adminProfileRef.value = null
     return
   }
-  localStorage.setItem(ADMIN_PROFILE_KEY, JSON.stringify(profile))
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(ADMIN_PROFILE_KEY, JSON.stringify(profile))
+  }
   adminProfileRef.value = profile
 }
 
@@ -49,8 +60,10 @@ export function setAuthSession({ token, admin }) {
 }
 
 export function clearAuthSession() {
-  localStorage.removeItem(TOKEN_KEY)
-  localStorage.removeItem(ADMIN_PROFILE_KEY)
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(ADMIN_PROFILE_KEY)
+  }
   tokenRef.value = ''
   adminProfileRef.value = null
 }

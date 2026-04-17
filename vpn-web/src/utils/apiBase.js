@@ -66,7 +66,10 @@ function preferRelativeToAvoidLoopbackCors (base) {
  */
 export function getApiBaseURL () {
   let base = ''
-  const stored = localStorage.getItem(API_BASE_STORAGE_KEY)
+  const stored =
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem(API_BASE_STORAGE_KEY)
+      : null
   if (stored !== null) {
     base = normalizeApiBase(stored)
   } else {
@@ -111,11 +114,13 @@ export function repairStoredApiBaseIfNeeded () {
 
 /** 保存用户输入的 API 根地址；传空字符串表示「强制同域」；需恢复构建默认请用 clearApiBaseURL */
 export function setApiBaseURL (url) {
+  if (typeof localStorage === 'undefined') return
   localStorage.setItem(API_BASE_STORAGE_KEY, normalizeApiBase(url))
 }
 
 /** 删除覆盖项，重新使用 VITE_API_BASE_URL 或同域 */
 export function clearApiBaseURL () {
+  if (typeof localStorage === 'undefined') return
   localStorage.removeItem(API_BASE_STORAGE_KEY)
 }
 
