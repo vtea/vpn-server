@@ -450,10 +450,10 @@ cleanup_legacy_openvpn_units() {
 }
 
 cleanup_stale_openvpn_management_ports() {
-  local ports=("56730" "56731" "56732")
+  # 与 mgmt_port_for_mode 一致：已知 mode 用 56730–56732；未知 mode 可能落到 56733+
   local port listeners line pid args
   local cleaned=0
-  for port in "${ports[@]}"; do
+  for port in $(seq 56730 56739); do
     listeners="$(ss -lntp 2>/dev/null | awk -v p="127.0.0.1:${port}" '$4 == p {print}')"
     [[ -z "$listeners" ]] && continue
     while IFS= read -r line; do
@@ -904,7 +904,8 @@ wait_all_openvpn_units_active() {
     modes+=("$mode")
   done
   [[ "${#modes[@]}" -eq 0 ]] && return 0
-  local t=0 all_ok
+  log "  等待 OpenVPN 全部处于 active（最长 ${max_wait}s；Step9 刚重启过实例，此处可能需数十秒）..."
+  local t=0 all_ok inactive
   while [[ "$t" -lt "$max_wait" ]]; do
     all_ok=1
     for mode in "${modes[@]}"; do
@@ -915,6 +916,14 @@ wait_all_openvpn_units_active() {
     done
     [[ "$all_ok" -eq 1 ]] && break
     t=$((t + 1))
+    # 每 10s 输出一次，避免「健康检查卡死」的误判
+    if [[ "$((t % 10))" -eq 0 ]]; then
+      inactive=()
+      for mode in "${modes[@]}"; do
+        systemctl is-active --quiet "openvpn-${mode}.service" || inactive+=("$mode")
+      done
+      warn "  OpenVPN 尚未全部 active（${t}/${max_wait}s）未就绪: ${inactive[*]}"
+    fi
     sleep 1
   done
   local errors=0
@@ -934,6 +943,7 @@ verify_required_ports_listening_file() {
   [[ ! -f "$f" ]] && { warn "无 $f，无法执行监听验收"; return 1; }
   local proto port component mode listeners errors tries
   errors=0
+  log "  验证监听端口（OpenVPN UDP 在 ss 中可能延迟出现，单项最多约 45s）..."
   while IFS='|' read -r component mode proto port; do
     [[ -z "$port" ]] && continue
     if [[ "$component" == "openvpn" && "$mode" != "unknown" ]] && is_mode_skipped "$mode"; then
@@ -956,6 +966,9 @@ verify_required_ports_listening_file() {
       fi
       [[ -n "$listeners" ]] && break
       tries=$((tries + 1))
+      if [[ "$((tries % 10))" -eq 0 ]]; then
+        warn "  仍等待监听 ${component}:${mode} ${proto}/${port}（${tries}/45s）..."
+      fi
       sleep 1
     done
     if [[ -z "$listeners" ]]; then
@@ -1005,6 +1018,7 @@ post_deploy_health_check() {
   fi
 
   # Step 9 安装/启动 vpn-agent 后可能再次触发 OpenVPN 配置应用、merge bootstrap；UDP bind 略晚于 is-active
+  log "  等待 UDP 监听与 bootstrap 写入稳定（8s）..."
   sleep 8
   if ! verify_required_ports_listening_file "$inst_json"; then
     errors=$((errors + 1))
@@ -1473,6 +1487,13 @@ else
   warn "本机防火墙自动放行未启用（mode=${OPEN_HOST_FIREWALL_MODE}）；若防火墙已启用请手动放行。"
 fi
 
+# ── 重装/升级前置：释放旧 OpenVPN ─────────────────────────────────────────────
+# 旧进程若仍占用 127.0.0.1:56730–56732（management），会与本次下发的 server.conf 冲突；
+# 在 Step 2 装包与后续写配置之前执行，避免拖到 Step 8 才清理、拉长部署时间。
+log "清理遗留 OpenVPN（旧 systemd 单元 / management 端口）..."
+cleanup_legacy_openvpn_units
+cleanup_stale_openvpn_management_ports
+
 # ── Step 2: Install packages ─────────────────────────────────────────────────
 
 log "Step 2/${TOTAL_STEPS}: Installing packages ..."
@@ -1854,6 +1875,26 @@ policy_prio_for_mode() {
   esac
 }
 
+# 向策略表写入 IPv4 default（WG 刚起时偶发 RTNETLINK 失败，短暂重试比静默失败更可诊断）
+# 使用 replace：重复执行或与残留路由冲突时比 add 更稳；每轮确认表中已有 default 即成功
+policy_add_default_route_v4() {
+  local table="$1"
+  local via="$2"
+  local dev="$3"
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if ip route replace default via "$via" dev "$dev" table "$table" 2>/dev/null; then
+      return 0
+    fi
+    if ip -4 route show table "$table" 2>/dev/null | grep -qE '^default'; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "policy-routing: ERROR: failed to add default in table ${table} via ${via} dev ${dev} (after 8 attempts)" >&2
+  return 1
+}
+
 policy_routing_self_check() {
   local i inst_en mode exit_node need_err=0
   for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
@@ -1864,13 +1905,13 @@ policy_routing_self_check() {
     mode="$(jq -r ".instances[$i].mode" "$NODE_JSON_FILE")"
     case "$mode" in
       global)
-        if ! ip route show table 102 2>/dev/null | grep -qE '^default '; then
+        if ! ip -4 route show table 102 2>/dev/null | grep -qE '^default'; then
           echo "policy-routing: ERROR: global enabled but routing table 102 (vpn_hk_global) has no IPv4 default" >&2
           need_err=1
         fi
         ;;
       cn-split)
-        if ! ip route show table 101 2>/dev/null | grep -qE '^default '; then
+        if ! ip -4 route show table 101 2>/dev/null | grep -qE '^default'; then
           echo "policy-routing: ERROR: cn-split enabled but routing table 101 (vpn_hk_split) has no IPv4 default" >&2
           need_err=1
         fi
@@ -1879,7 +1920,7 @@ policy_routing_self_check() {
         exit_node="$(jq -r ".instances[$i].exit_node // \"\"" "$NODE_JSON_FILE")"
         [[ "$exit_node" == "null" ]] && exit_node=""
         if [[ -n "$exit_node" ]]; then
-          if ! ip route show table 103 2>/dev/null | grep -qE '^default '; then
+          if ! ip -4 route show table 103 2>/dev/null | grep -qE '^default'; then
             echo "policy-routing: ERROR: node-direct+exit enabled but routing table 103 (vpn_local_exit) has no IPv4 default" >&2
             need_err=1
           fi
@@ -1919,12 +1960,16 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
         echo "${TABLE_NUM} ${RT_NAME}" >> /etc/iproute2/rt_tables
 
       ip route flush table $TABLE_NUM 2>/dev/null || true
-      ip route add default via "$PEER_IP" dev "$PEER_DEV" table $TABLE_NUM 2>/dev/null || true
+      policy_add_default_route_v4 "$TABLE_NUM" "$PEER_IP" "$PEER_DEV" || true
 
       # 控制台合并/重排 instances 后仅 del「当前子网」；表号固定为 103，避免遗留 rule 指向旧表
-      while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
-      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
-      echo "node-direct+exit table $TABLE_NUM: all->$PEER_IP ($PEER_DEV) exit_node=$EXIT_NODE"
+      if ip -4 route show table "$TABLE_NUM" 2>/dev/null | grep -qE '^default'; then
+        while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+        ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
+        echo "node-direct+exit table $TABLE_NUM: all->$PEER_IP ($PEER_DEV) exit_node=$EXIT_NODE"
+      else
+        echo "policy-routing: ERROR: node-direct+exit table $TABLE_NUM has no IPv4 default, skip ip rule for subnet $SUBNET" >&2
+      fi
       ;;
     cn-split)
       if [[ -n "$EXIT_NODE" ]]; then
@@ -1948,36 +1993,40 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
         echo "${TABLE_NUM} ${RT_NAME}" >> /etc/iproute2/rt_tables
 
       ip route flush table $TABLE_NUM 2>/dev/null || true
-      ip route add default via "$HK_IP" dev "$HK_DEV" table $TABLE_NUM 2>/dev/null || true
+      policy_add_default_route_v4 "$TABLE_NUM" "$HK_IP" "$HK_DEV" || true
 
-      # 双栈/策略路由下用「全族 default」可能拿到 v6 或错误出口；国内回程须稳定走本机 IPv4 默认路由
-      LOCAL_GW="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
-      LOCAL_DEV="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+      if ! ip -4 route show table "$TABLE_NUM" 2>/dev/null | grep -qE '^default'; then
+        echo "policy-routing: ERROR: cn-split table $TABLE_NUM has no IPv4 default, skip domestic routes + ip rule for subnet $SUBNET" >&2
+      else
+        # 双栈/策略路由下用「全族 default」可能拿到 v6 或错误出口；国内回程须稳定走本机 IPv4 默认路由
+        LOCAL_GW="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+        LOCAL_DEV="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
 
-      if [[ -f /etc/vpn-agent/cn-ip-list.txt && -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]]; then
-        ROUTE_BATCH="$(mktemp)"
-        while IFS= read -r cidr; do
-          [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-          cidr="${cidr//$'\r'/}"
-          printf 'route add %s via %s dev %s table %s\n' "$cidr" "$LOCAL_GW" "$LOCAL_DEV" "$TABLE_NUM" >> "$ROUTE_BATCH"
-        done < /etc/vpn-agent/cn-ip-list.txt
-        if [[ -s "$ROUTE_BATCH" ]]; then
-          if ! ip -force -batch "$ROUTE_BATCH" 2>/dev/null; then
-            while IFS= read -r cidr; do
-              [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-              cidr="${cidr//$'\r'/}"
-              ip route add "$cidr" via "$LOCAL_GW" dev "$LOCAL_DEV" table "$TABLE_NUM" 2>/dev/null || true
-            done < /etc/vpn-agent/cn-ip-list.txt
+        if [[ -f /etc/vpn-agent/cn-ip-list.txt && -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]]; then
+          ROUTE_BATCH="$(mktemp)"
+          while IFS= read -r cidr; do
+            [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+            cidr="${cidr//$'\r'/}"
+            printf 'route add %s via %s dev %s table %s\n' "$cidr" "$LOCAL_GW" "$LOCAL_DEV" "$TABLE_NUM" >> "$ROUTE_BATCH"
+          done < /etc/vpn-agent/cn-ip-list.txt
+          if [[ -s "$ROUTE_BATCH" ]]; then
+            if ! ip -force -batch "$ROUTE_BATCH" 2>/dev/null; then
+              while IFS= read -r cidr; do
+                [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+                cidr="${cidr//$'\r'/}"
+                ip route add "$cidr" via "$LOCAL_GW" dev "$LOCAL_DEV" table "$TABLE_NUM" 2>/dev/null || true
+              done < /etc/vpn-agent/cn-ip-list.txt
+            fi
           fi
+          rm -f "$ROUTE_BATCH"
+        elif [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
+          echo "WARN: cn-split domestic routes skipped (no IPv4 default gw/dev for LOCAL_GW/LOCAL_DEV)"
         fi
-        rm -f "$ROUTE_BATCH"
-      elif [[ -f /etc/vpn-agent/cn-ip-list.txt ]]; then
-        echo "WARN: cn-split domestic routes skipped (no IPv4 default gw/dev for LOCAL_GW/LOCAL_DEV)"
-      fi
 
-      while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
-      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
-      echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
+        while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+        ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
+        echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
+      fi
       ;;
     global)
       if [[ -n "$EXIT_NODE" ]]; then
@@ -2001,11 +2050,15 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
         echo "${TABLE_NUM} ${RT_NAME}" >> /etc/iproute2/rt_tables
 
       ip route flush table $TABLE_NUM 2>/dev/null || true
-      ip route add default via "$HK_IP" dev "$HK_DEV" table $TABLE_NUM 2>/dev/null || true
+      policy_add_default_route_v4 "$TABLE_NUM" "$HK_IP" "$HK_DEV" || true
 
-      while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
-      ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
-      echo "global table $TABLE_NUM: all->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
+      if ip -4 route show table "$TABLE_NUM" 2>/dev/null | grep -qE '^default'; then
+        while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+        ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
+        echo "global table $TABLE_NUM: all->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
+      else
+        echo "policy-routing: ERROR: global table $TABLE_NUM has no IPv4 default, skip ip rule for subnet $SUBNET" >&2
+      fi
       ;;
   esac
 done
@@ -2299,6 +2352,7 @@ log "  NAT rules configured"
 # ── Step 8: Systemd service units ────────────────────────────────────────────
 
 log "Step 8/${TOTAL_STEPS}: Creating systemd services ..."
+# 与 Step2 前清理呼应：若中途有人手工拉起旧 openvpn，或 unit 变更后仍有残留，此处再收一次尾
 cleanup_legacy_openvpn_units
 cleanup_stale_openvpn_management_ports
 
@@ -2343,9 +2397,10 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
 Description=OpenVPN instance - ${MODE}
 After=network-online.target vpn-routing.service
 Wants=network-online.target
-# StartLimit* 须在 [Unit]；放在 [Service] 时旧版 systemd 会忽略，导致失败时无限重启刷盘
-StartLimitIntervalSec=120
-StartLimitBurst=5
+# StartLimit：部署时 Step8 restart、Agent 连上后可能多次 restart openvpn、Step9 再拉起，易超过默认次数导致
+# 「Start request repeated too quickly」且全程无 UDP 监听。0=不限制启动频率（仍受 RestartSec 约束）。
+StartLimitIntervalSec=0
+StartLimitBurst=0
 
 [Service]
 # simple：兼容未编译 sd_notify 的 OpenVPN；notify 在部分发行版上会超时或立即失败导致重启风暴
@@ -2438,8 +2493,10 @@ systemctl daemon-reload
 systemctl enable vpn-agent.service
 systemctl restart vpn-agent.service || log "  WARNING: vpn-agent failed to start/restart"
 
-# 给 vpn-agent 首连 / update_config 留出时间；再显式拉起 OpenVPN，避免与部署末尾健康检查竞态
-sleep 4
+# 给 vpn-agent 首连 / update_config / applyOpenVPN 留出时间。勿无条件 restart 全部 openvpn：
+# 与 Step8 的 restart 叠加 Agent 侧 restart 易触发 systemd 启动频率限制（旧版 StartLimitBurst=5）。
+log "  等待 vpn-agent 与控制面同步（15s）..."
+sleep 15
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
   INST_EN="$(echo "$NODE_JSON" | jq -r ".instances[$i].enabled // true")"
@@ -2449,7 +2506,14 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   if is_mode_skipped "$MODE"; then
     continue
   fi
-  systemctl restart "openvpn-${MODE}.service" 2>/dev/null || true
+  if systemctl is-active --quiet "openvpn-${MODE}.service" 2>/dev/null; then
+    log "  openvpn-${MODE}.service 已在运行，跳过重复 restart"
+  else
+    log "  拉起 openvpn-${MODE}.service（当前非 active）"
+    if ! systemctl start "openvpn-${MODE}.service" 2>/dev/null; then
+      warn "  systemctl start openvpn-${MODE}.service 失败，请查 journalctl -u openvpn-${MODE}"
+    fi
+  fi
 done
 
 if ! post_deploy_health_check "/etc/vpn-agent/bootstrap-node.json"; then
