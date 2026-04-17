@@ -48,6 +48,11 @@ Default mode is dry-run. Use --apply to execute.
 
 提示：curl … | bash 时 stdin 为管道；若需交互询问「是否重装」，脚本会从 /dev/tty 读取。
 无人值守或 CI 请使用 --force-reinstall。
+
+apt 锁（与 unattended-upgrades 并发）可通过环境变量调节：
+  VPN_APT_LOCK_TIMEOUT=600       apt/dpkg 锁等待秒数（默认 600）
+  VPN_APT_PREWAIT_SECONDS=600    检测到 lists 锁时先轮询的最长时间（默认 600，0=不轮询）
+  VPN_APT_WAIT_APT_LOCK=0      跳过 lists 锁预等待（仍使用 VPN_APT_LOCK_TIMEOUT）
 EOF
 }
 
@@ -93,6 +98,39 @@ log()  { echo -e "${CYAN}[$(date '+%H:%M:%S')]${NC} $*"; }
 ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
 fail() { echo -e "  ${RED}✗${NC} $*"; }
+
+# apt/dpkg 锁：云主机上 unattended-upgrades / 安全更新常与部署并发，易报 Could not get lock。
+# - VPN_APT_LOCK_TIMEOUT：传给 apt-get 的 DPkg::Lock::Timeout / Acquire::Lock::Timeout（秒），默认 600。
+# - VPN_APT_PREWAIT_SECONDS：若检测到 lists 锁被占用，先轮询等待的最长时间（秒），默认 600；设为 0 跳过轮询。
+# - VPN_APT_WAIT_APT_LOCK：设为 0 则完全跳过「lists 锁」预等待（仍使用下面的 apt 锁超时）。
+VPN_APT_LOCK_TIMEOUT="${VPN_APT_LOCK_TIMEOUT:-600}"
+VPN_APT_PREWAIT_SECONDS="${VPN_APT_PREWAIT_SECONDS:-600}"
+
+apt_get_with_lock() {
+  apt-get \
+    -o "DPkg::Lock::Timeout=${VPN_APT_LOCK_TIMEOUT}" \
+    -o "Acquire::Lock::Timeout=${VPN_APT_LOCK_TIMEOUT}" \
+    "$@"
+}
+
+# 在 apt-get 前先轮询 /var/lib/apt/lists/lock（需 fuser，psmisc 包），便于输出「等待中」日志。
+wait_until_apt_lists_unlocked() {
+  command -v apt-get >/dev/null 2>&1 || return 0
+  [[ "${VPN_APT_WAIT_APT_LOCK:-1}" == "0" ]] && return 0
+  command -v fuser >/dev/null 2>&1 || return 0
+  local elapsed=0
+  local step=15
+  local max_wait="${VPN_APT_PREWAIT_SECONDS:-600}"
+  while fuser -s /var/lib/apt/lists/lock 2>/dev/null; do
+    if (( elapsed >= max_wait )); then
+      warn "已等待 apt lists 锁 ${max_wait}s，将继续执行（apt-get 仍会等待 Acquire::Lock::Timeout=${VPN_APT_LOCK_TIMEOUT}s）"
+      break
+    fi
+    log "  检测到 apt 占用 lists 锁（常见于 unattended-upgrades），等待中… ${elapsed}s / ${max_wait}s"
+    sleep "$step"
+    elapsed=$((elapsed + step))
+  done
+}
 
 # 每行一条 CIDR：先灌入临时集合并 swap/rename 到目标名，避免旧 NAT 仍引用目标集时 ipset destroy 失败（create 报「已存在」）。
 vpn_ipset_flush_and_restore_from_cidr_file() {
@@ -1317,7 +1355,8 @@ fi
 
 command -v jq >/dev/null 2>&1 || {
   log "jq not found, installing ..."
-  apt-get update -qq 2>/dev/null && apt-get install -y -qq jq 2>/dev/null || \
+  wait_until_apt_lists_unlocked
+  apt_get_with_lock update -qq 2>/dev/null && apt_get_with_lock install -y -qq jq 2>/dev/null || \
   dnf install -y jq 2>/dev/null || yum install -y jq 2>/dev/null || true
 }
 
@@ -1399,6 +1438,7 @@ fi
 # ── Step 2: Install packages ─────────────────────────────────────────────────
 
 log "Step 2/${TOTAL_STEPS}: Installing packages ..."
+wait_until_apt_lists_unlocked
 
 install_easyrsa_manual() {
   local VER="3.2.1" tgz
@@ -1414,9 +1454,9 @@ CORE_PKGS="openvpn wireguard-tools ipset iptables jq curl dnsmasq"
 
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq $CORE_PKGS
-  apt-get install -y -qq easy-rsa 2>/dev/null || install_easyrsa_manual
+  apt_get_with_lock update -qq
+  apt_get_with_lock install -y -qq $CORE_PKGS
+  apt_get_with_lock install -y -qq easy-rsa 2>/dev/null || install_easyrsa_manual
 elif command -v dnf >/dev/null 2>&1; then
   dnf install -y epel-release 2>/dev/null || true
   dnf install -y $CORE_PKGS easy-rsa

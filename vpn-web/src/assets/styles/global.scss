@@ -642,9 +642,9 @@ body {
   background-color: rgba(255, 255, 255, 0.38);
 }
 
-/* 滚动区略提亮，层次更清晰 */
+/* 滚动区略提亮：纯色替代纵向渐变，减少滚动时每帧对渐变背景的重绘 */
 .layout-main .layout-content {
-  background: linear-gradient(180deg, transparent 0%, rgba(255, 255, 255, 0.06) 100%);
+  background-color: rgba(255, 255, 255, 0.035);
 }
 
 .layout-header {
@@ -690,7 +690,9 @@ body {
   background: transparent;
   position: relative;
   z-index: 0;
-  transition: opacity var(--transition-normal);
+  /* 独立合成层，减轻与 .layout-main 毛玻璃背景叠化时的滚动卡顿 */
+  transform: translateZ(0);
+  overscroll-behavior: contain;
 }
 
 /* ===== Page Patterns（毛玻璃卡片）===== */
@@ -962,13 +964,47 @@ body {
 }
 
 .dialog-record-stack {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
   gap: 10px;
+  align-items: stretch;
   max-height: min(60vh, 420px);
   overflow-y: auto;
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   padding-right: 2px;
+  overscroll-behavior: contain;
+}
+
+/* 弹窗内空状态占满整行 */
+.dialog-record-stack .el-empty {
+  grid-column: 1 / -1;
+}
+
+/*
+ * 授权等弹窗内列表区域独立滚动：卡片数量多时 backdrop-filter + hover 位移会明显拖慢帧率，
+ * 此处关闭磨砂并去掉上浮，保留边框与阴影反馈。
+ */
+.dialog-record-stack .record-card {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transition:
+    border-color var(--transition-normal),
+    box-shadow var(--transition-normal),
+    background-color var(--transition-slow);
+}
+
+.dialog-record-stack .record-card:hover {
+  transform: none;
+}
+
+.dialog-record-stack .record-card::after {
+  transition: none;
+  opacity: 0.3;
+}
+
+.dialog-record-stack .record-card:hover::after {
+  opacity: 0.36;
 }
 
 @media (max-width: 480px) {
