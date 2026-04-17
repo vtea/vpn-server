@@ -145,15 +145,15 @@ npm install
 npm run build
 ```
 
-构建产物在 `vpn-web/dist/`，可部署到 Nginx/Caddy/静态站点服务。
+构建产物在 `vpn-web/dist/`（`npm run build` 使用 **vite-ssg**，为各静态路由生成 `dist/<路径>/index.html`，例如 `dist/network-segments/index.html`），可部署到 Nginx/Caddy/静态站点服务。
+
+**前端路由**：管理台为 **History 模式**（地址栏无 `#`，如 `/network-segments`）。构建期预渲染了**无动态参数**的页面，磁盘上存在对应目录即可在**不配置「整站回退 index.html」**的情况下刷新；**未预渲染**的路径（如 `/nodes/:id` 具体节点页）刷新仍可能 404，请从站内进入。部署在 **Vercel** 时仍可使用 [`vpn-web/vercel.json`](vpn-web/vercel.json) 兜底未生成的路径。
 
 ### 3) 反向代理建议
 
 - 前端域名：`https://vpn-admin.example.com`（托管 `dist`）
 - API 域名：`https://api.example.com`（反代到 `vpn-api`，默认后端监听 `56700`）
 - 若你希望同域部署，也可由同一反代统一转发静态资源与 `/api`（例如 `location /api/ { proxy_pass http://127.0.0.1:56700; ... }`）
-
-**前端路由**：管理台默认 **Hash 模式**（URL 含 `#/`，如 `/#/settings/api`），**刷新只请求 `/`**，宝塔/Nginx **不必**为前端路由配置伪静态。若部署在 **Vercel** 且希望地址栏无 `#`，根目录选 `vpn-web`，可使用 [`vpn-web/vercel.json`](vpn-web/vercel.json) 并改用 History 模式（需自行改 `router/index.js`）。
 
 ## 目录结构
 

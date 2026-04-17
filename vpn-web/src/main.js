@@ -1,6 +1,8 @@
 ﻿import { ViteSSG } from 'vite-ssg'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
+import { ID_INJECTION_KEY } from 'element-plus/es/hooks/use-id/index.mjs'
+import { ZINDEX_INJECTION_KEY } from 'element-plus/es/hooks/use-z-index/index.mjs'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import 'element-plus/dist/index.css'
 import './assets/styles/global.scss'
@@ -21,6 +23,13 @@ export const createApp = ViteSSG(
   ({ app, router }) => {
     bindRouter(router)
     installNavigationGuards(router)
+
+    /** Element Plus 在 SSG/SSR 下需要注入，避免 useId / z-index 告警并保证水合一致 */
+    app.provide(ID_INJECTION_KEY, {
+      prefix: Math.floor(Math.random() * 10000),
+      current: 0
+    })
+    app.provide(ZINDEX_INJECTION_KEY, { current: 0 })
 
     for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
       app.component(key, component)

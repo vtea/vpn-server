@@ -26,6 +26,14 @@ const apiProxy = {
 
 export default defineConfig({
   plugins: [vue()],
+  /**
+   * vite-ssg：nested 产出 network-segments/index.html，便于静态服务器按目录访问 /network-segments/
+   * （无尾斜杠的 /network-segments 仍依赖服务器是否重定向到目录，见文档）
+   */
+  ssgOptions: {
+    dirStyle: 'nested',
+    script: 'async'
+  },
   server: {
     port: 56701,
     // 56701 被占用时勿自动递增到 56700：会与 vpn-api 默认端口冲突，/api 代理会连错目标 → EADDRINUSE / ENOBUFS
