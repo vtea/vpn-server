@@ -2102,6 +2102,7 @@ func applyOpenVPNServerFromInstancesPayload(payload []byte) {
 	if len(rows) == 0 {
 		return
 	}
+	restarts := 0
 	for _, row := range rows {
 		mode := strings.TrimSpace(row.Mode)
 		if mode == "" || row.Port <= 0 {
@@ -2125,6 +2126,11 @@ func applyOpenVPNServerFromInstancesPayload(payload []byte) {
 		if !changed {
 			continue
 		}
+		// 连续多次 restart 与 node-setup 部署末健康检查竞态时，略作间隔减轻 systemd/绑定 UDP 瞬时失败。
+		if restarts > 0 {
+			time.Sleep(400 * time.Millisecond)
+		}
+		restarts++
 		// 使用 restart 而非 try-restart：try-restart 在单元非 active 时不会启动，会导致已写盘的新配置永远不生效。
 		out, err := exec.Command("systemctl", "restart", "openvpn-"+mode).CombinedOutput()
 		if err != nil {

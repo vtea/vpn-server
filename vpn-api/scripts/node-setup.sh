@@ -14,6 +14,8 @@ OPENVPN_PROTO_OVERRIDE=""
 PORT_CONFLICT_POLICY=""
 # 1=跳过 Step 7 海外列表下载与 overseas-ip 灌表（保留空集与占位列表文件）
 SKIP_OVERSEAS_IPSET=0
+# 部署末段健康检查前是否暂时 stop vpn-agent（默认 1）：避免 Agent 连上后立即 update_config/restart OpenVPN 与脚本争抢
+VPN_NODESETUP_PAUSE_AGENT_FOR_OPENVPN_CHECK="${VPN_NODESETUP_PAUSE_AGENT_FOR_OPENVPN_CHECK:-1}"
 FIREWALL_BACKEND="none"
 FIREWALL_ACTIVE=0
 SKIPPED_OPENVPN_MODES=()
@@ -53,6 +55,10 @@ apt 锁（与 unattended-upgrades 并发）可通过环境变量调节：
   VPN_APT_LOCK_TIMEOUT=600       apt/dpkg 锁等待秒数（默认 600）
   VPN_APT_PREWAIT_SECONDS=600    检测到 lists 锁时先轮询的最长时间（默认 600，0=不轮询）
   VPN_APT_WAIT_APT_LOCK=0      跳过 lists 锁预等待（仍使用 VPN_APT_LOCK_TIMEOUT）
+
+部署末段健康检查：
+  VPN_NODESETUP_PAUSE_AGENT_FOR_OPENVPN_CHECK=1（默认）  检查 OpenVPN/监听前暂时 stop vpn-agent，避免与 Agent 争抢 restart
+  VPN_NODESETUP_PAUSE_AGENT_FOR_OPENVPN_CHECK=0          不暂停 Agent（调试用，可能与末段健康检查竞态）
 EOF
 }
 
@@ -882,11 +888,42 @@ is_mode_skipped() {
   return 1
 }
 
+# 对已启用 OpenVPN 实例：reset-failed 后 start。单元若处于 failed（如曾触发 StartLimit），直接 start 往往无效。
+reset_failed_and_start_openvpn_instances() {
+  local f="$1"
+  [[ ! -f "$f" ]] && return 0
+  local ic i inst_en mode modes
+  modes=()
+  ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
+  for i in $(seq 0 $((ic - 1))); do
+    inst_en="$(jq -r ".instances[$i].enabled // true" "$f")"
+    if ! is_enabled_value "$inst_en"; then
+      continue
+    fi
+    mode="$(jq -r ".instances[$i].mode // \"unknown\"" "$f")"
+    if is_mode_skipped "$mode"; then
+      continue
+    fi
+    modes+=("$mode")
+  done
+  [[ "${#modes[@]}" -eq 0 ]] && return 0
+  for mode in "${modes[@]}"; do
+    systemctl reset-failed "openvpn-${mode}.service" 2>/dev/null || true
+  done
+  sleep 2
+  for mode in "${modes[@]}"; do
+    if ! systemctl start "openvpn-${mode}.service" 2>/dev/null; then
+      warn "  systemctl start openvpn-${mode}.service 返回非零（可稍后查 journalctl -u openvpn-${mode}）"
+    fi
+  done
+}
+
 # 部署末尾健康检查：并行等待所有已启用的 OpenVPN 单元同时处于 active。
 # 避免「按 instances 数组顺序各等 50s」导致先检查的实例在后续等待期间已掉线、却仍显示 ✓ 的假阳性。
 wait_all_openvpn_units_active() {
   local f="$1"
-  local max_wait="${2:-120}"
+  local max_wait="${2:-180}"
   local ic i inst_en mode modes
   modes=()
   ic="$(jq '.instances | length' "$f" 2>/dev/null || echo 0)"
@@ -904,7 +941,7 @@ wait_all_openvpn_units_active() {
     modes+=("$mode")
   done
   [[ "${#modes[@]}" -eq 0 ]] && return 0
-  log "  等待 OpenVPN 全部处于 active（最长 ${max_wait}s；Step9 刚重启过实例，此处可能需数十秒）..."
+  log "  等待 OpenVPN 全部处于 active（最长 ${max_wait}s；需全部同时 active；Agent 可能仍在重启实例）..."
   local t=0 all_ok inactive
   while [[ "$t" -lt "$max_wait" ]]; do
     all_ok=1
@@ -932,6 +969,9 @@ wait_all_openvpn_units_active() {
       ok "服务健康: openvpn-${mode}.service"
     else
       fail "服务异常: openvpn-${mode}.service（${max_wait}s 内未与其它实例同时保持稳定 active；若刚部署请查 journalctl -u openvpn-${mode} 与 vpn-agent 日志）"
+      if command -v systemctl >/dev/null 2>&1; then
+        warn "  systemctl show openvpn-${mode}: $(systemctl show "openvpn-${mode}.service" -p ActiveState,SubState,Result,ExecMainStatus --no-pager 2>/dev/null | tr '\n' ' ')"
+      fi
       errors=$((errors + 1))
     fi
   done
@@ -1011,7 +1051,20 @@ post_deploy_health_check() {
   inst_json="$f"
   [[ -f "/etc/vpn-agent/bootstrap-node.json" ]] && inst_json="/etc/vpn-agent/bootstrap-node.json"
 
-  wait_all_openvpn_units_active "$inst_json" 120
+  local agent_paused_for_ovpn_check=0
+  # Agent 首连常立即收到 update_config 并对 openvpn-* 执行 restart，与脚本末段 reset/start/健康检查竞态，表现为 Step9 后实例全非 active、长时间无法「同时 active」。
+  if [[ "${VPN_NODESETUP_PAUSE_AGENT_FOR_OPENVPN_CHECK:-1}" == "1" ]] && systemctl is-active --quiet vpn-agent.service 2>/dev/null; then
+    log "  暂时停止 vpn-agent（避免与健康检查期间争抢 restart OpenVPN）；检查结束后会自动拉起"
+    systemctl stop vpn-agent.service || true
+    agent_paused_for_ovpn_check=1
+    sleep 2
+  fi
+
+  log "  部署后同步 OpenVPN（reset-failed + start，清除 failed 状态后再等稳定）..."
+  reset_failed_and_start_openvpn_instances "$inst_json"
+  sleep 5
+
+  wait_all_openvpn_units_active "$inst_json" 180
   ov_wait_rc=$?
   if [[ "$ov_wait_rc" -ne 0 ]]; then
     errors=$((errors + ov_wait_rc))
@@ -1030,6 +1083,16 @@ post_deploy_health_check() {
     fi
   else
     warn "未启用本机防火墙自动放行/验收（mode=${OPEN_HOST_FIREWALL_MODE}）"
+  fi
+
+  if [[ "$agent_paused_for_ovpn_check" -eq 1 ]]; then
+    log "  恢复 vpn-agent 服务（OpenVPN/监听验收已结束）..."
+    if systemctl start vpn-agent.service; then
+      ok "vpn-agent.service 已重新启动"
+    else
+      warn "vpn-agent.service 自动启动失败，请手动: systemctl start vpn-agent.service"
+      errors=$((errors + 1))
+    fi
   fi
 
   if [[ "$errors" -gt 0 ]]; then
@@ -2493,28 +2556,11 @@ systemctl daemon-reload
 systemctl enable vpn-agent.service
 systemctl restart vpn-agent.service || log "  WARNING: vpn-agent failed to start/restart"
 
-# 给 vpn-agent 首连 / update_config / applyOpenVPN 留出时间。勿无条件 restart 全部 openvpn：
-# 与 Step8 的 restart 叠加 Agent 侧 restart 易触发 systemd 启动频率限制（旧版 StartLimitBurst=5）。
-log "  等待 vpn-agent 与控制面同步（15s）..."
-sleep 15
-for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
-  MODE="$(echo "$NODE_JSON" | jq -r ".instances[$i].mode")"
-  INST_EN="$(echo "$NODE_JSON" | jq -r ".instances[$i].enabled // true")"
-  if ! is_enabled_value "$INST_EN"; then
-    continue
-  fi
-  if is_mode_skipped "$MODE"; then
-    continue
-  fi
-  if systemctl is-active --quiet "openvpn-${MODE}.service" 2>/dev/null; then
-    log "  openvpn-${MODE}.service 已在运行，跳过重复 restart"
-  else
-    log "  拉起 openvpn-${MODE}.service（当前非 active）"
-    if ! systemctl start "openvpn-${MODE}.service" 2>/dev/null; then
-      warn "  systemctl start openvpn-${MODE}.service 失败，请查 journalctl -u openvpn-${MODE}"
-    fi
-  fi
-done
+# 给 vpn-agent 首连 / update_config / applyOpenVPN 留出时间；再统一 reset-failed + start（避免单元卡在 failed 时 start 无效）
+log "  等待 vpn-agent 与控制面同步（20s）..."
+sleep 20
+log "  Step9：OpenVPN reset-failed + start（与部署后健康检查前会再执行一次）..."
+reset_failed_and_start_openvpn_instances "/etc/vpn-agent/bootstrap-node.json"
 
 if ! post_deploy_health_check "/etc/vpn-agent/bootstrap-node.json"; then
   exit 1
