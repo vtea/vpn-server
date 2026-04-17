@@ -560,7 +560,9 @@ const openUpgradeIfNeeded = (row) => {
 const loadUpgradeDefaults = async () => {
   try {
     const res = await http.get('/api/agent-upgrades/defaults', {
-      validateStatus: (s) => (s >= 200 && s < 300) || s === 404
+      validateStatus: (s) => (s >= 200 && s < 300) || s === 404,
+      /** 403 时走 catch 内本地 fallback，避免与全局 403 提示重复 */
+      meta: { suppress403: true }
     })
     if (res.status === 404) {
       throw new Error('defaults endpoint not available')

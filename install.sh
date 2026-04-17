@@ -36,7 +36,7 @@ for arg in "$@"; do
 用法: bash install.sh [选项]
 
 安装模式:
-  (默认)          安装控制面（API + 前端构建；反向代理/TLS 请自备，见 docs/nginx-control-plane.example.conf）
+  (默认)          安装控制面（API + 前端构建；反向代理/TLS 请自备，见 README 反向代理建议）
   --node          仅安装 VPN 节点（需要先有控制面）
 
 端口约定详见 docs/ports.md（摘要：API 默认 56700；管理台开发默认 56701）。

@@ -6,7 +6,7 @@
 
 | 脚本 | 作用 | 安装内容 |
 |------|------|----------|
-| `install.sh` (默认) | 部署**控制面** | API 服务 + Web 静态构建 + 数据库 + CA + 备份（反向代理见 `docs/nginx-control-plane.example.conf`） |
+| `install.sh` (默认) | 部署**控制面** | API 服务 + Web 静态构建 + 数据库 + CA + 备份（反向代理见根目录 README） |
 | `install.sh --node` | 部署**VPN 节点** | OpenVPN 多实例 + WireGuard 隧道 + Agent + NAT 分流 |
 
 一个完整的 VPN 网络至少需要：
@@ -106,7 +106,7 @@ bash install.sh --domain vpn.company.com --yes
 
 检查端口占用 ...
   ✓ 端口 56700 (API (vpn-api)) 可用
-  提示: 若使用 Nginx 反代静态站与 /api，请参考项目内 docs/nginx-control-plane.example.conf（本脚本不安装 Nginx）。
+  提示: 若使用反向代理托管静态站并将 /api 转到 vpn-api，请自行配置（本脚本不安装 Nginx）；参见仓库 README「反向代理建议」。
 
 检查磁盘空间 ...
   ✓ /opt 可用空间 45321MB
@@ -183,7 +183,7 @@ bash install.sh --domain vpn.company.com --yes
 | 服务 | 说明 |
 |------|------|
 | vpn-api.service | Go API 服务，默认监听 **56700** |
-| （自选）Nginx/Caddy | 对外提供静态站与 `/api/` 反代，示例见 `docs/nginx-control-plane.example.conf` |
+| （自选）Nginx/Caddy | 对外提供静态站与 `/api/` 反代，说明见根目录 README |
 | cron | 每天 02:00 自动备份 SQLite 数据库 |
 
 ### 1.4 安装后的目录结构
@@ -217,7 +217,7 @@ bash install.sh --domain vpn.company.com --yes
 ═══════════════════════════════════════════════════════════════
 
   API 直连:    http://101.200.143.82:56700/api/health
-  前端静态:    /var/www/vpn-admin （需自行 Nginx/Caddy 等对外提供，参见 docs/nginx-control-plane.example.conf）
+  前端静态:    /var/www/vpn-admin （需自行 Nginx/Caddy 等对外提供，参见仓库 README）
   默认账号:    admin / admin123 (请尽快修改密码)
 ═══════════════════════════════════════════════════════════════
 ```

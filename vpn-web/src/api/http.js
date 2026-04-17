@@ -81,7 +81,10 @@ http.interceptors.response.use(
         ElMessage.error(msg || '登录已过期，请重新登录')
       }
     } else if (status === 403) {
-      ElMessage.error(msg || '没有操作权限')
+      const suppress403 = Boolean(err.config?.meta?.suppress403)
+      if (!suppress403) {
+        ElMessage.error(msg || '没有操作权限')
+      }
     } else if (status === 404) {
       if (suppress404) return Promise.reject(err)
       ElMessage.error(

@@ -1,48 +1,56 @@
-﻿import { createRouter, createWebHistory } from 'vue-router'
-import { ElMessage } from 'element-plus'
+﻿import { ElMessage } from 'element-plus'
 import { isSuperAdminSession } from '../utils/adminSession'
-import Dashboard from '../views/Dashboard.vue'
-import Nodes from '../views/Nodes.vue'
-import NodeDetail from '../views/NodeDetail.vue'
-import Users from '../views/Users.vue'
-import Rules from '../views/Rules.vue'
-import Tunnels from '../views/Tunnels.vue'
-import Audit from '../views/Audit.vue'
-import Admins from '../views/Admins.vue'
-import Login from '../views/Login.vue'
-import SelfService from '../views/SelfService.vue'
-import ApiConfig from '../views/ApiConfig.vue'
-import NetworkSegments from '../views/NetworkSegments.vue'
+import { routes } from './routes'
 
-const routes = [
-  { path: '/login', component: Login },
-  { path: '/self-service', component: SelfService, meta: { noAuth: true } },
-  { path: '/settings/api', component: ApiConfig, meta: { requiresSuperAdmin: true } },
-  { path: '/', component: Dashboard },
-  { path: '/network-segments', component: NetworkSegments },
-  { path: '/nodes', component: Nodes },
-  { path: '/nodes/:id', component: NodeDetail },
-  { path: '/users', component: Users },
-  { path: '/rules', component: Rules },
-  { path: '/tunnels', component: Tunnels },
-  { path: '/audit', component: Audit },
-  { path: '/admins', component: Admins }
-]
+export { routes }
 
-const router = createRouter({
-  history: createWebHistory(),
-  routes
-})
+/** @type {import('vue-router').Router | null} */
+let _router = null
 
-router.beforeEach((to) => {
-  if (to.path === '/login' || to.meta?.noAuth) return true
-  const token = localStorage.getItem('token')
-  if (!token) return '/login'
-  if (to.meta?.requiresSuperAdmin && !isSuperAdminSession()) {
-    ElMessage.warning('仅超级管理员可访问 API 连接')
-    return { path: '/', replace: true }
+/**
+ * 由 main.js 中 ViteSSG 创建 router 后立即绑定，供 http 拦截器与视图在非 setup 上下文中使用。
+ * @param {import('vue-router').Router} r - Vue Router 实例
+ */
+export function bindRouter (r) {
+  _router = r
+}
+
+/**
+ * 注册全局前置守卫（鉴权、超管页）。
+ * SSG 预渲染阶段无 localStorage/token，必须放行，否则所有页面都会生成登录页 HTML。
+ * @param {import('vue-router').Router} router - Vue Router 实例
+ */
+export function installNavigationGuards (router) {
+  router.beforeEach((to) => {
+    if (import.meta.env.SSR) return true
+    if (to.path === '/login' || to.meta?.noAuth) return true
+    const token = localStorage.getItem('token')
+    if (!token) return '/login'
+    if (to.meta?.requiresSuperAdmin && !isSuperAdminSession()) {
+      ElMessage.warning('仅超级管理员可访问 API 连接')
+      return { path: '/', replace: true }
+    }
+    return true
+  })
+}
+
+/**
+ * 默认导出为 Proxy，在 bindRouter 之前访问会返回 undefined（勿在模块顶层同步使用 router）。
+ */
+const routerProxy = new Proxy(
+  /** @type {import('vue-router').Router} */ ({}),
+  {
+    get (_, prop) {
+      if (!_router) {
+        if (import.meta.env.DEV) {
+          console.warn(`[router] 在 bindRouter 之前访问: ${String(prop)}`)
+        }
+        return undefined
+      }
+      const v = _router[/** @type {keyof import('vue-router').Router} */ (prop)]
+      return typeof v === 'function' ? v.bind(_router) : v
+    }
   }
-  return true
-})
+)
 
-export default router
+export default routerProxy

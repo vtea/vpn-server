@@ -151,9 +151,9 @@ npm run build
 
 - 前端域名：`https://vpn-admin.example.com`（托管 `dist`）
 - API 域名：`https://api.example.com`（反代到 `vpn-api`，默认后端监听 `56700`）
-- 若你希望同域部署，也可由同一反代统一转发静态资源与 `/api`
+- 若你希望同域部署，也可由同一反代统一转发静态资源与 `/api`（例如 `location /api/ { proxy_pass http://127.0.0.1:56700; ... }`）
 
-Nginx 参考配置见：`docs/nginx-control-plane.example.conf`。
+**前端路由**：管理台默认 **Hash 模式**（URL 含 `#/`，如 `/#/settings/api`），**刷新只请求 `/`**，宝塔/Nginx **不必**为前端路由配置伪静态。若部署在 **Vercel** 且希望地址栏无 `#`，根目录选 `vpn-web`，可使用 [`vpn-web/vercel.json`](vpn-web/vercel.json) 并改用 History 模式（需自行改 `router/index.js`）。
 
 ## 目录结构
 
@@ -174,8 +174,7 @@ Nginx 参考配置见：`docs/nginx-control-plane.example.conf`。
 │   ├── user-guide.md
 │   ├── architecture.md
 │   ├── roadmap.md
-│   ├── progress.md
-│   └── nginx-control-plane.example.conf
+│   └── progress.md
 └── openvpn-install.sh              # 原始 OpenVPN 安装脚本（参考）
 ```
 
@@ -199,6 +198,5 @@ Nginx 参考配置见：`docs/nginx-control-plane.example.conf`。
 - [用户使用指南](docs/user-guide.md) — 管理端使用流程
 - [详细技术架构](docs/architecture.md)
 - [手工打包部署（vpn-api）](vpn-api/docs/deploy-manual.md)
-- [Nginx 控制面示例配置](docs/nginx-control-plane.example.conf)
 - [实施路线图](docs/roadmap.md)
 - [项目进度](docs/progress.md)

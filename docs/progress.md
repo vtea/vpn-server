@@ -56,7 +56,7 @@
 | 文件 | 功能 | 状态 |
 |------|------|------|
 | `scripts/node-setup.sh` | 一键部署脚本（9 步：注册→安装→PKI→OpenVPN→WireGuard→策略路由→NAT→systemd→Agent）| ✅ |
-| `docs/nginx-control-plane.example.conf` | Nginx 反代示例（HTTPS + WebSocket + 前端静态文件，运维自备）| ✅ |
+| 控制面前端 Hash 路由 | 宝塔/nginx 仅托管静态即可刷新；可选 `vercel.json` 供 Vercel 无 `#` 部署 | ✅ |
 | `scripts/backup.sh` | SQLite 定时备份脚本（.backup + gzip + 自动清理）| ✅ |
 
 ### 文档

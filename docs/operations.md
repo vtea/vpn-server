@@ -1,6 +1,14 @@
 # 运维手册
 
-## 1. 节点无法上线
+## 1. 控制面 Web：刷新出现 nginx 404
+
+**说明**：管理台默认 **Hash 路由**（`/#/login`、`/#/settings/api`）。刷新时请求的是站点根路径 `/`，不应再出现「按路径找 `/settings/api` 文件」导致的 404。若地址栏仍是 **`/settings/api` 无 `#`**，说明前端未用最新构建或从站外打开了无 Hash 的深链——请从侧栏进入，或手动改成 `https://域名/#/settings/api`。
+
+若仍 404：检查网站 **根目录** 是否指向 `dist`、**首页** `https://域名/` 能否打开；**不要**把浏览器里的「后端 API 根地址」填成页面域名（见「API 连接」说明）。
+
+---
+
+## 2. 节点无法上线
 
 **现象**：Web 端节点状态一直显示 offline。
 
@@ -11,7 +19,7 @@
 4. 确认 bootstrap token 正确：检查 `/etc/vpn-agent/agent.json`
 5. 确认防火墙放行控制面 **56700/tcp**（或经 Nginx 的 443/tcp）和 **56720/udp**（WireGuard）
 
-## 2. 换发节点 token / 重装节点后：授权删不掉或接口 404
+## 3. 换发节点 token / 重装节点后：授权删不掉或接口 404
 
 **现象**：换发 bootstrap token 并在节点上重装后，用户授权列表里旧记录删不掉，或提示「接口不存在 (404）」、证书 CN 冲突。
 
@@ -29,7 +37,7 @@
 
 ---
 
-## 3. 用户连接失败
+## 4. 用户连接失败
 
 **排查步骤**：
 1. 确认 OpenVPN 实例运行：`systemctl status openvpn-<mode>`
@@ -165,7 +173,7 @@ iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
 
 **说明**：新版 `node-setup.sh` 在部署 Step 8 会自动清理上述历史冲突单元，并对每个启用实例执行端口冲突与健康检查；若仍失败，脚本会直接打印对应实例的近 30 行日志。
 
-## 4. 智能分流不生效
+## 5. 智能分流不生效
 
 **现象**：所有流量都走本地或都走海外。
 
@@ -176,7 +184,7 @@ iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
 4. 手动测试分流：`ip route get 114.114.114.114`（应走本地）、`ip route get 8.8.8.8`（应走隧道）
 5. 重新应用规则：`bash /etc/vpn-agent/policy-routing.sh && bash /etc/vpn-agent/nat-rules.sh`（若仍异常，比对节点上 `policy-routing.sh` 是否已为**固定表号**新版，必要时重跑 `node-setup.sh` 再生脚本）
 
-## 5. WireGuard 隧道断开
+## 6. WireGuard 隧道断开
 
 **排查步骤**：
 1. 查看隧道状态：`wg show`
@@ -185,7 +193,7 @@ iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
 4. 确认公钥匹配：对比两端的 publickey
 5. 重启隧道：`systemctl restart wg-quick@wg-<peer>`
 
-## 6. 证书签发失败
+## 7. 证书签发失败
 
 **排查步骤**：
 1. 查看 agent 日志中的 `issue_cert` 错误
@@ -197,7 +205,7 @@ iptables -t nat -S VPN_POSTROUTING | grep -- '-i wg-'
    ```
 4. 如果 PKI 损坏，需要重新初始化（会导致所有已签发证书失效）
 
-## 7. 吊销证书
+## 8. 吊销证书
 
 **Web 端操作**：用户管理 → 选择用户 → 授权管理 → 点击"吊销"
 
@@ -208,7 +216,7 @@ EASYRSA_BATCH=1 ./easyrsa revoke <cert_cn>
 EASYRSA_BATCH=1 ./easyrsa gen-crl
 ```
 
-## 8. IP 库更新异常
+## 9. IP 库更新异常
 
 ### 8.1 双库、控制台「全网立即更新」与节点在线
 
@@ -257,7 +265,7 @@ flowchart LR
    # 通过 Web 端触发全网更新
    ```
 
-## 9. 数据库备份与恢复
+## 10. 数据库备份与恢复
 
 **备份**：
 ```bash
@@ -272,7 +280,7 @@ cp /opt/vpn-api/backups/vpn_YYYYMMDD_HHMMSS.db /opt/vpn-api/vpn.db
 systemctl start vpn-api
 ```
 
-## 10. 添加新节点
+## 11. 添加新节点
 
 1. Web 端：节点管理 → 添加节点 → 填写名称/地域/公网IP
 2. 复制生成的部署命令
@@ -280,7 +288,7 @@ systemctl start vpn-api
 4. 等待节点在 Web 端显示"在线"
 5. 验证：`systemctl status openvpn-* vpn-agent wg-quick@*`
 
-## 11. 控制面迁移
+## 12. 控制面迁移
 
 1. 备份数据库：`bash scripts/backup.sh`
 2. 在新机器上部署 vpn-api 和 vpn-web
@@ -288,7 +296,7 @@ systemctl start vpn-api
 4. 更新 DNS 指向新机器
 5. 所有节点 Agent 会自动重连（通过 DNS 解析到新地址）
 
-## 12. 节点与控制面完整巡检
+## 13. 节点与控制面完整巡检
 
 适用场景：节点显示异常（如“未部署却在线”）、IP 库状态长期未更新、怀疑 agent 与 API 通信异常。
 
@@ -350,7 +358,7 @@ systemctl start vpn-api
 
 ---
 
-## 13. WG-only 刷新灰度与回滚 SOP（不影响 OpenVPN）
+## 14. WG-only 刷新灰度与回滚 SOP（不影响 OpenVPN）
 
 适用场景：仅需要刷新 WireGuard 隧道配置（如某 peer 公钥修复、隧道地址修复），并要求 OpenVPN 业务无感。
 
@@ -444,7 +452,7 @@ bash /opt/vpn-api/scripts/wg-gate-check.sh \
 
 ---
 
-## 14. Agent 版本与自动更新
+## 15. Agent 版本与自动更新
 
 ### 14.1 版本号规则
 

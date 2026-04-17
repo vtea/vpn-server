@@ -63,3 +63,41 @@ func RequirePermission(module string) gin.HandlerFunc {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "no permission for " + module})
 	}
 }
+
+// RequireAnyPermission 与 RequirePermission 相同，但满足任一模块即放行（用于跨模块能力，如 Agent 升级既属节点运维也可能历史配置在 admins 下）。
+func RequireAnyPermission(modules ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, _ := c.Get("role")
+		roleStr, _ := role.(string)
+		if roleStr == "admin" {
+			c.Next()
+			return
+		}
+
+		perms, _ := c.Get("permissions")
+		permsStr, _ := perms.(string)
+		if permsStr == "*" {
+			c.Next()
+			return
+		}
+
+		want := make(map[string]struct{}, len(modules))
+		for _, m := range modules {
+			want[strings.TrimSpace(m)] = struct{}{}
+		}
+		for _, p := range strings.Split(permsStr, ",") {
+			p = strings.TrimSpace(p)
+			if p == "*" {
+				c.Next()
+				return
+			}
+			if _, ok := want[p]; ok {
+				c.Next()
+				return
+			}
+		}
+
+		modList := strings.Join(modules, " or ")
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "no permission for " + modList})
+	}
+}

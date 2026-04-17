@@ -2788,6 +2788,17 @@ func (h *Handler) RollbackConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": ver})
 }
 
+// callerCanManageAdmins 与 AdminIsUnrestricted 一致：JWT 中 role=admin 或 permissions（perms）为 *。
+func callerCanManageAdmins(c *gin.Context) bool {
+	role, _ := c.Get("role")
+	if rs, ok := role.(string); ok && rs == "admin" {
+		return true
+	}
+	perms, _ := c.Get("permissions")
+	ps, ok := perms.(string)
+	return ok && strings.TrimSpace(ps) == "*"
+}
+
 func (h *Handler) ListAdmins(c *gin.Context) {
 	var admins []model.Admin
 	h.db.Order("id asc").Find(&admins)
@@ -2808,8 +2819,7 @@ type createAdminReq struct {
 }
 
 func (h *Handler) CreateAdmin(c *gin.Context) {
-	role, _ := c.Get("role")
-	if role != "admin" {
+	if !callerCanManageAdmins(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can manage admins"})
 		return
 	}
@@ -2870,8 +2880,7 @@ type updateAdminReq struct {
 }
 
 func (h *Handler) UpdateAdmin(c *gin.Context) {
-	callerRole, _ := c.Get("role")
-	if callerRole != "admin" {
+	if !callerCanManageAdmins(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can manage admins"})
 		return
 	}
@@ -2932,8 +2941,7 @@ type resetPasswordReq struct {
 }
 
 func (h *Handler) ResetAdminPassword(c *gin.Context) {
-	callerRole, _ := c.Get("role")
-	if callerRole != "admin" {
+	if !callerCanManageAdmins(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can reset passwords"})
 		return
 	}
@@ -2968,8 +2976,7 @@ func (h *Handler) ResetAdminPassword(c *gin.Context) {
 }
 
 func (h *Handler) DeleteAdmin(c *gin.Context) {
-	role, _ := c.Get("role")
-	if role != "admin" {
+	if !callerCanManageAdmins(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can manage admins"})
 		return
 	}

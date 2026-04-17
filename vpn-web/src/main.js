@@ -1,22 +1,41 @@
-﻿import { createApp } from 'vue'
+﻿import { ViteSSG } from 'vite-ssg'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import 'element-plus/dist/index.css'
 import './assets/styles/global.scss'
 import App from './App.vue'
-import router from './router'
+import { routes } from './router/routes'
+import { bindRouter, installNavigationGuards } from './router'
 import { repairStoredApiBaseIfNeeded } from './utils/apiBase'
 
 repairStoredApiBaseIfNeeded()
 
-const app = createApp(App)
+/**
+ * vite-ssg 入口：构建期为每条静态路由生成独立 HTML，便于纯静态托管下无「整站伪静态」也能刷新深链。
+ * 动态路由（如 /nodes/:id）不包含在生成列表中，刷新该路径仍可能 404，需从站内进入。
+ */
+export const createApp = ViteSSG(
+  App,
+  { routes, base: import.meta.env.BASE_URL },
+  ({ app, router }) => {
+    bindRouter(router)
+    installNavigationGuards(router)
 
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
+    for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+      app.component(key, component)
+    }
+
+    app.use(createPinia())
+    app.use(ElementPlus)
+  }
+)
+
+/**
+ * 构建期只预渲染无动态参数的路径，避免 /nodes/:id 等无法枚举的段。
+ * @param {string[]} paths - vite-ssg 解析出的路径列表
+ * @returns {Promise<string[]>}
+ */
+export async function includedRoutes (paths) {
+  return paths.filter((p) => !p.includes(':'))
 }
-
-app.use(createPinia())
-app.use(router)
-app.use(ElementPlus)
-app.mount('#app')

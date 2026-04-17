@@ -136,6 +136,13 @@ func main() {
 	nodes.POST("/nodes/:id/instances", h.CreateInstance)
 	nodes.PATCH("/instances/:id", h.PatchInstance)
 
+	// Agent 升级：需节点或管理员模块其一（运维常仅有 nodes；历史服务账号可能仅有 admins）
+	agentUpgrades := secured.Group("", middleware.RequireAnyPermission("nodes", "admins"))
+	agentUpgrades.GET("/agent-upgrades/defaults", h.GetAgentUpgradeDefaults)
+	agentUpgrades.POST("/agent-upgrades", h.CreateAgentUpgradeTask)
+	agentUpgrades.GET("/agent-upgrades/:id", h.GetAgentUpgradeTask)
+	agentUpgrades.GET("/agent-upgrades/:id/items", h.ListAgentUpgradeTaskItems)
+
 	users := secured.Group("", middleware.RequirePermission("users"))
 	users.GET("/users", h.ListUsers)
 	users.POST("/users", h.CreateUser)
@@ -173,10 +180,6 @@ func main() {
 	admins.PATCH("/admins/:id", h.UpdateAdmin)
 	admins.POST("/admins/:id/reset-password", h.ResetAdminPassword)
 	admins.DELETE("/admins/:id", h.DeleteAdmin)
-	admins.GET("/agent-upgrades/defaults", h.GetAgentUpgradeDefaults)
-	admins.POST("/agent-upgrades", h.CreateAgentUpgradeTask)
-	admins.GET("/agent-upgrades/:id", h.GetAgentUpgradeTask)
-	admins.GET("/agent-upgrades/:id/items", h.ListAgentUpgradeTaskItems)
 
 	secured.GET("/metrics", h.PrometheusMetrics)
 	secured.GET("/config/versions", h.ListConfigVersions)

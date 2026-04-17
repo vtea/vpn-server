@@ -931,7 +931,7 @@ precheck() {
   if ! ensure_install_port_ready; then
     ERRORS=$((ERRORS+1))
   fi
-  log "提示: 若使用 Nginx 反代静态站与 /api，请参考项目内 docs/nginx-control-plane.example.conf（本脚本不安装 Nginx）。"
+  log "提示: 若使用反向代理托管静态站并将 /api 转到 vpn-api，请自行配置（本脚本不安装 Nginx）；参见仓库 README「反向代理建议」。"
 
   # ── 0.5 检查磁盘空间 ───────────────────────────────────────────────────────
 
@@ -1580,7 +1580,7 @@ print_summary() {
 
   API 直连:    ${summary_url}/api/health
   EXTERNAL_URL:${summary_url}
-  前端静态:    ${FRONTEND_DIR}  （需自行用 Nginx/Caddy 等对外提供，参见 docs/nginx-control-plane.example.conf）
+  前端静态:    ${FRONTEND_DIR}  （需自行用 Nginx/Caddy 等对外提供，参见仓库 README「反向代理建议」）
   默认账号:    admin / admin123 (请尽快修改密码)
 
   JWT Secret:  ${JWT_SECRET}

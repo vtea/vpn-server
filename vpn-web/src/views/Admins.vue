@@ -3,7 +3,7 @@
     <div class="page-card">
       <div class="page-card-header">
         <span class="page-card-title">管理员管理</span>
-        <el-button type="primary" @click="openCreate" :disabled="!isAdmin">
+        <el-button type="primary" @click="openCreate" :disabled="!canManageAdmins">
           <el-icon><Plus /></el-icon> 添加管理员
         </el-button>
       </div>
@@ -48,17 +48,26 @@
             </el-tag>
           </div>
           <div class="record-card__actions">
-            <el-button size="small" plain type="primary" @click="openEdit(row)" :disabled="!isAdmin">
+            <el-button size="small" plain type="primary" @click="openEdit(row)" :disabled="!canManageAdmins">
               <el-icon><Edit /></el-icon> 编辑
             </el-button>
-            <el-button size="small" plain type="warning" @click="openResetPwd(row)" :disabled="!isAdmin">
+            <el-button size="small" plain type="warning" @click="openResetPwd(row)" :disabled="!canManageAdmins">
               <el-icon><Lock /></el-icon> 重置密码
             </el-button>
-            <el-button size="small" plain type="danger" @click="handleDelete(row)" :disabled="!isAdmin || row.username === 'admin'">
+            <el-button size="small" plain type="danger" @click="handleDelete(row)" :disabled="!canManageAdmins || row.username === 'admin'">
               <el-icon><Delete /></el-icon> 删除
             </el-button>
           </div>
         </div>
+        <el-alert
+          v-if="!canManageAdmins && admins.length"
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-top: 12px"
+        >
+          当前账号仅有「管理员管理」查看权限；添加、编辑、重置密码、删除需超级管理员（角色为超级管理员，或权限为 *）。
+        </el-alert>
         <el-empty v-if="!loading && !admins.length" description="暂无管理员" :image-size="60" />
       </div>
     </div>
@@ -136,7 +145,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import http from '../api/http'
 import { formatDate, recordCardToneFromTagType } from '../utils'
-import { parseJwtPayload } from '../utils/jwt'
+import { isSuperAdminSession } from '../utils/adminSession'
 
 const admins = ref([])
 const nodeOptions = ref([])
@@ -167,14 +176,8 @@ const roleOptions = [
 const form = ref({ username: '', password: '', role: 'operator', permList: [], nodeIds: [] })
 const resetForm = ref({ id: null, username: '', newPassword: '' })
 
-const currentAdmin = computed(() => {
-  const token = localStorage.getItem('token')
-  if (!token) return {}
-  const p = parseJwtPayload(token)
-  return p || {}
-})
-
-const isAdmin = computed(() => currentAdmin.value.role === 'admin')
+/** 与侧栏、后端一致：超级管理员 = role=admin 或 permissions=* */
+const canManageAdmins = computed(() => isSuperAdminSession())
 
 const parsePerms = (s) => {
   if (!s) return []
@@ -209,7 +212,7 @@ const fetchAdmins = async () => {
 }
 
 const loadNodeOptions = async () => {
-  if (!isAdmin.value) return
+  if (!canManageAdmins.value) return
   nodeOptsLoading.value = true
   try {
     const { data } = await http.get('/api/nodes')

@@ -205,7 +205,7 @@ export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
 
 ## 生产部署
 
-1. **Nginx（自选）**：参考仓库内 [`docs/nginx-control-plane.example.conf`](../docs/nginx-control-plane.example.conf)，自行复制到 `/etc/nginx/` 并调整 `server_name`、证书路径、监听端口。
+1. **反向代理（自选）**：将 HTTPS 与静态 `dist`、路径 `/api/` → `vpn-api`（默认 `127.0.0.1:56700`）自行配置；说明见仓库根目录 [`README.md`](../README.md)「反向代理建议」。前端为 Hash 路由，无需为 SPA 单独写 `try_files`。
 2. **HTTPS**：在反向代理或独立证书上配置（Let's Encrypt / 自签等），安装脚本不再自动申请证书。
 3. 构建前端：`cd ../vpn-admin-web && npm run build && cp -r dist/* /var/www/vpn-admin/`
 4. 配置备份：`crontab -e` 添加 `0 2 * * * DB_PATH=/opt/vpn-api/data/vpn.db BACKUP_DIR=/opt/vpn-api/backups /opt/vpn-api/scripts/backup.sh >> /var/log/vpn-backup.log 2>&1`
