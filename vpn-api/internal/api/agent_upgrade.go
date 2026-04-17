@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -110,7 +111,10 @@ func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
 	}
 
 	var online []model.Node
-	_ = h.db.Where("status = ?", "online").Find(&online).Error
+	if err := h.db.Where("status = ?", "online").Find(&online).Error; err != nil {
+		log.Printf("agent upgrade defaults: list online nodes: %v", err)
+		online = nil
+	}
 	amdCount, armCount := 0, 0
 	for _, n := range online {
 		a := strings.TrimSpace(strings.ToLower(n.AgentArch))
@@ -311,7 +315,10 @@ JOIN (
 ) latest ON latest.node_id = i.node_id AND latest.max_updated = i.updated_at
 ORDER BY i.updated_at DESC;
 `
-	_ = h.db.Raw(q).Scan(&rows).Error
+	if err := h.db.Raw(q).Scan(&rows).Error; err != nil {
+		log.Printf("agent upgrade status: scan: %v", err)
+		rows = nil
+	}
 
 	type item struct {
 		NodeID        string `json:"node_id"`
@@ -446,13 +453,21 @@ func (h *Handler) dispatchUpgradeTaskItem(task model.AgentUpgradeTask, item mode
 		"message": "dispatching upgrade command",
 	})
 
-	payload, _ := json.Marshal(map[string]any{
+	payload, merr := json.Marshal(map[string]any{
 		"task_id":         task.ID,
 		"version":         task.Version,
 		"download_urls":   buildUpgradeURLs(task.DownloadURLLAN, task.DownloadURL),
 		"sha256":          task.SHA256,
 		"restart_service": true,
 	})
+	if merr != nil {
+		log.Printf("dispatchUpgradeTaskItem: marshal upgrade_agent: %v", merr)
+		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+			"status":  "failed",
+			"message": "marshal upgrade payload failed",
+		})
+		return false
+	}
 	if h.hub == nil || h.hub.SendToNode(item.NodeID, WSMessage{Type: "upgrade_agent", Payload: payload}) != nil {
 		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
 			"status":  "failed",
@@ -516,10 +531,20 @@ func buildUpgradeURLs(lan, pub string) []string {
 }
 
 func (h *Handler) dispatchUpgradePrecheck(taskID uint, item model.AgentUpgradeTaskItem, urls []string, timeout time.Duration) {
-	payload, _ := json.Marshal(map[string]any{
+	payload, merr := json.Marshal(map[string]any{
 		"task_id":       taskID,
 		"download_urls": urls,
 	})
+	if merr != nil {
+		log.Printf("dispatchUpgradePrecheck: marshal payload: %v", merr)
+		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+			"status":     "failed",
+			"step":       "precheck",
+			"error_code": "marshal_failed",
+			"message":    "marshal precheck payload failed",
+		})
+		return
+	}
 	if h.hub == nil || h.hub.SendToNode(item.NodeID, WSMessage{Type: "upgrade_precheck", Payload: payload}) != nil {
 		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
 			"status":  "failed",

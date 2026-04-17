@@ -236,8 +236,10 @@ while IFS= read -r nid; do
     STATUS_JSON="$(curl -fsS "$API_BASE/api/nodes/$nid/status" \
       -H "Authorization: Bearer $JWT")"
     # 若指定了预期异常 peer，要求 invalid_config 仅出现在该 peer 关联隧道上。
-    invalid_count="$(echo "$STATUS_JSON" | jq --arg p "$EXPECT_INVALID_PEER" '[.tunnels[] | select(.status=="invalid_config" and (.node_a==$p or .node_b==$p))] | length')"
-    other_invalid_count="$(echo "$STATUS_JSON" | jq --arg p "$EXPECT_INVALID_PEER" '[.tunnels[] | select(.status=="invalid_config" and (.node_a!=$p and .node_b!=$p))] | length')"
+    invalid_count="$(echo "$STATUS_JSON" | jq --arg p "$EXPECT_INVALID_PEER" '[.tunnels[] | select(.status=="invalid_config" and (.node_a==$p or .node_b==$p))] | length' 2>/dev/null || echo 0)"
+    [[ "$invalid_count" =~ ^[0-9]+$ ]] || invalid_count=0
+    other_invalid_count="$(echo "$STATUS_JSON" | jq --arg p "$EXPECT_INVALID_PEER" '[.tunnels[] | select(.status=="invalid_config" and (.node_a!=$p and .node_b!=$p))] | length' 2>/dev/null || echo 0)"
+    [[ "$other_invalid_count" =~ ^[0-9]+$ ]] || other_invalid_count=0
     echo "[INFO] node=$nid invalid_config expected-peer=$invalid_count other-peers=$other_invalid_count"
     if [[ "$invalid_count" -ge 1 && "$other_invalid_count" -eq 0 ]]; then
       echo "[OK] node=$nid invalid_config isolation passed"

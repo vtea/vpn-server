@@ -91,14 +91,14 @@ if [[ "$ROLE" == "control-plane" ]]; then
 
   if [[ "$SKIP_DOWNLOAD_CHECK" -eq 0 ]]; then
     check_cmd "agent amd64 download endpoint" \
-      "curl -sfSL --max-time 15 -o /tmp/.vpn-agent.probe \"$API_URL/api/downloads/vpn-agent-linux-amd64\" && [[ -s /tmp/.vpn-agent.probe ]]"
+      "curl -sfSL --max-time 15 -o \"$HC_TMP/vpn-agent.probe\" \"$API_URL/api/downloads/vpn-agent-linux-amd64\" && [[ -s \"$HC_TMP/vpn-agent.probe\" ]]"
   fi
 
   if [[ -n "$API_JWT" ]]; then
-    if curl -sf --max-time 8 -H "Authorization: Bearer $API_JWT" "$API_URL/api/nodes/state-consistency" -o /tmp/.state-consistency.json; then
+    if curl -sf --max-time 8 -H "Authorization: Bearer $API_JWT" "$API_URL/api/nodes/state-consistency" -o "$HC_TMP/state-consistency.json"; then
       ok "state consistency endpoint"
       if command -v jq >/dev/null 2>&1; then
-        mismatch="$(jq -r '.mismatch // 0' /tmp/.state-consistency.json 2>/dev/null || echo 0)"
+        mismatch="$(jq -r '.mismatch // 0' "$HC_TMP/state-consistency.json" 2>/dev/null || echo 0)"
         if [[ "$mismatch" =~ ^[0-9]+$ ]]; then
           if [[ "$mismatch" -eq 0 ]]; then
             ok "state consistency mismatch=0"

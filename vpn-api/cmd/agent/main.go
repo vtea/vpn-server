@@ -214,7 +214,8 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 				return
 			}
 			var msg WSMessage
-			if json.Unmarshal(raw, &msg) != nil {
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("ws: skip non-json message (%d bytes): %v", len(raw), err)
 				continue
 			}
 			handleCommand(conn, cfg, msg)
@@ -227,7 +228,11 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 			return fmt.Errorf("connection closed")
 		case <-heartbeat.C:
 			msg := WSMessage{Type: "heartbeat"}
-			data, _ := json.Marshal(msg)
+			data, err := json.Marshal(msg)
+			if err != nil {
+				log.Printf("heartbeat json.Marshal: %v", err)
+				continue
+			}
 			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				return fmt.Errorf("heartbeat write: %w", err)
 			}
@@ -237,14 +242,22 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 
 func sendReport(conn *websocket.Conn, cfg *Config) {
 	wgKey := readWGPublicKey()
-	payload, _ := json.Marshal(map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"agent_version": agentVersion(),
 		"agent_arch":    runtime.GOARCH,
 		"wg_pubkey":     wgKey,
 		"capabilities":  []string{"upgrade_agent_v2", "upgrade_precheck", "wg_refresh_v1"},
 	})
+	if err != nil {
+		log.Printf("sendReport: marshal payload: %v", err)
+		return
+	}
 	msg := WSMessage{Type: "report", Payload: payload}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("sendReport: marshal message: %v", err)
+		return
+	}
 	conn.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -569,7 +582,12 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			Proto      string `json:"proto"`
 			Mode       string `json:"mode"`
 		}
-		if json.Unmarshal(msg.Payload, &req) != nil {
+		if err := json.Unmarshal(msg.Payload, &req); err != nil {
+			log.Printf("issue_cert: invalid payload: %v", err)
+			sendResult(conn, "cert_result", map[string]any{
+				"success": false,
+				"error":   "invalid payload: " + err.Error(),
+			})
 			return
 		}
 		proto := resolveClientProtoForIssueCert(req.Proto, req.Mode)
@@ -595,7 +613,13 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		var req struct {
 			CertCN string `json:"cert_cn"`
 		}
-		if json.Unmarshal(msg.Payload, &req) != nil {
+		if err := json.Unmarshal(msg.Payload, &req); err != nil {
+			log.Printf("revoke_cert: invalid payload: %v", err)
+			sendResult(conn, "cert_result", map[string]any{
+				"cert_cn": "",
+				"success": false,
+				"error":   "invalid payload: " + err.Error(),
+			})
 			return
 		}
 		log.Printf("revoking cert: %s", req.CertCN)
@@ -642,7 +666,8 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		var payload struct {
 			Exceptions []exceptionRule `json:"exceptions"`
 		}
-		if json.Unmarshal(msg.Payload, &payload) != nil {
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			log.Printf("update_exceptions: invalid JSON payload, ignored: %v", err)
 			return
 		}
 		applyExceptions(payload.Exceptions)
@@ -653,7 +678,15 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			Version     string `json:"version"`
 			DownloadURL string `json:"download_url"`
 		}
-		_ = json.Unmarshal(msg.Payload, &req)
+		if err := json.Unmarshal(msg.Payload, &req); err != nil {
+			log.Printf("update_iplist: invalid payload: %v", err)
+			sendResult(conn, "iplist_result", map[string]any{
+				"scope":   "",
+				"success": false,
+				"error":   "invalid payload: " + err.Error(),
+			})
+			return
+		}
 		scope := normalizeIPListScope(req.Scope)
 		scopes := []string{scope}
 		if scope == "all" {
@@ -683,7 +716,16 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			SHA256         string   `json:"sha256"`
 			RestartService bool     `json:"restart_service"`
 		}
-		if json.Unmarshal(msg.Payload, &req) != nil {
+		if err := json.Unmarshal(msg.Payload, &req); err != nil {
+			log.Printf("upgrade_agent: invalid payload: %v", err)
+			sendResult(conn, "upgrade_result", map[string]any{
+				"task_id":         0,
+				"success":         false,
+				"current_version": agentVersion(),
+				"step":            "parse",
+				"error_code":      "invalid_payload",
+				"error":           err.Error(),
+			})
 			return
 		}
 		log.Printf("upgrade_agent: task=%d version=%s", req.TaskID, req.Version)
@@ -709,7 +751,13 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			TaskID       uint     `json:"task_id"`
 			DownloadURLs []string `json:"download_urls"`
 		}
-		if json.Unmarshal(msg.Payload, &req) != nil {
+		if err := json.Unmarshal(msg.Payload, &req); err != nil {
+			log.Printf("upgrade_precheck: invalid payload: %v", err)
+			sendResult(conn, "upgrade_precheck_result", map[string]any{
+				"task_id": 0,
+				"success": false,
+				"error":   err.Error(),
+			})
 			return
 		}
 		ok, selected, err := precheckDownloadURLs(req.DownloadURLs)
@@ -744,17 +792,26 @@ func loginForAutoUpdate(apiBase, username, password string) (string, error) {
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
 		return "", fmt.Errorf("auto update credentials missing")
 	}
-	payload, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	payload, err := json.Marshal(map[string]string{"username": username, "password": password})
+	if err != nil {
+		return "", fmt.Errorf("marshal login body: %w", err)
+	}
 	client := &http.Client{Timeout: 12 * time.Second}
 	for _, p := range []string{"/api/auth/login", "/api/login"} {
-		req, _ := http.NewRequest(http.MethodPost, strings.TrimRight(apiBase, "/")+p, bytes.NewReader(payload))
+		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiBase, "/")+p, bytes.NewReader(payload))
+		if err != nil {
+			continue
+		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, rerr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		if rerr != nil {
+			continue
+		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			continue
 		}
@@ -776,7 +833,10 @@ func loginForAutoUpdate(apiBase, username, password string) (string, error) {
 
 func fetchUpgradeDefaults(apiBase, jwt string) (*upgradeDefaultsResponse, error) {
 	client := &http.Client{Timeout: 12 * time.Second}
-	req, _ := http.NewRequest(http.MethodGet, strings.TrimRight(apiBase, "/")+"/api/agent-upgrades/defaults", nil)
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(apiBase, "/")+"/api/agent-upgrades/defaults", nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -900,10 +960,20 @@ func runManualUpgrade() {
 }
 
 func sendResult(conn *websocket.Conn, msgType string, payload any) {
-	p, _ := json.Marshal(payload)
+	p, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("sendResult %s: marshal payload: %v", msgType, err)
+		return
+	}
 	msg := WSMessage{Type: msgType, Payload: p}
-	data, _ := json.Marshal(msg)
-	conn.WriteMessage(websocket.TextMessage, data)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("sendResult %s: marshal envelope: %v", msgType, err)
+		return
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		log.Printf("sendResult %s: write: %v", msgType, err)
+	}
 }
 
 func precheckDownloadURLs(urls []string) (bool, string, error) {
@@ -986,7 +1056,15 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 		result.Error = "invalid upgrade payload: download urls empty"
 		return result
 	}
-	tmpPath := fmt.Sprintf("/tmp/vpn-agent.%d.bin", time.Now().UnixNano())
+	tmpFile, err := os.CreateTemp("", "vpn-agent-dl-*.bin")
+	if err != nil {
+		result.ErrorCode = "tempfile_failed"
+		result.Error = fmt.Sprintf("create temp download file: %v", err)
+		return result
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
 	var lastErr string
 	usedURL := ""
 	result.Step = "download"
@@ -1034,12 +1112,19 @@ func performAgentUpgrade(version string, downloadURLs []string, expectedSHA256 s
 		result.Error = fmt.Sprintf("replace binary %s: %v", targetPath, err)
 		return result
 	}
-	_ = os.Remove(tmpPath)
 
 	if restartService {
 		result.Step = "restart"
 		// Delay restart slightly so this process can send upgrade_result first.
-		reCmd := exec.Command("bash", "-lc", "nohup sh -c 'sleep 1; systemctl restart vpn-agent' >/tmp/vpn-agent-upgrade.log 2>&1 &")
+		upgradeLog, lerr := os.CreateTemp("", "vpn-agent-upgrade-*.log")
+		if lerr != nil {
+			result.ErrorCode = "restart_log_failed"
+			result.Error = fmt.Sprintf("create upgrade log file: %v", lerr)
+			return result
+		}
+		logPath := upgradeLog.Name()
+		_ = upgradeLog.Close()
+		reCmd := exec.Command("bash", "-lc", fmt.Sprintf("nohup sh -c 'sleep 1; systemctl restart vpn-agent' >%q 2>&1 &", logPath))
 		if out, err := reCmd.CombinedOutput(); err != nil {
 			result.ErrorCode = "restart_launch_failed"
 			result.Error = fmt.Sprintf("restart launch failed: %v", err)
@@ -1276,13 +1361,21 @@ func cronHealthReport(activeConn **websocket.Conn, connMu *sync.Mutex, cfg *Conf
 		tunnelStats := collectTunnelHealth()
 		onlineUsers := countOnlineUsers()
 
-		payload, _ := json.Marshal(map[string]any{
+		payload, err := json.Marshal(map[string]any{
 			"online_users": onlineUsers,
 			"tunnels":      tunnelStats,
 			"wg_pubkey":    readWGPublicKey(),
 		})
+		if err != nil {
+			log.Printf("cronHealthReport: marshal payload: %v", err)
+			continue
+		}
 		msg := WSMessage{Type: "health", Payload: payload}
-		data, _ := json.Marshal(msg)
+		data, err := json.Marshal(msg)
+		if err != nil {
+			log.Printf("cronHealthReport: marshal message: %v", err)
+			continue
+		}
 
 		connMu.Lock()
 		if *activeConn != nil {

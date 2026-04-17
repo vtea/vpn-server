@@ -74,22 +74,27 @@ func (h *Handler) audit(c *gin.Context, action, target, detail string) {
 	if adminStr == "" {
 		adminStr = "system"
 	}
-	log := model.AuditLog{
+	rec := model.AuditLog{
 		AdminUser: adminStr,
 		Action:    action,
 		Target:    target,
 		Detail:    detail,
 	}
-	_ = h.db.Create(&log).Error
+	if err := h.db.Create(&rec).Error; err != nil {
+		log.Printf("audit persist failed action=%s target=%s: %v", action, target, err)
+	}
 }
 
 func (h *Handler) auditSystem(action, target, detail string) {
-	_ = h.db.Create(&model.AuditLog{
+	rec := model.AuditLog{
 		AdminUser: "system",
 		Action:    action,
 		Target:    target,
 		Detail:    detail,
-	}).Error
+	}
+	if err := h.db.Create(&rec).Error; err != nil {
+		log.Printf("auditSystem persist failed action=%s target=%s: %v", action, target, err)
+	}
 }
 
 // buildWireGuardRefreshPayload 生成与「刷新WG」一致的 update_wg_config JSON body。
@@ -543,9 +548,15 @@ func (h *Handler) GetNode(c *gin.Context) {
 		return
 	}
 	var instances []model.Instance
-	_ = h.db.Where("node_id = ?", node.ID).Find(&instances).Error
+	if err := h.db.Where("node_id = ?", node.ID).Find(&instances).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	var tunnels []model.Tunnel
-	_ = h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&tunnels).Error
+	if err := h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&tunnels).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	segs, _ := h.nodeSegmentsDetail(node.ID)
 	c.JSON(http.StatusOK, gin.H{
 		"node":         node,
@@ -873,10 +884,18 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		sent := 0
 		for _, n := range nodes {
 			if h.hub != nil && h.hub.IsOnline(n.ID) {
-				_ = h.hub.SendToNode(n.ID, WSMessage{Type: "update_iplist"})
+				if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_iplist"}); err != nil {
+					log.Printf("TriggerIPListUpdate legacy: send update_iplist to %s: %v", n.ID, err)
+				}
 				if len(exceptions) > 0 {
-					payload, _ := json.Marshal(map[string]any{"exceptions": exceptions})
-					_ = h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: payload})
+					exPayload, merr := json.Marshal(map[string]any{"exceptions": exceptions})
+					if merr != nil {
+						log.Printf("TriggerIPListUpdate legacy: marshal exceptions: %v", merr)
+					} else {
+						if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: exPayload}); err != nil {
+							log.Printf("TriggerIPListUpdate legacy: send update_exceptions to %s: %v", n.ID, err)
+						}
+					}
 				}
 				sent++
 			}
@@ -890,7 +909,13 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		Scope string `json:"scope"`
 	}
 	var req reqBody
-	_ = c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// 空 body / 仅空白时常见为 EOF 或 json 的 unexpected end；仍按默认 scope 处理
+		if !errors.Is(err, io.EOF) && !strings.Contains(err.Error(), "unexpected end of JSON input") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	scope := normalizeIPListScope(req.Scope)
 	if scope == "all" {
 		scope = "all"
@@ -924,11 +949,23 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 	sent := 0
 	for _, n := range nodes {
 		if h.hub != nil && h.hub.IsOnline(n.ID) {
-			payload, _ := json.Marshal(gin.H{"scope": scope})
-			_ = h.hub.SendToNode(n.ID, WSMessage{Type: "update_iplist", Payload: payload})
+			scopePayload, merr := json.Marshal(gin.H{"scope": scope})
+			if merr != nil {
+				log.Printf("TriggerIPListUpdate: marshal iplist scope: %v", merr)
+			} else {
+				if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_iplist", Payload: scopePayload}); err != nil {
+					log.Printf("TriggerIPListUpdate: send update_iplist to %s: %v", n.ID, err)
+				}
+			}
 			if len(exceptions) > 0 {
-				payload, _ := json.Marshal(map[string]any{"exceptions": exceptions})
-				_ = h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: payload})
+				exPayload, exErr := json.Marshal(map[string]any{"exceptions": exceptions})
+				if exErr != nil {
+					log.Printf("TriggerIPListUpdate: marshal exceptions: %v", exErr)
+				} else {
+					if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: exPayload}); err != nil {
+						log.Printf("TriggerIPListUpdate: send update_exceptions to %s: %v", n.ID, err)
+					}
+				}
 			}
 			sent++
 		}
@@ -1080,7 +1117,11 @@ func (h *Handler) refreshIPListArtifact(scope string) (*model.IPListArtifact, er
 			continue
 		}
 		for i := 0; i <= src.RetryCount; i++ {
-			req, _ := http.NewRequest(http.MethodGet, u, nil)
+			req, reqErr := http.NewRequest(http.MethodGet, u, nil)
+			if reqErr != nil {
+				lastErr = reqErr
+				continue
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				lastErr = err
@@ -1479,8 +1520,14 @@ func (h *Handler) RevokeGrant(c *gin.Context) {
 	var inst model.Instance
 	if h.db.First(&inst, grant.InstanceID).Error == nil {
 		if h.hub != nil && h.hub.IsOnline(inst.NodeID) {
-			payload, _ := json.Marshal(map[string]any{"cert_cn": grant.CertCN})
-			_ = h.hub.SendToNode(inst.NodeID, WSMessage{Type: "revoke_cert", Payload: payload})
+			payload, merr := json.Marshal(map[string]any{"cert_cn": grant.CertCN})
+			if merr != nil {
+				log.Printf("revoke_grant: marshal revoke_cert payload: %v", merr)
+			} else {
+				if err := h.hub.SendToNode(inst.NodeID, WSMessage{Type: "revoke_cert", Payload: payload}); err != nil {
+					log.Printf("revoke_grant: send revoke_cert to %s: %v", inst.NodeID, err)
+				}
+			}
 		} else {
 			grant.CertStatus = "revoked"
 			h.db.Save(&grant)
@@ -1597,12 +1644,18 @@ func (h *Handler) broadcastExceptions() {
 	}
 	var exceptions []model.IPListException
 	h.db.Find(&exceptions)
-	payload, _ := json.Marshal(map[string]any{"exceptions": exceptions})
+	payload, err := json.Marshal(map[string]any{"exceptions": exceptions})
+	if err != nil {
+		log.Printf("broadcastExceptions: json.Marshal: %v", err)
+		return
+	}
 	var nodes []model.Node
 	h.db.Find(&nodes)
 	for _, n := range nodes {
 		if h.hub.IsOnline(n.ID) {
-			_ = h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: payload})
+			if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: payload}); err != nil {
+				log.Printf("broadcastExceptions: send to %s: %v", n.ID, err)
+			}
 		}
 	}
 }
@@ -2139,18 +2192,27 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 		return
 	}
 	var instances []model.Instance
-	_ = h.db.Where("node_id = ? AND enabled = ?", node.ID, true).Find(&instances).Error
+	if err := h.db.Where("node_id = ? AND enabled = ?", node.ID, true).Find(&instances).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load instances: " + err.Error()})
+		return
+	}
 
 	now := time.Now()
 	bt.Used = true
 	bt.UsedAt = &now
-	_ = h.db.Save(&bt).Error
+	if err := h.db.Save(&bt).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark bootstrap token used: " + err.Error()})
+		return
+	}
 
 	// Do not set node.Status here. Real online/offline should be driven by
 	// websocket lifecycle (connect/heartbeat/disconnect) in ws_hub.
 	node.ConfigVersion++
 	node.AgentVersion = "bootstrap"
-	_ = h.db.Save(&node).Error
+	if err := h.db.Save(&node).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update node after register: " + err.Error()})
+		return
+	}
 
 	tunnelConfigs, _ := service.BuildTunnelConfigsForNode(h.db, node.ID)
 	if tunnelConfigs == nil {
@@ -2160,7 +2222,7 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 		if tc.ConfigValid {
 			continue
 		}
-		_ = h.db.Model(&model.Tunnel{}).
+		if err := h.db.Model(&model.Tunnel{}).
 			Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",
 				node.ID, tc.PeerNodeID, tc.PeerNodeID, node.ID).
 			Updates(map[string]any{
@@ -2168,7 +2230,9 @@ func (h *Handler) AgentRegister(c *gin.Context) {
 				"status_reason":        tc.ConfigError,
 				"status_updated_at":    time.Now(),
 				"consecutive_failures": gorm.Expr("COALESCE(consecutive_failures, 0) + 1"),
-			}).Error
+			}).Error; err != nil {
+			log.Printf("AgentRegister: mark tunnel invalid_config %s <-> %s: %v", node.ID, tc.PeerNodeID, err)
+		}
 	}
 
 	resp := gin.H{
@@ -2285,8 +2349,14 @@ func (h *Handler) RollbackConfig(c *gin.Context) {
 		return
 	}
 	if h.hub != nil && h.hub.IsOnline(ver.NodeID) {
-		payload, _ := json.Marshal(map[string]any{"config": ver.Snapshot})
-		_ = h.hub.SendToNode(ver.NodeID, WSMessage{Type: "update_config", Payload: payload})
+		payload, merr := json.Marshal(map[string]any{"config": ver.Snapshot})
+		if merr != nil {
+			log.Printf("RollbackConfig: marshal update_config: %v", merr)
+		} else {
+			if err := h.hub.SendToNode(ver.NodeID, WSMessage{Type: "update_config", Payload: payload}); err != nil {
+				log.Printf("RollbackConfig: send update_config to %s: %v", ver.NodeID, err)
+			}
+		}
 	}
 	h.audit(c, "rollback_config", fmt.Sprintf("node:%s version:%d", ver.NodeID, ver.ID), ver.Comment)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": ver})

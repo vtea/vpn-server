@@ -25,7 +25,11 @@ func (h *AdminWSHub) Broadcast(eventType string, data any) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	payload, _ := json.Marshal(map[string]any{"type": eventType, "data": data, "ts": time.Now().Unix()})
+	payload, err := json.Marshal(map[string]any{"type": eventType, "data": data, "ts": time.Now().Unix()})
+	if err != nil {
+		log.Printf("AdminWSHub.Broadcast: json.Marshal: %v", err)
+		return
+	}
 	for conn := range h.conns {
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		conn.WriteMessage(websocket.TextMessage, payload)

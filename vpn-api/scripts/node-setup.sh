@@ -275,7 +275,8 @@ check_instance_ports_from_bootstrap_json() {
   local json="$1"
   [[ -z "$json" ]] && return 0
   local ic port p mode conflicts policy action
-  ic="$(echo "$json" | jq '.instances | length')"
+  ic="$(echo "$json" | jq '.instances | length' 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
   [[ "$ic" -eq 0 ]] && return 0
   echo ""
   log "检查 OpenVPN 监听端口占用（控制面下发） ..."
@@ -320,7 +321,8 @@ check_instance_ports_from_bootstrap_json() {
     esac
   done
   local tc
-  tc="$(echo "$json" | jq '.tunnels | length')"
+  tc="$(echo "$json" | jq '.tunnels | length' 2>/dev/null || echo 0)"
+  [[ "$tc" =~ ^[0-9]+$ ]] || tc=0
   if [[ "$tc" -gt 0 ]]; then
     local wgport
     wgport="$(echo "$json" | jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty')"
@@ -376,7 +378,8 @@ count_enabled_instances_from_json() {
   [[ -z "$json" ]] && { echo "0"; return 0; }
   local ic i inst_en cnt
   cnt=0
-  ic="$(echo "$json" | jq '.instances | length')"
+  ic="$(echo "$json" | jq '.instances | length' 2>/dev/null || echo 0)"
+  [[ "$ic" =~ ^[0-9]+$ ]] || ic=0
   for i in $(seq 0 $((ic - 1))); do
     inst_en="$(echo "$json" | jq -r ".instances[$i].enabled // true")"
     if is_enabled_value "$inst_en"; then
@@ -729,7 +732,8 @@ collect_required_ports_from_bootstrap_file() {
     [[ "$p" != "tcp" ]] && p="udp"
     echo "openvpn|${mode}|${p}|${port}"
   done
-  tc="$(jq '.tunnels | length' "$f")"
+  tc="$(jq '.tunnels | length' "$f" 2>/dev/null || echo 0)"
+  [[ "$tc" =~ ^[0-9]+$ ]] || tc=0
   if [[ "$tc" -gt 0 ]]; then
     wgport="$(jq -r '[.tunnels[] | select((.peer_pubkey // "") != "")][0].wg_port // empty' "$f")"
     if [[ -n "$wgport" ]]; then
@@ -845,12 +849,16 @@ verify_required_ports_listening_file() {
     fi
     listeners=""
     tries=0
-    # openvpn 刚启动后监听建立可能有短暂延迟；vpn-agent 重启后 try-restart OpenVPN 也会短暂无监听
-    while [[ "$tries" -lt 28 ]]; do
+    # openvpn 刚启动后监听建立可能有短暂延迟；vpn-agent 安装/启动后也可能触发 OpenVPN 重启。
+    # UDP 监听在 ss 中常为 UNCONN，部分 iproute2 版本上 ( sport = :PORT ) 过滤器不命中，需行级回退。
+    while [[ "$tries" -lt 35 ]]; do
       if [[ "$proto" == "tcp" ]]; then
         listeners="$(ss -H -tlnp "( sport = :${port} )" 2>/dev/null || true)"
       else
         listeners="$(ss -H -ulnp "( sport = :${port} )" 2>/dev/null || true)"
+        if [[ -z "$listeners" ]]; then
+          listeners="$(ss -H -ulnp 2>/dev/null | grep -E ":${port}[[:space:]]" || true)"
+        fi
       fi
       [[ -n "$listeners" ]] && break
       tries=$((tries + 1))
@@ -920,6 +928,8 @@ post_deploy_health_check() {
     fi
   done
 
+  # Step 9 安装/启动 vpn-agent 后可能再次触发 OpenVPN 配置应用，端口就绪略晚于 is-active
+  sleep 3
   if ! verify_required_ports_listening_file "$f"; then
     errors=$((errors + 1))
   fi
@@ -1391,12 +1401,13 @@ fi
 log "Step 2/${TOTAL_STEPS}: Installing packages ..."
 
 install_easyrsa_manual() {
-  local VER="3.2.1"
+  local VER="3.2.1" tgz
+  tgz="$(mktemp)"
   curl -fsSL "https://github.com/OpenVPN/easy-rsa/releases/download/v${VER}/EasyRSA-${VER}.tgz" \
-    -o /tmp/easyrsa.tgz
+    -o "$tgz"
   mkdir -p /etc/openvpn/server/easy-rsa
-  tar xzf /tmp/easyrsa.tgz --strip-components=1 -C /etc/openvpn/server/easy-rsa
-  rm -f /tmp/easyrsa.tgz
+  tar xzf "$tgz" --strip-components=1 -C /etc/openvpn/server/easy-rsa
+  rm -f "$tgz"
 }
 
 CORE_PKGS="openvpn wireguard-tools ipset iptables jq curl dnsmasq"
@@ -1697,8 +1708,10 @@ is_enabled_value() {
 NODE_JSON_FILE="/etc/vpn-agent/bootstrap-node.json"
 [[ ! -f "$NODE_JSON_FILE" ]] && exit 0
 
-INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE")"
-TUNNEL_COUNT="$(jq '.tunnels | length' "$NODE_JSON_FILE")"
+INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE" 2>/dev/null || echo 0)"
+[[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || INSTANCE_COUNT=0
+TUNNEL_COUNT="$(jq '.tunnels | length' "$NODE_JSON_FILE" 2>/dev/null || echo 0)"
+[[ "$TUNNEL_COUNT" =~ ^[0-9]+$ ]] || TUNNEL_COUNT=0
 
 PEER_MAP_DIR="$(mktemp -d)"
 trap 'rm -rf "$PEER_MAP_DIR"' EXIT
@@ -1861,7 +1874,7 @@ log "Step 7/${TOTAL_STEPS}: Configuring NAT rules ..."
 # 先摘 NAT/FORWARD 中对 china-ip/overseas-ip 的 match，避免后续 destroy/swap 异常；nat-rules.sh 末尾会重建规则
 vpn_ipset_clear_vpn_iptables_chains_for_reload
 
-CHINA_LIST="/tmp/china_ip_list.txt"
+CHINA_LIST="$(mktemp)"
 CHINA_LIST_URL_DEFAULT="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 CHINA_LIST_URL_MIRROR="https://cdn.jsdelivr.net/gh/17mon/china_ip_list@master/china_ip_list.txt"
 
@@ -1942,8 +1955,6 @@ fi
 
 # Overseas IP 库：与控制面 overseas 制品及 Agent 的 overseas-ip / overseas-ip-list.txt 对齐。
 # overseas-ip 为 ipset hash:net（仅 IPv4）。旧默认 china6.txt 全系 IPv6，会导致海量 ipset 报错且无法入库。
-OVERSEAS_LIST="/tmp/overseas_ip_list.txt"
-OVERSEAS_LIST_V4="/tmp/overseas_ip_list_v4.txt"
 # 公网 IPv4 聚合段（示例：美国 / 日本），供 hash:net；管理员可在控制面改「分流规则」数据源
 OVERSEAS_URL_PRIMARY="https://www.ipdeny.com/ipblocks/data/countries/us.zone"
 OVERSEAS_URL_MIRROR="https://www.ipdeny.com/ipblocks/data/countries/jp.zone"
@@ -1996,7 +2007,8 @@ if [[ "${SKIP_OVERSEAS_IPSET:-0}" == "1" ]]; then
   ipset flush overseas-ip 2>/dev/null || true
   printf '%s\n' '# skipped: overseas list not downloaded (--skip-overseas-ipset)' > /etc/vpn-agent/overseas-ip-list.txt
 else
-  rm -f "$OVERSEAS_LIST" "$OVERSEAS_LIST_V4"
+  OVERSEAS_LIST="$(mktemp)"
+  OVERSEAS_LIST_V4="$(mktemp)"
   if download_overseas_from_cp && [[ -s "$OVERSEAS_LIST" ]]; then
     log "  overseas ip list downloaded from control plane"
   elif download_overseas_public "$OVERSEAS_URL_PRIMARY" && [[ -s "$OVERSEAS_LIST" ]]; then
@@ -2081,7 +2093,8 @@ iptables -C FORWARD -j VPN_FORWARD 2>/dev/null || \
 NODE_JSON_FILE="/etc/vpn-agent/bootstrap-node.json"
 [[ ! -f "$NODE_JSON_FILE" ]] && exit 0
 
-INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE")"
+INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE" 2>/dev/null || echo 0)"
+[[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || INSTANCE_COUNT=0
 
 for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   INST_EN="$(jq -r ".instances[$i].enabled // true" "$NODE_JSON_FILE")"
@@ -2115,7 +2128,8 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
   esac
 done
 
-TUNNEL_COUNT="$(jq '.tunnels | length' "$NODE_JSON_FILE")"
+TUNNEL_COUNT="$(jq '.tunnels | length' "$NODE_JSON_FILE" 2>/dev/null || echo 0)"
+[[ "$TUNNEL_COUNT" =~ ^[0-9]+$ ]] || TUNNEL_COUNT=0
 for t in $(seq 0 $((TUNNEL_COUNT - 1))); do
   PEER_ID="$(jq -r ".tunnels[$t].peer_node_id" "$NODE_JSON_FILE")"
   iptables -A VPN_FORWARD -i "wg-${PEER_ID}" -j ACCEPT

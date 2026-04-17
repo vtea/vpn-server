@@ -1116,16 +1116,18 @@ install_go() {
   while [[ "$INSTALLED" -eq 0 ]]; do
     local u=""
     for u in "${GO_URLS[@]}"; do
-      if curl -fsSL --connect-timeout 60 -o /tmp/go.tar.gz "$u" && [[ -s /tmp/go.tar.gz ]]; then
+      local go_tgz
+      go_tgz="$(mktemp)"
+      if curl -fsSL --connect-timeout 60 -o "$go_tgz" "$u" && [[ -s "$go_tgz" ]]; then
         rm -rf /usr/local/go
-        if tar -C /usr/local -xzf /tmp/go.tar.gz; then
+        if tar -C /usr/local -xzf "$go_tgz"; then
           INSTALLED=1
-          rm -f /tmp/go.tar.gz
+          rm -f "$go_tgz"
           break
         fi
-        rm -f /tmp/go.tar.gz
+        rm -f "$go_tgz"
       fi
-      rm -f /tmp/go.tar.gz
+      rm -f "$go_tgz"
     done
     [[ "$INSTALLED" -eq 1 ]] && break
     if ! prompt_network_proxy_retry "curl 下载 Go（go.dev / dl.google.com）"; then
@@ -1185,37 +1187,41 @@ install_node() {
   # 方式 1: nodesource
   case "$PKG" in
     apt)
-      local ns_ok=0
+      local ns_ok=0 ns_sh=""
       while true; do
-        if curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/ns.sh 2>/dev/null && [[ -s /tmp/ns.sh ]]; then
+        ns_sh="$(mktemp)"
+        if curl -fsSL https://deb.nodesource.com/setup_20.x -o "$ns_sh" 2>/dev/null && [[ -s "$ns_sh" ]]; then
           ns_ok=1
           break
         fi
-        rm -f /tmp/ns.sh
+        rm -f "$ns_sh"
+        ns_sh=""
         if ! prompt_network_proxy_retry "curl NodeSource 脚本 (deb.nodesource.com)"; then
           break
         fi
       done
-      if [[ "$ns_ok" -eq 1 ]]; then
-        bash /tmp/ns.sh 2>/dev/null && apt-get install -y -qq nodejs 2>/dev/null && INSTALLED=1
-        rm -f /tmp/ns.sh
+      if [[ "$ns_ok" -eq 1 && -n "$ns_sh" ]]; then
+        bash "$ns_sh" 2>/dev/null && apt-get install -y -qq nodejs 2>/dev/null && INSTALLED=1
+        rm -f "$ns_sh"
       fi
       ;;
     dnf|yum)
-      local ns_ok=0
+      local ns_ok=0 ns_sh=""
       while true; do
-        if curl -fsSL https://rpm.nodesource.com/setup_20.x -o /tmp/ns.sh 2>/dev/null && [[ -s /tmp/ns.sh ]]; then
+        ns_sh="$(mktemp)"
+        if curl -fsSL https://rpm.nodesource.com/setup_20.x -o "$ns_sh" 2>/dev/null && [[ -s "$ns_sh" ]]; then
           ns_ok=1
           break
         fi
-        rm -f /tmp/ns.sh
+        rm -f "$ns_sh"
+        ns_sh=""
         if ! prompt_network_proxy_retry "curl NodeSource 脚本 (rpm.nodesource.com)"; then
           break
         fi
       done
-      if [[ "$ns_ok" -eq 1 ]]; then
-        bash /tmp/ns.sh 2>/dev/null && $PKG install -y nodejs 2>/dev/null && INSTALLED=1
-        rm -f /tmp/ns.sh
+      if [[ "$ns_ok" -eq 1 && -n "$ns_sh" ]]; then
+        bash "$ns_sh" 2>/dev/null && $PKG install -y nodejs 2>/dev/null && INSTALLED=1
+        rm -f "$ns_sh"
       fi
       ;;
   esac
@@ -1227,13 +1233,15 @@ install_node() {
     [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && NODE_ARCH="arm64"
     local NODE_PKG="node-v20.18.0-linux-${NODE_ARCH}"
     while true; do
-      if curl -fsSL --connect-timeout 60 -o /tmp/node.tar.xz "https://nodejs.org/dist/v20.18.0/${NODE_PKG}.tar.xz" && [[ -s /tmp/node.tar.xz ]]; then
-        tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
-        rm -f /tmp/node.tar.xz
+      local node_xz
+      node_xz="$(mktemp)"
+      if curl -fsSL --connect-timeout 60 -o "$node_xz" "https://nodejs.org/dist/v20.18.0/${NODE_PKG}.tar.xz" && [[ -s "$node_xz" ]]; then
+        tar -xJf "$node_xz" -C /usr/local --strip-components=1
+        rm -f "$node_xz"
         INSTALLED=1
         break
       fi
-      rm -f /tmp/node.tar.xz
+      rm -f "$node_xz"
       if ! prompt_network_proxy_retry "curl Node.js 官方二进制 (nodejs.org)"; then
         break
       fi
@@ -1509,12 +1517,14 @@ UNIT
   while [[ $i -lt 15 ]]; do
     if curl -sf http://127.0.0.1:${API_PORT}/api/health >/dev/null 2>&1; then
       ok "API 运行中 :${API_PORT}"
-      if curl -sfSL -o /tmp/.node-setup-probe "http://127.0.0.1:${API_PORT}/api/node-setup.sh" \
-        && [[ -s /tmp/.node-setup-probe ]]; then
-        rm -f /tmp/.node-setup-probe
+      local _probe
+      _probe="$(mktemp)"
+      if curl -sfSL -o "$_probe" "http://127.0.0.1:${API_PORT}/api/node-setup.sh" \
+        && [[ -s "$_probe" ]]; then
+        rm -f "$_probe"
         ok "node-setup.sh endpoint healthy"
       else
-        rm -f /tmp/.node-setup-probe
+        rm -f "$_probe"
         err "GET /api/node-setup.sh 不可用，部署终止"
         journalctl -u vpn-api --no-pager -n 50 || true
         exit 1
@@ -1525,12 +1535,13 @@ UNIT
         aarch64|arm64) arch=arm64 ;;
         *) arch=amd64; warn "unknown uname -m=$(uname -m), probing amd64 download" ;;
       esac
-      if curl -sfSL -o /tmp/.vpn-agent-probe "http://127.0.0.1:${API_PORT}/api/downloads/vpn-agent-linux-${arch}" \
-        && [[ -s /tmp/.vpn-agent-probe ]]; then
-        rm -f /tmp/.vpn-agent-probe
+      _probe="$(mktemp)"
+      if curl -sfSL -o "$_probe" "http://127.0.0.1:${API_PORT}/api/downloads/vpn-agent-linux-${arch}" \
+        && [[ -s "$_probe" ]]; then
+        rm -f "$_probe"
         ok "节点可拉取 vpn-agent (vpn-agent-linux-${arch})"
       else
-        rm -f /tmp/.vpn-agent-probe
+        rm -f "$_probe"
         warn "GET /api/downloads/vpn-agent-linux-${arch} 不可用，请确认 /usr/local/bin/vpn-agent-linux-* 已部署"
       fi
       return
