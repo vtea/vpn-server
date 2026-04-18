@@ -874,12 +874,12 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	}
 	var req createUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体须为 JSON，且包含必填字段 username（VPN 用户名）", "detail": err.Error()})
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写 VPN 用户名（username）"})
 		return
 	}
 
@@ -898,7 +898,7 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	}
 
 	if _, err := h.firstVPNUserByUsernameCI(req.Username); err == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username already exists"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该 VPN 用户名已存在，请换一个名称，或在列表中编辑已有用户", "code": "username_exists"})
 		return
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -910,7 +910,12 @@ func (h *Handler) CreateUser(c *gin.Context) {
 		u.GroupName = "default"
 	}
 	if err := h.db.Create(&u).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		em := err.Error()
+		if strings.Contains(strings.ToLower(em), "unique") || strings.Contains(strings.ToLower(em), "duplicate") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "该 VPN 用户名已存在（数据库唯一约束）", "code": "username_exists"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": em})
 		return
 	}
 	h.audit(c, "create_user", fmt.Sprintf("user:%s", u.Username), fmt.Sprintf("group=%s", u.GroupName))

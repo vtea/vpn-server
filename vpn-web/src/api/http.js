@@ -118,6 +118,10 @@ http.interceptors.response.use(
         msg ||
           '接口不存在 (404)。若管理台在 56701：请确认 vpn-api 已启动于 56700，且 API 地址勿填成页面地址；可到「API 连接」清空或设为 http://127.0.0.1:56700'
       )
+    } else if (status === 400) {
+      ElMessage.error(
+        msg || '请求参数不正确（请检查必填项是否与后端要求一致）'
+      )
     } else if (status >= 500) {
       const raw = err.response?.data
       const detail =

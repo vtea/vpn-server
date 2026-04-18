@@ -105,11 +105,15 @@
     <!-- 添加用户 -->
     <el-dialog v-model="showAdd" title="添加用户" width="min(450px, 92vw)" destroy-on-close class="user-form-dialog">
       <el-form :model="addForm" label-width="80px">
-        <el-form-item label="用户名">
+        <el-form-item label="用户名" :required="isSuperAdminSession()">
           <el-input
             v-model="addForm.username"
             :readonly="!isSuperAdminSession()"
-            placeholder="与登录名一致"
+            :placeholder="
+              isSuperAdminSession()
+                ? '必填：VPN 登录名（唯一，用于证书 CN；勿与「姓名」混淆）'
+                : '与登录名一致'
+            "
           />
           <el-text v-if="!isSuperAdminSession()" type="info" size="small" style="display: block; margin-top: 4px">
             非超级管理员仅可创建与当前登录名一致的 VPN 用户，用于后续在本账户下签发证书。
@@ -394,9 +398,22 @@ const openAddDialog = () => {
 }
 
 const doAdd = async () => {
+  const name = String(addForm.username ?? '').trim()
+  if (!name) {
+    ElMessage.warning(
+      isSuperAdminSession()
+        ? '请填写「用户名」：VPN 账户名（必填、唯一）。「姓名」仅为显示用。'
+        : '用户名为空，请刷新页面后重试或联系管理员。'
+    )
+    return
+  }
   addLoading.value = true
   try {
-    await http.post('/api/users', addForm)
+    await http.post('/api/users', {
+      username: name,
+      display_name: String(addForm.display_name ?? '').trim(),
+      group_name: String(addForm.group_name ?? '').trim() || 'default'
+    })
     ElMessage.success('创建成功')
     showAdd.value = false
     Object.assign(addForm, { username: '', display_name: '', group_name: '' })
