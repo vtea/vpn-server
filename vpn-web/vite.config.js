@@ -1,5 +1,8 @@
 ﻿import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 /**
  * Vite 会校验 Host；经公网域名、内网穿透等访问 dev/preview 时需放行。
@@ -24,8 +27,15 @@ const apiProxy = {
   }
 }
 
+/** Element Plus 按需：组件样式与 v-loading 指令；ElMessage 等仍可在源码中显式 import。 */
+const elementPlusResolver = ElementPlusResolver({ importStyle: 'css', directives: true })
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    AutoImport({ resolvers: [elementPlusResolver] }),
+    Components({ resolvers: [elementPlusResolver] })
+  ],
   /**
    * 拆分 element-plus / d3 / vue 生态，利于缓存与并行下载（首屏仍可能拉取含业务的主 chunk）。
    */
@@ -48,7 +58,9 @@ export default defineConfig({
       }
     },
     /** element-plus 单包仍可能 >700kB，属预期 */
-    chunkSizeWarningLimit: 1200
+    chunkSizeWarningLimit: 1200,
+    /** Vite 默认对入口依赖做 modulepreload；按需组件后主包变小，一般无需手工再挂一堆 link。 */
+    modulePreload: { polyfill: false }
   },
   /**
    * vite-ssg：nested 产出 network-segments/index.html，便于静态服务器按目录访问 /network-segments/
@@ -73,5 +85,11 @@ export default defineConfig({
     host: '0.0.0.0',
     allowedHosts,
     proxy: apiProxy
+  },
+  /**
+   * vite-ssg 在 Node 中执行 SSR 产物；按需引入会带上 theme-chalk/*.css，须让 Vite 参与打包以消除裸 .css 导入。
+   */
+  ssr: {
+    noExternal: ['element-plus']
   }
 })

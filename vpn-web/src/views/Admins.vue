@@ -219,7 +219,7 @@ const loadNodeOptions = async () => {
   if (!canManageAdmins.value) return
   nodeOptsLoading.value = true
   try {
-    const { data } = await http.get('/api/nodes')
+    const { data } = await http.get('/api/nodes', { meta: { suppress403: true } })
     nodeOptions.value = (data.items || []).map((item) => item.node).filter(Boolean)
   } catch {
     nodeOptions.value = []

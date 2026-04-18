@@ -1,5 +1,8 @@
 ﻿import { ElMessage } from 'element-plus'
-import { isSuperAdminSession } from '../utils/adminSession'
+import {
+  isSuperAdminSession,
+  hasModulePermission
+} from '../utils/adminSession'
 import { routes } from './routes'
 
 export { routes }
@@ -33,6 +36,18 @@ export function installNavigationGuards (router) {
           : '仅超级管理员可访问该页面'
       )
       return { path: '/', replace: true }
+    }
+    /** 功能模块页：无对应权限则不调起页面（避免 onMounted 里打 403） */
+    const reqMod = to.meta?.requiresModule
+    if (reqMod) {
+      const mods = Array.isArray(reqMod) ? reqMod : [reqMod]
+      const ok = mods.some(
+        (m) => typeof m === 'string' && hasModulePermission(m.trim())
+      )
+      if (!ok) {
+        ElMessage.warning('当前账号无权访问该页面')
+        return { path: '/', replace: true }
+      }
     }
     return true
   })

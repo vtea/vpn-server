@@ -147,13 +147,15 @@ import { ref, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import http from '../api/http'
-import { getAdminProfile } from '../utils/adminSession'
+import { getAdminProfile, isSuperAdminSession } from '../utils/adminSession'
 
 const PORT_MIN = 56714
 
+/** 与 JWT 优先的超管判定一致，避免仅本地 profile 缺失时误隐藏「添加」等入口 */
 const canManageSegments = computed(() => {
+  if (isSuperAdminSession()) return true
   const p = getAdminProfile()
-  return p?.role === 'admin' || p?.permissions === '*' || p?.node_scope === 'all'
+  return p?.node_scope === 'all'
 })
 
 const rows = ref([])

@@ -93,6 +93,13 @@ EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTER
 
 1. **API**：设置 `CORS_ALLOWED_ORIGINS` 为管理台页面所在源（协议+主机+端口），例如 `https://vpn.example.com`。未设置时不启用 CORS 中间件（适合同域或由 Nginx 统一反代）。
 2. **管理台**：构建前设置 `VITE_API_BASE_URL` 为 API 根地址（如 `https://api.example.com`），再执行 `npm run build`。开发时可在 `.env.local` 中配置并配合 `vite` 代理省略该变量。
+3. **请求关联**：每个 HTTP 请求会设置并回显 `X-Request-ID`（若客户端已传入则沿用）。排查 `database is locked` 等 500 时可在日志中检索该值。
+4. **子路径与 Nginx**：管理台挂在子路径或需同时反代 `/api` 与 WebSocket 时，见仓库根目录 [`docs/deployment-web.md`](../docs/deployment-web.md)。
+
+### 并发与数据库
+
+- **SQLite（默认）**：`SetMaxOpenConns(1)`，适合单进程控制面；并发写多读多时可能出现 `database is locked`，表现为接口 500（请结合 `X-Request-ID` 查日志）。
+- **PostgreSQL**：设置 `DB_DRIVER=postgres`，`DB_PATH` 为 Postgres DSN（详见 `internal/config` 与环境变量约定），便于更高并发与多实例前迁移；迁移需自行完成数据导入与连接池参数调优。
 
 默认管理员：`admin` / `admin123`
 

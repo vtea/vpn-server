@@ -195,7 +195,7 @@
               {{ getStatusInfo('cert', row.cert_status).label }}
             </el-tag>
           </div>
-          <div class="record-card__actions">
+          <div class="record-card__actions grant-card__actions">
             <el-button
               size="small"
               plain
@@ -430,7 +430,8 @@ const openGrants = async (user) => {
   showGrants.value = true
   const [g, n] = await Promise.all([
     http.get(`/api/users/${user.id}/grants`),
-    http.get('/api/nodes'),
+    /** GET /api/grantable-nodes：仅需 users 模块，且路径不与 /api/users/:id 冲突 */
+    http.get('/api/grantable-nodes'),
   ])
   grants.value = g.data.items || []
   const insts = []
@@ -625,6 +626,22 @@ onMounted(() => void loadUsers().catch(() => {}))
 .grant-create-btn {
   flex-shrink: 0;
   margin-left: auto;
+}
+
+/** 授权卡片内四个操作按钮单行排列；窄屏可横向滚动 */
+.grant-dialog :deep(.dialog-record-stack) {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+}
+.grant-dialog :deep(.grant-card__actions) {
+  flex-wrap: nowrap;
+  gap: 6px;
+  justify-content: flex-start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+.grant-dialog :deep(.grant-card__actions .el-button) {
+  flex-shrink: 0;
 }
 
 @media (max-width: 768px) {

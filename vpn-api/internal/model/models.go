@@ -36,28 +36,26 @@ func (a *Admin) HasPermission(module string) bool {
 	return false
 }
 
+// splitPerms 与 middleware.permissionTokens 语义一致（逗号/分号/中文逗号/纯空格分隔）。
 func splitPerms(s string) []string {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
 	}
-	var result []string
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i == len(s) || s[i] == ',' {
-			p := s[start:i]
-			for len(p) > 0 && p[0] == ' ' {
-				p = p[1:]
+	if strings.ContainsAny(s, ",;，") {
+		parts := strings.FieldsFunc(s, func(r rune) bool {
+			return r == ',' || r == ';' || r == '，'
+		})
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			t := strings.TrimSpace(p)
+			if t != "" {
+				out = append(out, t)
 			}
-			for len(p) > 0 && p[len(p)-1] == ' ' {
-				p = p[:len(p)-1]
-			}
-			if p != "" {
-				result = append(result, p)
-			}
-			start = i + 1
 		}
+		return out
 	}
-	return result
+	return strings.Fields(s)
 }
 
 type Node struct {

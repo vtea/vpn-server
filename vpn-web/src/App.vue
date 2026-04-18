@@ -151,7 +151,8 @@ import {
   getSessionToken,
   setAdminProfile,
   clearAuthSession,
-  isSuperAdminSession
+  isSuperAdminSession,
+  hasModulePermission
 } from './utils/adminSession'
 
 const route = useRoute()
@@ -262,13 +263,7 @@ const roleTagType = computed(() => {
   return 'info'
 })
 
-const hasPerm = (module) => {
-  const info = adminInfo.value
-  if (info.role === 'admin') return true
-  if (info.perms === '*') return true
-  if (!info.perms) return false
-  return info.perms.split(',').map(s => s.trim()).includes(module)
-}
+const hasPerm = (module) => hasModulePermission(module)
 
 /** 侧栏「API 连接」仅超级管理员可见（与后端 AdminIsUnrestricted 一致） */
 const isSuperAdmin = computed(() => isSuperAdminSession())
@@ -301,7 +296,7 @@ onMounted(async () => {
   const token = getSessionToken()
   if (!token) return
   try {
-    // 刷新时拉取资料：404（账号已删/库不一致）勿走全局 404 提示，改为清会话并回登录页
+    // 刷新时拉取资料：401（账号已删）由 http 拦截器清会话；404 为兼容旧后端仍本地处理
     const res = await http.get('/api/me', { meta: { suppress404: true } })
     setAdminProfile(res.data?.admin || null)
   } catch (err) {
@@ -313,7 +308,7 @@ onMounted(async () => {
         ElMessage.warning('登录状态无效（账号不存在或已变更），请重新登录')
       }
     }
-    // 401 等仍由 http 拦截器统一处理
+    // 401 由 http.js 统一提示并回登录页
   }
 })
 

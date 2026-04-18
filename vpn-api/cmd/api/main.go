@@ -62,10 +62,11 @@ func main() {
 	}
 	r := gin.Default()
 	r.GET("/favicon.ico", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	r.Use(middleware.RequestID())
 	r.Use(func(c *gin.Context) {
 		c.Next()
 		if c.Writer.Status() >= 500 {
-			log.Printf("[http] %s %s -> %d", c.Request.Method, c.Request.URL.Path, c.Writer.Status())
+			log.Printf("[http] request_id=%s %s %s -> %d", middleware.GetRequestID(c), c.Request.Method, c.Request.URL.Path, c.Writer.Status())
 		}
 	})
 	// 直连监听时不信任任何代理，消除 Gin 关于「信任全部代理」的启动告警；若经 Nginx/Caddy 反代，应改为 SetTrustedProxies([]string{"内网 CIDR"})
@@ -113,6 +114,11 @@ func main() {
 	secured.GET("/me", h.GetCurrentAdmin)
 	secured.POST("/me/password", h.ChangePassword)
 	secured.GET("/dashboard/stats", h.GetDashboardStats)
+	secured.GET("/dashboard/online-overview", h.GetDashboardOnlineOverview)
+
+	// 节点列表：签发授权、隧道拓扑、管理员管辖配置等均需实例/节点信息；handler 内已按 AdminNodeScope 过滤，不限于 nodes 模块。
+	nodesList := secured.Group("", middleware.RequireAnyPermission("nodes", "users", "admins", "tunnels"))
+	nodesList.GET("/nodes", h.ListNodes)
 
 	nodes := secured.Group("", middleware.RequirePermission("nodes"))
 	nodes.GET("/network-segments", h.ListNetworkSegments)
@@ -121,7 +127,6 @@ func main() {
 	nodes.PATCH("/network-segments/:id", h.PatchNetworkSegment)
 	nodes.DELETE("/network-segments/:id", h.DeleteNetworkSegment)
 
-	nodes.GET("/nodes", h.ListNodes)
 	// Register static route before param route to avoid matching "upgrade-status" as :id.
 	nodes.GET("/nodes/upgrade-status", h.ListNodeUpgradeStatus)
 	nodes.GET("/nodes/state-consistency", h.GetNodeStateConsistency)
@@ -131,6 +136,7 @@ func main() {
 	nodes.POST("/nodes/:id/delete", h.DeleteNodeWithPassword)
 	nodes.POST("/nodes/:id/rotate-bootstrap-token", h.RotateNodeBootstrapToken)
 	nodes.POST("/nodes/:id/wg-refresh", h.RefreshNodeWG)
+	nodes.POST("/nodes/:id/sync-agent-config", h.SyncNodeAgentConfig)
 	nodes.GET("/nodes/:id/status", h.GetNodeStatus)
 	nodes.GET("/nodes/:id/instances", h.ListNodeInstances)
 	nodes.POST("/nodes/:id/instances", h.CreateInstance)
@@ -144,6 +150,8 @@ func main() {
 	agentUpgrades.GET("/agent-upgrades/:id/items", h.ListAgentUpgradeTaskItems)
 
 	users := secured.Group("", middleware.RequirePermission("users"))
+	// 管辖内节点列表（与 ListNodes 相同）：独立路径，避免 /users/:id 将「visible-nodes」等误解析为用户 id。
+	users.GET("/grantable-nodes", h.ListNodes)
 	users.GET("/users", h.ListUsers)
 	users.POST("/users", h.CreateUser)
 	users.GET("/users/:id", h.GetUser)

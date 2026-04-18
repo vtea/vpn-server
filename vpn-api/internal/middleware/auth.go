@@ -74,6 +74,28 @@ func JWT(secret string) gin.HandlerFunc {
 	}
 }
 
+// permissionTokens 将 JWT/库表中的权限串拆成 token（支持逗号、分号、中文逗号及纯空格分隔，避免手工录入格式不一致导致鉴权失败）。
+func permissionTokens(permsStr string) []string {
+	s := strings.TrimSpace(permsStr)
+	if s == "" {
+		return nil
+	}
+	if strings.ContainsAny(s, ",;，") {
+		parts := strings.FieldsFunc(s, func(r rune) bool {
+			return r == ',' || r == ';' || r == '，'
+		})
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			t := strings.TrimSpace(p)
+			if t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	return strings.Fields(s)
+}
+
 func RequirePermission(module string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if JWTClaimsUnrestricted(c) {
@@ -84,8 +106,8 @@ func RequirePermission(module string) gin.HandlerFunc {
 		perms, _ := c.Get("permissions")
 		permsStr := jwtClaimString(perms)
 
-		for _, p := range strings.Split(permsStr, ",") {
-			if strings.TrimSpace(p) == module || strings.TrimSpace(p) == "*" {
+		for _, p := range permissionTokens(permsStr) {
+			if p == module || p == "*" {
 				c.Next()
 				return
 			}
@@ -110,8 +132,7 @@ func RequireAnyPermission(modules ...string) gin.HandlerFunc {
 		for _, m := range modules {
 			want[strings.TrimSpace(m)] = struct{}{}
 		}
-		for _, p := range strings.Split(permsStr, ",") {
-			p = strings.TrimSpace(p)
+		for _, p := range permissionTokens(permsStr) {
 			if p == "*" {
 				c.Next()
 				return

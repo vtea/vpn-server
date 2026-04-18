@@ -1,10 +1,8 @@
 ﻿import { ViteSSG } from 'vite-ssg'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
 import { ID_INJECTION_KEY } from 'element-plus/es/hooks/use-id/index.mjs'
 import { ZINDEX_INJECTION_KEY } from 'element-plus/es/hooks/use-z-index/index.mjs'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
-import 'element-plus/dist/index.css'
 import './assets/styles/global.scss'
 import App from './App.vue'
 import { routes } from './router/routes'
@@ -36,7 +34,6 @@ export const createApp = ViteSSG(
     }
 
     app.use(createPinia())
-    app.use(ElementPlus)
   }
 )
 

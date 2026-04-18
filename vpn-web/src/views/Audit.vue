@@ -75,6 +75,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
+import { hasModulePermission } from '../utils/adminSession'
 import { formatDate, downloadBlob } from '../utils'
 
 const viewportNarrow = ref(typeof window !== 'undefined' && window.innerWidth <= 600)
@@ -96,6 +97,7 @@ const actionFilter = ref('')
 const actionOptions = ref([])
 
 const loadLogs = async () => {
+  if (!hasModulePermission('audit')) return
   loading.value = true
   try {
     const params = { page: page.value, limit: pageSize.value }

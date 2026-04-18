@@ -232,16 +232,32 @@
     <div class="page-card mb-md node-instances-card">
       <div class="page-card-header node-instances-card__head">
         <span class="page-card-title">组网接入（模式与地址）</span>
-        <el-button
-          type="primary"
-          link
-          :loading="refreshing"
-          class="node-instances-card__refresh"
-          @click="load({ refresh: true })"
-        >
-          <el-icon><Refresh /></el-icon>
-          刷新状态
-        </el-button>
+        <div class="node-instances-card__toolbar">
+          <el-tooltip
+            content="将库中的组网接入配置下发到本节点 Agent（需在线），合并 bootstrap 并重启 vpn-routing。"
+            placement="bottom"
+          >
+            <el-button
+              type="primary"
+              plain
+              size="small"
+              :loading="syncingAgentConfig"
+              @click="syncAgentConfig"
+            >
+              同步配置
+            </el-button>
+          </el-tooltip>
+          <el-button
+            type="primary"
+            link
+            :loading="refreshing"
+            class="node-instances-card__refresh"
+            @click="load({ refresh: true })"
+          >
+            <el-icon><Refresh /></el-icon>
+            刷新状态
+          </el-button>
+        </div>
       </div>
       <el-collapse class="instance-hint-collapse mb-md">
         <el-collapse-item name="instance-hint">
@@ -564,6 +580,8 @@ const route = useRoute()
 const nodeId = route.params.id
 const loading = ref(false)
 const refreshing = ref(false)
+/** 「组网接入」标题栏「同步配置」请求中 */
+const syncingAgentConfig = ref(false)
 /** 与节点列表同源：来自 /api/nodes/upgrade-status，用于详情页 Agent 版本着色 */
 const latestAgentVersion = ref('')
 const node = ref({})
@@ -745,6 +763,24 @@ const statCards = computed(() => {
     }
   ]
 })
+
+/**
+ * 主动向本节点 Agent 下发当前库中的组网接入（update_config），需 WebSocket 在线。
+ */
+const syncAgentConfig = async () => {
+  if (!nodeId) return
+  syncingAgentConfig.value = true
+  try {
+    const res = await http.post(`/api/nodes/${nodeId}/sync-agent-config`)
+    const n = Number(res.data?.instances) || 0
+    ElMessage.success(`已下发配置（${n} 个接入实例）。节点将合并 bootstrap 并重启 vpn-routing。`)
+    await load({ refresh: true })
+  } catch {
+    // http.js 已统一处理
+  } finally {
+    syncingAgentConfig.value = false
+  }
+}
 
 const load = async ({ refresh = false } = {}) => {
   if (refresh) refreshing.value = true
@@ -963,6 +999,23 @@ const saveInstancePatch = async (inst) => {
       ElMessage.success('已保存')
     }
     await load()
+    try {
+      await ElMessageBox.confirm(
+        '配置已保存。是否立即向本节点 Agent 下发并应用（需 WebSocket 在线）？',
+        '同步配置',
+        {
+          confirmButtonText: '立即同步',
+          cancelButtonText: '放弃同步',
+          type: 'info',
+          distinguishCancelAndClose: true
+        }
+      )
+      await syncAgentConfig()
+    } catch (e) {
+      if (e === 'cancel' || e === 'close') {
+        ElMessage.info('已跳过。可稍后在「组网接入」标题栏点击「同步配置」。')
+      }
+    }
   } catch {
     // http.js 已统一处理
   }
@@ -1059,8 +1112,15 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 8px;
 }
-.node-instances-card__refresh {
+.node-instances-card__toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   margin-left: auto;
+  flex-wrap: wrap;
+}
+.node-instances-card__refresh {
+  margin-left: 0;
 }
 .instance-hint-collapse {
   border: 1px solid var(--border-light);

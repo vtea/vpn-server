@@ -124,6 +124,23 @@ export function getSessionAdminUsername() {
 }
 
 /**
+ * 与 vpn-api middleware.permissionTokens 一致：逗号/分号/中文逗号/空格分隔的权限串。
+ * @param {string} perms
+ * @returns {string[]}
+ */
+function permissionTokensFromString(perms) {
+  const s = typeof perms === 'string' ? perms.trim() : ''
+  if (!s) return []
+  if (/[,;，]/.test(s)) {
+    return s
+      .split(/[,;，]+/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+  }
+  return s.split(/\s+/).filter(Boolean)
+}
+
+/**
  * 会话是否对某功能模块有权（与 `/me` 及 JWT 的 `permissions` / `perms` 一致；超管视为全模块）。
  * @param {string} module
  * @returns {boolean}
@@ -149,8 +166,17 @@ export function hasModulePermission(module) {
   const { role, perms } = normalizeRolePerms(info)
   if (role === 'admin' || perms === '*') return true
   if (!perms) return false
-  return perms
-    .split(',')
-    .map((s) => s.trim())
-    .includes(mod)
+  return permissionTokensFromString(perms).includes(mod)
+}
+
+/**
+ * 是否具备任一模块权限（与 `/me`、JWT 一致；超管视为全部具备）。
+ * @param {string[]} modules
+ * @returns {boolean}
+ */
+export function hasAnyModulePermission(modules) {
+  if (!Array.isArray(modules) || modules.length === 0) return false
+  return modules.some((m) =>
+    hasModulePermission(typeof m === 'string' ? m.trim() : '')
+  )
 }

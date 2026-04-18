@@ -28,7 +28,7 @@
         <el-text type="info" size="small">共 {{ filteredRows.length }} 个节点</el-text>
       </div>
 
-      <div v-loading="loading" class="record-grid">
+      <div v-loading="loading" class="record-grid record-grid--nodes">
         <div
           v-for="row in filteredRows"
           :key="row.node.id"
@@ -247,10 +247,12 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, EditPen } from '@element-plus/icons-vue'
 import http from '../api/http'
-import { getAdminProfile } from '../utils/adminSession'
+import { getAdminProfile, isSuperAdminSession } from '../utils/adminSession'
 import { getStatusInfo, recordCardToneClass, recordCardToneFromTagType } from '../utils'
 
 const rows = ref([])
+/** 列表接口 403 时用于空状态文案，避免显示「暂无节点」误导 */
+const nodesListForbidden = ref(false)
 const loading = ref(false)
 const search = ref('')
 const statusFilter = ref('')
@@ -306,13 +308,20 @@ const agentVersionTooltip = (node) => {
   return [verLine, arch, lat].filter(Boolean).join('\n')
 }
 
-/** 仅超级管理员（全局）可新建节点、发起全量 Agent 升级 */
+/**
+ * 仅全局可新建节点、发起全量 Agent 升级。
+ * 须与 JWT 优先的 `isSuperAdminSession` 对齐：勿仅依赖本地 profile（丢失时超管会误隐藏按钮）。
+ */
 const canManageAllNodes = computed(() => {
+  if (isSuperAdminSession()) return true
   const p = getAdminProfile()
-  return p?.role === 'admin' || p?.permissions === '*' || p?.node_scope === 'all'
+  return p?.node_scope === 'all'
 })
 
 const nodesEmptyDescription = computed(() => {
+  if (nodesListForbidden.value) {
+    return '当前账号无权查看节点列表（需具备「节点管理」模块权限）'
+  }
   const p = getAdminProfile()
   if (p?.node_scope === 'scoped' && Array.isArray(p.node_ids) && p.node_ids.length === 0) {
     return '当前账号未分配任何可管理节点，请联系超级管理员在「管理员管理」中配置节点范围'
@@ -388,8 +397,15 @@ const loadSegments = async () => {
 
 const loadNodes = async () => {
   loading.value = true
+  nodesListForbidden.value = false
   try {
     rows.value = (await http.get('/api/nodes')).data.items || []
+  } catch (e) {
+    const st = e.response?.status
+    if (st === 403) {
+      nodesListForbidden.value = true
+      rows.value = []
+    }
   } finally {
     loading.value = false
   }
@@ -725,9 +741,13 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 节点列表专用：同排等高、中部可伸展 */
-.record-grid .node-list-card.record-card {
-  height: 100%;
+/* 节点列表：Grid align-items:start + 卡片 height:auto，避免悬停展开时同行卡片被拉高、标签区 flex 吃满留白 */
+.record-grid--nodes {
+  align-items: start;
+}
+
+.record-grid--nodes .node-list-card.record-card {
+  height: auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -756,7 +776,7 @@ onUnmounted(() => {
 }
 
 .node-list-card .record-card__tags--node-list {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 36px;
   min-width: 0;
   display: flex;
