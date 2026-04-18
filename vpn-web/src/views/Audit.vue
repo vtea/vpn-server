@@ -26,7 +26,12 @@
             style="width: 160px"
             @change="onSearch"
           >
-            <el-option v-for="a in actionOptions" :key="a" :label="a" :value="a" />
+            <el-option
+              v-for="a in actionOptions"
+              :key="a"
+              :label="auditActionLabelZh(a)"
+              :value="a"
+            />
           </el-select>
         </div>
         <el-text type="info" size="small">共 {{ total }} 条记录</el-text>
@@ -39,16 +44,18 @@
               <div class="record-card__title">{{ formatDate(row.created_at) }}</div>
               <div class="record-card__meta">{{ row.admin_user || '—' }}</div>
             </div>
-            <el-tag size="small" type="info">{{ row.action }}</el-tag>
+            <el-tag size="small" type="info" :title="row.action">
+              {{ auditActionLabelZh(row.action) }}
+            </el-tag>
           </div>
           <div class="record-card__fields">
             <div class="kv-row">
               <span class="kv-label">目标</span>
-              <span class="kv-value">{{ row.target || '—' }}</span>
+              <span class="kv-value">{{ auditTargetDisplayZh(row.target) }}</span>
             </div>
             <div class="kv-row">
               <span class="kv-label">详情</span>
-              <span class="kv-value">{{ row.detail || '—' }}</span>
+              <span class="kv-value">{{ auditDetailDisplayZh(row.detail) }}</span>
             </div>
           </div>
         </div>
@@ -77,6 +84,11 @@ import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { hasModulePermission } from '../utils/adminSession'
 import { formatDate, downloadBlob } from '../utils'
+import {
+  auditActionLabelZh,
+  auditTargetDisplayZh,
+  auditDetailDisplayZh,
+} from '../utils/auditDisplay'
 
 const viewportNarrow = ref(typeof window !== 'undefined' && window.innerWidth <= 600)
 const onResizeAudit = () => {
@@ -116,9 +128,19 @@ const onSearch = () => { page.value = 1; loadLogs() }
 const onSizeChange = (size) => { pageSize.value = size; page.value = 1; loadLogs() }
 
 const exportCSV = () => {
-  const header = 'time,admin,action,target,detail\n'
+  const header = '时间,操作人,操作代码,操作类型,目标,详情\n'
   const body = rows.value
-    .map(r => `"${r.created_at}","${r.admin_user}","${r.action}","${r.target || ''}","${r.detail || ''}"`)
+    .map((r) => {
+      const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`
+      return [
+        esc(r.created_at),
+        esc(r.admin_user),
+        esc(r.action),
+        esc(auditActionLabelZh(r.action)),
+        esc(auditTargetDisplayZh(r.target)),
+        esc(auditDetailDisplayZh(r.detail)),
+      ].join(',')
+    })
     .join('\n')
   downloadBlob(header + body, 'audit-logs.csv')
 }

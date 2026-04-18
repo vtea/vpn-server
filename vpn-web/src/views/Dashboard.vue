@@ -28,10 +28,6 @@
           <div class="stat-content">
             <div class="stat-value">{{ stats[item.key] }}</div>
             <div class="stat-label">{{ item.key === 'users' ? userStatLabel : item.label }}</div>
-            <div v-if="item.key === 'users' && userStatHint" class="stat-hint">{{ userStatHint }}</div>
-            <div v-if="item.key === 'onlineUsers' && showOnlineOverviewStatCard" class="stat-hint">
-              点击查看在线节点上的有效授权
-            </div>
           </div>
         </div>
       </el-col>
@@ -244,14 +240,6 @@ const userStatLabel = computed(() => {
   const v = dashboardUserStats.users_visible
   if (t != null && v != null && t !== v) return '可见用户'
   return '用户总数'
-})
-
-/** 当可见数小于全库总数时展示副说明 */
-const userStatHint = computed(() => {
-  const t = dashboardUserStats.users_total
-  const v = dashboardUserStats.users_visible
-  if (t == null || v == null || t === v) return ''
-  return `全平台共 ${t} 名`
 })
 
 /** 解析接口返回的在线人数（兼容 number / 字符串） */

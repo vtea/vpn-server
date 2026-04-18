@@ -628,20 +628,77 @@ onMounted(() => void loadUsers().catch(() => {}))
   margin-left: auto;
 }
 
-/** 授权卡片内四个操作按钮单行排列；窄屏可横向滚动 */
+/** 授权弹窗内证书卡片：减轻玻璃/色光阴影，避免在 dialog 内过重 */
+.grant-dialog :deep(.dialog-record-stack .record-card) {
+  background-image: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  transition:
+    border-color var(--transition-normal, 0.2s ease),
+    box-shadow var(--transition-normal, 0.2s ease);
+}
+.grant-dialog :deep(.dialog-record-stack .record-card:hover) {
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  transform: none;
+}
+.grant-dialog :deep(.dialog-record-stack .record-card::after) {
+  opacity: 0.2;
+}
+.grant-dialog :deep(.dialog-record-stack .record-card:hover::after) {
+  opacity: 0.26;
+}
+.grant-dialog :deep(.dialog-record-stack .record-card.record-card--tone-success) {
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 0 0 1px rgba(167, 243, 208, 0.55);
+}
+.grant-dialog :deep(.dialog-record-stack .record-card.record-card--tone-success:hover) {
+  box-shadow:
+    0 2px 8px rgba(15, 23, 42, 0.08),
+    0 0 0 1px rgba(110, 231, 183, 0.65);
+}
+.grant-dialog :deep(.dialog-record-stack .record-card.record-card--tone-warning) {
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 0 0 1px rgba(253, 230, 138, 0.65);
+}
+.grant-dialog :deep(.dialog-record-stack .record-card.record-card--tone-danger) {
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 0 0 1px rgba(252, 165, 165, 0.55);
+}
+.grant-dialog :deep(.dialog-record-stack .record-card.record-card--tone-info),
+.grant-dialog :deep(.dialog-record-stack .record-card.record-card--tone-muted) {
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 0 0 1px rgba(203, 213, 225, 0.55);
+}
+
+/** 授权卡片：四按钮单行均分，覆盖全局 .record-card__actions 的 flex-wrap:wrap */
 .grant-dialog :deep(.dialog-record-stack) {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
 }
-.grant-dialog :deep(.grant-card__actions) {
-  flex-wrap: nowrap;
-  gap: 6px;
-  justify-content: flex-start;
+.grant-dialog :deep(.record-card__actions.grant-card__actions) {
+  flex-wrap: nowrap !important;
+  justify-content: space-between;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
 }
-.grant-dialog :deep(.grant-card__actions .el-button) {
-  flex-shrink: 0;
+.grant-dialog :deep(.record-card__actions.grant-card__actions .el-button) {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-inline: 0 !important;
+  padding-inline: 6px;
+  white-space: nowrap;
+}
+.grant-dialog :deep(.record-card__actions.grant-card__actions .el-button + .el-button) {
+  margin-left: 0 !important;
 }
 
 @media (max-width: 768px) {
