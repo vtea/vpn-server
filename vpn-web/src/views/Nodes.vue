@@ -106,7 +106,14 @@
             <el-text v-else type="info" size="small">暂无已启用接入</el-text>
           </div>
           <div class="record-card__actions">
-            <el-button size="small" plain @click="refreshWG(row.node)">刷新WG</el-button>
+            <el-button
+              size="small"
+              plain
+              :loading="wgRefreshLoadingId === row.node.id"
+              @click="refreshWG(row.node)"
+            >
+              刷新WG
+            </el-button>
             <el-button size="small" type="primary" plain @click="$router.push(`/nodes/${row.node.id}`)">
               <el-icon><EditPen /></el-icon> 编辑
             </el-button>
@@ -247,7 +254,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElLoading, ElMessage, ElNotification } from 'element-plus'
 import { Search, EditPen, Plus, Delete } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { getAdminProfile, isSuperAdminSession } from '../utils/adminSession'
@@ -284,6 +291,8 @@ const upgradeForm = reactive({
   canary_node_id: ''
 })
 const upgradeCandidates = ref({})
+/** 正在执行「刷新WG」的节点 id，用于按钮 loading */
+const wgRefreshLoadingId = ref('')
 
 /**
  * 运行中任务仅在结束时写入 success_count；进行中按各节点子项聚合，避免「成功 0/5」与卡片已显示成功不一致。
@@ -529,25 +538,79 @@ const confirmDelete = async () => {
   }
 }
 
+/**
+ * 解析「刷新 WG」请求失败时的展示文案（与拦截器 silent 配合，避免无提示）。
+ * @param {unknown} e - axios 错误对象
+ * @returns {string}
+ */
+const wgRefreshErrorText = (e) => {
+  const st = e?.response?.status
+  const data = e?.response?.data
+  const errStr =
+    data && typeof data === 'object' && typeof data.error === 'string'
+      ? data.error
+      : typeof data === 'string'
+        ? data
+        : ''
+  if (errStr) return errStr
+  if (st) return `请求失败（HTTP ${st}）`
+  if (e?.code === 'ECONNABORTED' || String(e?.message || '').includes('timeout')) {
+    return '请求超时，请确认 vpn-api 可达，且「API 连接」未误填为页面端口'
+  }
+  return '无法连接 API 或请求被中断，请检查网络与 API 地址'
+}
+
+/**
+ * 向在线 Agent 下发 WireGuard 快照（与节点详情中的隧道配置一致）。
+ * 使用全屏 Loading + 右上角通知，避免仅依赖 ElMessage 时被样式/层级遮挡或静默失败。
+ */
 const refreshWG = async (node) => {
   if (!node?.id) return
+  const id = String(node.id)
+  wgRefreshLoadingId.value = id
+  /** @type {import('element-plus').LoadingInstance | null} */
+  let loadingInst = null
   try {
-    const res = await http.post(`/api/nodes/${node.id}/wg-refresh`)
-    const invalid = Number(res.data?.invalid) || 0
-    const total = Number(res.data?.total_tunnel) || 0
-    if (invalid > 0) {
-      ElMessage.warning(
-        `已下发 WireGuard 配置刷新。共 ${total} 条隧道，其中 ${invalid} 条配置校验未通过（请在节点详情「相关隧道」中查看状态并修正）。`
-      )
-    } else {
-      ElMessage.success(
-        total > 0
-          ? `已下发 WireGuard 配置刷新（${total} 条隧道，配置校验均通过）。`
-          : '已下发 WireGuard 配置刷新（当前无隧道条目）。'
-      )
+    loadingInst = ElLoading.service({
+      lock: true,
+      text: '正在下发 WireGuard 配置…',
+      background: 'rgba(0, 0, 0, 0.35)'
+    })
+    const res = await http.post(`/api/nodes/${id}/wg-refresh`, {}, { meta: { silentGlobalError: true } })
+    const data = res?.data && typeof res.data === 'object' ? res.data : {}
+    const invalid = Number(data.invalid) || 0
+    const total = Number(data.total_tunnel) || 0
+    const base =
+      invalid > 0
+        ? `共 ${total} 条隧道，其中 ${invalid} 条配置校验未通过，请到节点详情「相关隧道」查看并修正。`
+        : total > 0
+          ? `已向 Agent 下发配置（${total} 条隧道，校验均通过）。`
+          : '已向 Agent 下发配置（当前无隧道条目）。'
+    const msg =
+      data.delivery === 'queued'
+        ? `${base} 控制面已先返回；配置正通过 WebSocket 在后台下发至节点。`
+        : base
+    ElNotification({
+      title: invalid > 0 ? 'WireGuard：已下发（有告警）' : 'WireGuard：已下发',
+      message: msg,
+      type: invalid > 0 ? 'warning' : 'success',
+      duration: 10000,
+      position: 'top-right'
+    })
+  } catch (e) {
+    if (e?.response?.status === 401) {
+      return
     }
-  } catch {
-    // http.js 已统一处理
+    ElNotification({
+      title: 'WireGuard 刷新失败',
+      message: wgRefreshErrorText(e),
+      type: 'error',
+      duration: 12000,
+      position: 'top-right'
+    })
+  } finally {
+    loadingInst?.close()
+    wgRefreshLoadingId.value = ''
   }
 }
 
@@ -784,6 +847,15 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
+/*
+ * 全局 .record-card:hover 使用 translateY(-2px)，卡片上移后指针相对落在卡片外，:hover 丢失，
+ * 悬停展开的操作区立刻收回且 pointer-events 变回 none →「刷新WG」等按钮无法点击、脚本也无从执行。
+ * 节点列表卡片保留阴影反馈，取消位移。
+ */
+.record-grid--nodes .node-list-card.record-card:hover {
+  transform: none;
+}
+
 .node-list-card .record-card__head {
   flex-shrink: 0;
 }
@@ -831,7 +903,8 @@ onUnmounted(() => {
     opacity 0.22s ease,
     padding-top 0.22s ease,
     border-color 0.2s ease;
-  pointer-events: none;
+  /* 与全局卡片 hover 位移修复配合：展开后需始终可点，勿用 none 以免悬停抖动时整区失效 */
+  pointer-events: auto;
 }
 
 .node-list-card:hover .record-card__actions,
@@ -841,7 +914,6 @@ onUnmounted(() => {
   margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid var(--glass-edge);
-  pointer-events: auto;
 }
 
 @media (hover: none), (max-width: 768px) {
@@ -851,7 +923,6 @@ onUnmounted(() => {
     margin-top: auto;
     padding-top: 12px;
     border-top: 1px solid var(--glass-edge);
-    pointer-events: auto;
   }
 }
 

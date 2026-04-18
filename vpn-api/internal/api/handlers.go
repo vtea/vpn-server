@@ -189,6 +189,17 @@ func (h *Handler) pushWireGuardRefreshToOnlineNodes(nodeIDs []string, reason str
 	}
 }
 
+// pushWireGuardRefreshForInstanceMesh 在实例创建或影响分流/子网的补丁后，刷新本节点及隧道对端的 WG 快照。
+// 否则策略路由已指向 wg-*，但 AllowedIPs 仍缺 0.0.0.0/0 时，经出口中继的公网流量无法在入口侧选路封装。
+func (h *Handler) pushWireGuardRefreshForInstanceMesh(nodeID string, reason string) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+	ids := append([]string{nodeID}, service.MeshNeighborNodeIDs(h.db, nodeID)...)
+	h.pushWireGuardRefreshToOnlineNodes(ids, reason)
+}
+
 func (h *Handler) nodeRefreshLock(nodeID string) *sync.Mutex {
 	if v, ok := h.wgRefreshLocks.Load(nodeID); ok {
 		if mu, ok2 := v.(*sync.Mutex); ok2 {
@@ -2435,6 +2446,7 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		return
 	}
 	h.pushInstancesConfigToNode(nodeID)
+	h.pushWireGuardRefreshForInstanceMesh(nodeID, fmt.Sprintf("create_instance node=%s id=%d", nodeID, inst.ID))
 	h.audit(c, "create_instance", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("mode=%s port=%d", mode, req.Port))
 	c.JSON(http.StatusCreated, gin.H{"instance": inst})
 }
@@ -2563,6 +2575,9 @@ func (h *Handler) PatchInstance(c *gin.Context) {
 		return
 	}
 	h.pushInstancesConfigToNode(inst.NodeID)
+	if req.ExitNode != nil || req.Enabled != nil || req.Subnet != nil {
+		h.pushWireGuardRefreshForInstanceMesh(inst.NodeID, fmt.Sprintf("patch_instance id=%d", inst.ID))
+	}
 	detail := fmt.Sprintf("enabled=%v subnet=%s port=%d proto=%s exit_node=%s", inst.Enabled, inst.Subnet, inst.Port, inst.Proto, inst.ExitNode)
 	h.audit(c, "patch_instance", fmt.Sprintf("instance:%d", inst.ID), detail)
 	c.JSON(http.StatusOK, gin.H{"instance": inst})
@@ -2650,10 +2665,6 @@ func (h *Handler) RefreshNodeWG(c *gin.Context) {
 		return
 	}
 
-	lock := h.nodeRefreshLock(nodeID)
-	lock.Lock()
-	defer lock.Unlock()
-
 	var node model.Node
 	if abortJSONIfDBFirstErr(c, h.db.Where("id = ?", nodeID).First(&node).Error, "node not found") {
 		return
@@ -2663,17 +2674,29 @@ func (h *Handler) RefreshNodeWG(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.hub.SendToNode(nodeID, WSMessage{Type: "update_wg_config", Payload: payload}); err != nil {
+	if !h.hub.IsOnline(nodeID) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "node offline or ws send failed"})
 		return
 	}
+
 	h.audit(c, "wg_refresh", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("total=%d invalid=%d", totalTunnel, invalid))
 	c.JSON(http.StatusAccepted, gin.H{
 		"ok":           true,
 		"node_id":      nodeID,
 		"total_tunnel": totalTunnel,
 		"invalid":      invalid,
+		"delivery":     "queued",
 	})
+
+	// SendToNode 在 WS 写阻塞或通道背压时可能阻塞十余秒；先返回 202，避免反向代理/浏览器长时间 pending。
+	lock := h.nodeRefreshLock(nodeID)
+	go func() {
+		lock.Lock()
+		defer lock.Unlock()
+		if err := h.hub.SendToNode(nodeID, WSMessage{Type: "update_wg_config", Payload: payload}); err != nil {
+			log.Printf("wg-refresh: async send to node %s failed: %v", nodeID, err)
+		}
+	}()
 }
 
 // SyncNodeAgentConfig 主动向在线 Agent 下发当前库中的 instances（WebSocket update_config），

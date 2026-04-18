@@ -1,6 +1,49 @@
 ﻿<!doctype html>
 <html lang="en">
   <head>
+    <!-- 同步执行、早于 Vue：拦截 Cloudflare RUM（/cdn-cgi/rum）的 XHR/fetch，避免控制台 CORS 红字；与业务 /api 无关 -->
+    <script>
+      ;(function () {
+        var MARK = 'cdn-cgi/rum'
+        function match (url) {
+          return typeof url === 'string' && url.indexOf(MARK) !== -1
+        }
+        var xopen = XMLHttpRequest.prototype.open
+        var xsend = XMLHttpRequest.prototype.send
+        XMLHttpRequest.prototype.open = function (method, url) {
+          this.__cfRumSkip = match(String(url || ''))
+          return xopen.apply(this, arguments)
+        }
+        XMLHttpRequest.prototype.send = function (body) {
+          if (this.__cfRumSkip) return
+          return xsend.apply(this, arguments)
+        }
+        if (typeof window.fetch === 'function') {
+          var ofetch = window.fetch
+          window.fetch = function (input, init) {
+            var u =
+              typeof input === 'string'
+                ? input
+                : input && typeof input.url === 'string'
+                  ? input.url
+                  : ''
+            if (match(u)) {
+              return Promise.resolve(
+                new Response(null, { status: 204, statusText: 'No Content' })
+              )
+            }
+            return ofetch.apply(this, arguments)
+          }
+        }
+        if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+          var osb = navigator.sendBeacon.bind(navigator)
+          navigator.sendBeacon = function (url, data) {
+            if (match(String(url || ''))) return true
+            return osb(url, data)
+          }
+        }
+      })()
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>VPN Admin</title>
