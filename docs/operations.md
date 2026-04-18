@@ -248,12 +248,28 @@ flowchart LR
 - **海外库与 `overseas-ip`**：仍由 Agent/安装脚本维护，供健康检查或后续扩展；**当前 `policy-routing.sh` / `nat-rules.sh` 不依据海外库做 `cn-split` 选路**（详见下条）。
 
 - **国内库**：写入 **`china-ip`** ipset；**`policy-routing.sh`** 用 **`cn-ip-list.txt`** 注入策略路由表；**`nat-rules.sh`** 对 `cn-split` 用 **`china-ip`** 匹配目的地址做 SNAT。即 **国内分流主路径依赖国内库**。
+- **手工例外**：**`vpn-ex-domestic` / `vpn-ex-foreign`** 与 **`mangle` 链 `VPN_SPLIT_MARK`**、**fwmark → 表 104/105** 及 **`nat-rules.sh` 中优先于 `china-ip` 的 SNAT/MASQUERADE** 联动（详见 §8.3）。
 - **海外库**：由 Agent（及安装脚本）维护 **`overseas-ip`** ipset 与列表文件；**当前生成的 `nat-rules.sh` / `policy-routing.sh` 未引用 `overseas-ip`**。若需按「海外列表」进一步改 NAT/路由，需另行设计规则链后再改脚本模板。
 - **海外库与 ipset 类型**：`overseas-ip` 为 **`hash:net`（仅 IPv4 CIDR）**。数据源须为 IPv4 段列表；若误用 **仅含 IPv6** 的文本（例如历史上的 `china6.txt`），`ipset add` 会大量报错且无法入库。控制面默认海外源已改为 **IPv4 国家聚合段**；存量库在控制面 **重启迁移** 时会将仍指向 `china6.txt` 的 `overseas` 源自动升级。控制面与 Agent 在写入制品时会对 **`overseas` 范围**丢弃非 IPv4 CIDR 行。
 
 环境变量 **`IPLIST_DUAL_ENABLED=false` 已被忽略**（控制面始终为双库）；若仍见旧文档请勿再关闭该能力。
 
-### 8.3 Agent 日志「ip list anomaly detected」
+### 8.3 手工例外（vpn-ex-*）、CDN 与验证
+
+**为何 Cloudflare 等站点会走海外**：`cn-split` 按 **目的 IP 是否在中国段** 选路；CDN **Anycast** 常解析到 **境外 POP**，不在 `china-ip` 中，默认会经 **`exit_node`**。控制台 **「走国内」** 例外将地址写入 **`vpn-ex-domestic`**，节点上通过 **fwmark 0x64 → 表 104（仅 default 走本机 WAN）** 与 **NAT 中优先于 `china-ip` 的 SNAT** 纠偏；**「走境外」** 写入 **`vpn-ex-foreign`**（**fwmark 0x65 → 表 105**，NAT 优先 **MASQUERADE**）。
+
+**域名类例外与 DNS**：Agent 生成的 **`/etc/dnsmasq.d/vpn-exceptions.conf`** 仅在 **向本机 dnsmasq 查询** 时把解析结果加入 ipset。默认 **`server.conf`** 向客户端 **推送公共 DNS（223.5.5.5 / 8.8.8.8）**，客户端若不用节点 DNS，**域名例外可能无法填充 ipset**；**CIDR 类例外**不依赖 DNS。若需域名纠偏，应让客户端使用 **入口节点上对 VPN 子网开放的解析**（需在安全前提下调整 dnsmasq 监听与 `push "dhcp-option DNS …"`，并与隧道内网关地址一致）。
+
+**变更生效**：`node-setup.sh` / **`systemctl restart vpn-routing.service`** 会重跑 **`policy-routing.sh`** 与 **`nat-rules.sh`**；**ipset** 内容由 Agent 在 **`update_exceptions`** 时更新。
+
+**验收（节点上）**：
+
+```bash
+bash /opt/vpn-api/scripts/verify-split-exceptions.sh
+# 若仓库路径不同，使用源码内 vpn-api/scripts/verify-split-exceptions.sh
+```
+
+### 8.4 Agent 日志「ip list anomaly detected」
 
 **现象**：Agent 日志显示 "ip list anomaly detected"。
 

@@ -204,6 +204,7 @@ vpn_ipset_clear_vpn_iptables_chains_for_reload() {
   command -v iptables >/dev/null 2>&1 || return 0
   iptables -t nat -F VPN_POSTROUTING 2>/dev/null || true
   iptables -F VPN_FORWARD 2>/dev/null || true
+  iptables -t mangle -F VPN_SPLIT_MARK 2>/dev/null || true
 }
 
 # 仅在 swap/rename 不可行时的兜底：先清链再 destroy+create（失败返回 1，勿在 set -e 下裸跑 create）
@@ -1957,6 +1958,20 @@ INSTANCE_COUNT="$(jq '.instances | length' "$NODE_JSON_FILE" 2>/dev/null || echo
 TUNNEL_COUNT="$(jq '.tunnels | length' "$NODE_JSON_FILE" 2>/dev/null || echo 0)"
 [[ "$TUNNEL_COUNT" =~ ^[0-9]+$ ]] || TUNNEL_COUNT=0
 
+# 分流手工例外：vpn-ex-* ipset + mangle 打标（policy-routing 先于 nat-rules 执行）
+vpn_split_exception_init() {
+  command -v ipset >/dev/null 2>&1 || return 0
+  ipset create vpn-ex-domestic hash:net -exist 2>/dev/null || true
+  ipset create vpn-ex-foreign hash:net -exist 2>/dev/null || true
+  command -v iptables >/dev/null 2>&1 || return 0
+  iptables -t mangle -N VPN_SPLIT_MARK 2>/dev/null || true
+  iptables -t mangle -F VPN_SPLIT_MARK
+  if ! iptables -t mangle -C PREROUTING -j VPN_SPLIT_MARK 2>/dev/null; then
+    iptables -t mangle -A PREROUTING -j VPN_SPLIT_MARK
+  fi
+}
+vpn_split_exception_init
+
 PEER_MAP_DIR="$(mktemp -d)"
 trap 'rm -rf "$PEER_MAP_DIR"' EXIT
 
@@ -2168,9 +2183,31 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
           echo "WARN: cn-split domestic routes skipped (no IPv4 default gw/dev for LOCAL_GW/LOCAL_DEV)"
         fi
 
+        # 手工例外：fwmark 走独立策略表（104=强制国内 WAN，105=强制海外隧道），优先级高于主 cn-split 表 101
+        grep -q "^104 " /etc/iproute2/rt_tables 2>/dev/null || echo "104 vpn_ex_domestic" >> /etc/iproute2/rt_tables
+        grep -q "^105 " /etc/iproute2/rt_tables 2>/dev/null || echo "105 vpn_ex_foreign" >> /etc/iproute2/rt_tables
+        if [[ -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]]; then
+          ip route replace default via "$LOCAL_GW" dev "$LOCAL_DEV" table 104 2>/dev/null || true
+        else
+          ip route flush table 104 2>/dev/null || true
+        fi
+        ip route replace default via "$HK_IP" dev "$HK_DEV" table 105 2>/dev/null || true
+
         while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+        ip -4 rule add from "$SUBNET" fwmark 0x65 lookup 105 prio 3185
+        if [[ -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]] && ip -4 route show table 104 2>/dev/null | grep -qE '^default'; then
+          ip -4 rule add from "$SUBNET" fwmark 0x64 lookup 104 prio 3190
+        fi
         ip -4 rule add from "$SUBNET" lookup $TABLE_NUM prio "$PRIO"
-        echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy}"
+
+        if command -v iptables >/dev/null 2>&1; then
+          iptables -t mangle -A VPN_SPLIT_MARK -s "$SUBNET" -m set --match-set vpn-ex-foreign dst -j MARK --set-xmark 0x65/0xffffffff
+          if [[ -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]] && ip -4 route show table 104 2>/dev/null | grep -qE '^default'; then
+            iptables -t mangle -A VPN_SPLIT_MARK -s "$SUBNET" -m set --match-set vpn-ex-domestic dst -j MARK --set-xmark 0x64/0xffffffff
+          fi
+        fi
+
+        echo "smart-split table $TABLE_NUM: CN->local, rest->$HK_IP ($HK_DEV) exit_node=${EXIT_NODE:-legacy} (exceptions: tables 104/105)"
       fi
       ;;
     global)
@@ -2403,6 +2440,10 @@ else
   fi
 fi
 
+# 与 Agent applyExceptions 一致：保证 nat/policy 引用前 ipset 已存在（无例外时为空集）
+ipset create vpn-ex-domestic hash:net -exist 2>/dev/null || true
+ipset create vpn-ex-foreign hash:net -exist 2>/dev/null || true
+
 cat > /etc/vpn-agent/nat-rules.sh <<'NATRULES'
 #!/bin/bash
 set -euo pipefail
@@ -2427,6 +2468,9 @@ DEFAULT_IF="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; e
 LOCAL_IP="$(ip -4 addr show "$DEFAULT_IF" 2>/dev/null | awk '/inet / && $2 !~ /^127\./ { split($2,a,"/"); print a[1]; exit}')"
 [[ -z "$LOCAL_IP" ]] && LOCAL_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src / { for (i=1;i<=NF;i++) if ($i=="src") { print $(i+1); exit } }')"
 [[ -z "$LOCAL_IP" ]] && { echo "nat-rules: could not determine LOCAL_IP for dev=$DEFAULT_IF" >&2; exit 1; }
+
+ipset create vpn-ex-domestic hash:net -exist 2>/dev/null || true
+ipset create vpn-ex-foreign hash:net -exist 2>/dev/null || true
 
 iptables -t nat -F VPN_POSTROUTING 2>/dev/null || iptables -t nat -N VPN_POSTROUTING
 iptables -t nat -C POSTROUTING -j VPN_POSTROUTING 2>/dev/null || \
@@ -2465,6 +2509,9 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
       fi
       ;;
     cn-split)
+      # 顺序：境外例外 > 国内例外 > 国内库 china-ip > 其余 MASQUERADE（海外隧道）
+      iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -m set --match-set vpn-ex-foreign dst -j MASQUERADE
+      iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -m set --match-set vpn-ex-domestic dst -j SNAT --to-source "$LOCAL_IP"
       iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -m set --match-set china-ip dst -j SNAT --to-source "$LOCAL_IP"
       iptables -t nat -A VPN_POSTROUTING -s "$SUBNET" -j MASQUERADE
       ;;
