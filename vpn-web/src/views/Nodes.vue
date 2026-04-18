@@ -195,7 +195,10 @@
       </el-form>
 
       <el-alert v-if="upgradeTask.id" type="info" :closable="false" show-icon style="margin-bottom:12px;">
-        任务 #{{ upgradeTask.id }} 状态：{{ upgradeTask.status }}，成功 {{ upgradeTask.success_count || 0 }}/{{ upgradeTask.total_nodes || 0 }}，失败 {{ upgradeTask.failed_count || 0 }}
+        任务 #{{ upgradeTask.id }} 状态：{{ upgradeTask.status }}，成功 {{ upgradeTaskSuccessDisplay }}/{{
+          upgradeTaskTotalDisplay
+        }}，失败 {{ upgradeTaskFailDisplay
+        }}<span v-if="upgradeTask.status === 'running'">（进行中按节点汇总；结束后与任务汇总一致）</span>
       </el-alert>
       <div v-if="upgradeItems.length" class="dialog-record-stack">
         <div
@@ -245,7 +248,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Search, EditPen } from '@element-plus/icons-vue'
+import { Search, EditPen, Plus, Delete } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { getAdminProfile, isSuperAdminSession } from '../utils/adminSession'
 import { getStatusInfo, recordCardToneClass, recordCardToneFromTagType } from '../utils'
@@ -281,6 +284,33 @@ const upgradeForm = reactive({
   canary_node_id: ''
 })
 const upgradeCandidates = ref({})
+
+/**
+ * 运行中任务仅在结束时写入 success_count；进行中按各节点子项聚合，避免「成功 0/5」与卡片已显示成功不一致。
+ */
+const upgradeTaskSuccessDisplay = computed(() => {
+  const t = upgradeTask.value
+  if (t?.status === 'running') {
+    return upgradeItems.value.filter((i) => i.status === 'succeeded').length
+  }
+  return t?.success_count ?? 0
+})
+
+/** @returns {number} */
+const upgradeTaskFailDisplay = computed(() => {
+  const t = upgradeTask.value
+  if (t?.status === 'running') {
+    return upgradeItems.value.filter((i) => i.status === 'failed' || i.status === 'timeout').length
+  }
+  return t?.failed_count ?? 0
+})
+
+/** @returns {number} */
+const upgradeTaskTotalDisplay = computed(() => {
+  const t = upgradeTask.value
+  if (t?.total_nodes != null && t.total_nodes !== '') return Number(t.total_nodes)
+  return upgradeItems.value.length
+})
 
 const displayAgentVersion = (v) => {
   const s = String(v || '').trim().replace(/^v/i, '').replace(/-unknown$/i, '')

@@ -166,6 +166,14 @@
 <script setup>
 import { reactive, ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import {
+  Monitor,
+  CircleCheck,
+  UserFilled,
+  User,
+  Connection,
+  ArrowRight
+} from '@element-plus/icons-vue'
 import http from '../api/http'
 import {
   hasModulePermission,
@@ -186,11 +194,11 @@ const onlineOverviewNote = ref('')
 const onlineOverviewLoading = ref(false)
 
 const statCards = [
-  { key: 'nodes', label: '节点总数', icon: 'Monitor', color: 'primary' },
-  { key: 'onlineNodes', label: '在线节点', icon: 'CircleCheck', color: 'success' },
-  { key: 'onlineUsers', label: '在线用户', icon: 'UserFilled', color: 'success' },
-  { key: 'users', label: '用户', icon: 'User', color: 'warning' },
-  { key: 'tunnels', label: '隧道数', icon: 'Connection', color: 'info' },
+  { key: 'nodes', label: '节点总数', icon: Monitor, color: 'primary' },
+  { key: 'onlineNodes', label: '在线节点', icon: CircleCheck, color: 'success' },
+  { key: 'onlineUsers', label: '在线用户', icon: UserFilled, color: 'success' },
+  { key: 'users', label: '用户', icon: User, color: 'warning' },
+  { key: 'tunnels', label: '隧道数', icon: Connection, color: 'info' },
 ]
 
 /** 与节点列表/实例相关的统计卡片（无节点类模块则不展示，亦不请求对应数据） */

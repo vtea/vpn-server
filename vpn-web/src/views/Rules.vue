@@ -190,6 +190,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Refresh, Plus, Delete } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { formatDate, recordCardToneFromTagType } from '../utils'
 

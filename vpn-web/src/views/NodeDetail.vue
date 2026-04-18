@@ -573,6 +573,14 @@
 import { ref, computed, onMounted, reactive } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  Refresh,
+  DocumentCopy,
+  InfoFilled,
+  CircleCheck,
+  Coin,
+  Connection
+} from '@element-plus/icons-vue'
 import http from '../api/http'
 import { getStatusInfo, recordCardToneClass, recordCardToneFromTagType } from '../utils'
 
@@ -750,15 +758,15 @@ const statCards = computed(() => {
       agentDisplay,
       agentVersionTone: resolveAgentVersionTone(agentRaw),
       onlineUsers: node.value.online_users,
-      icon: 'CircleCheck',
+      icon: CircleCheck,
       color: 'primary'
     },
-    { key: 'number', label: '节点号', value: node.value.node_number || '-', icon: 'Coin', color: 'warning' },
+    { key: 'number', label: '节点号', value: node.value.node_number || '-', icon: Coin, color: 'warning' },
     {
       key: 'tunnels',
       label: '相关隧道',
       value: tunnels.value?.length ?? 0,
-      icon: 'Connection',
+      icon: Connection,
       color: 'info'
     }
   ]

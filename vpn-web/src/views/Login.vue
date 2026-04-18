@@ -82,8 +82,7 @@
 import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { User, Lock, ArrowDown } from '@element-plus/icons-vue'
-import http, { setApiBaseURL } from '../api/http'
-import { API_BASE_STORAGE_KEY } from '../utils/apiBase'
+import http, { setApiBaseURL, getUserConfiguredApiBaseForForm } from '../api/http'
 import { setAuthSession } from '../utils/adminSession'
 import router from '../router'
 
@@ -91,7 +90,8 @@ import router from '../router'
 const LOGIN_DRAFT_KEY = 'vpn_web_login_draft'
 
 const loading = ref(false)
-const apiOpen = ref(true)
+/** 默认折叠「API 根地址」；展开后才显示输入区 */
+const apiOpen = ref(false)
 const form = reactive({ username: '', password: '' })
 const apiBaseInput = ref('')
 
@@ -119,8 +119,8 @@ function saveLoginDraft () {
 }
 
 onMounted(() => {
-  const raw = localStorage.getItem(API_BASE_STORAGE_KEY)
-  apiBaseInput.value = raw !== null ? raw : ''
+  // 仅回填用户曾在登录页或「API 连接」中保存过的地址，不展示构建默认或其它隐式来源
+  apiBaseInput.value = getUserConfiguredApiBaseForForm()
   loadLoginDraft()
 })
 

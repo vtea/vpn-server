@@ -675,8 +675,9 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					updates["status"] = "failed"
 					updates["message"] = singleLine(res.Error)
 				}
+				// 允许在控制面已判 timeout 后仍接收晚到的结果（例如下载接近上限时长、或此前 WS 读阻塞导致重连晚到）。
 				logWSHubDBErr(fmt.Sprintf("upgrade_result task=%d node=%s", res.TaskID, ac.NodeID), hub.db.Model(&model.AgentUpgradeTaskItem{}).
-					Where("task_id = ? AND node_id = ? AND status IN ?", res.TaskID, ac.NodeID, []string{"pending", "running", "verifying"}).
+					Where("task_id = ? AND node_id = ? AND status IN ?", res.TaskID, ac.NodeID, []string{"pending", "running", "verifying", "timeout"}).
 					Updates(updates).Error)
 				if res.CurrentVersion != "" {
 					logWSHubDBErr(fmt.Sprintf("upgrade_result agent_version node=%s", ac.NodeID), hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Update("agent_version", res.CurrentVersion).Error)

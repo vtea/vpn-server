@@ -82,8 +82,11 @@ JWT_SECRET=xxx      # JWT 密钥（生产环境必须修改）
 EXTERNAL_URL=...    # 控制面对外基址（公网 IP/域名）。未设置时默认为 `http://127.0.0.1:端口`。**若仍为回环**：创建节点/换发令牌时，会尽量用**当前 HTTP 请求的 Host / X-Forwarded-*** 自动推断部署命令里的地址（适用于你用公网 IP 或域名打开管理台、且反代正确传递转发头的情况）。无法可靠自动探测「公网 IP」（NAT/多网卡/离线环境）；推断失败时仍须手动设置本变量。
 EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTERNAL_URL 可同时配置（内网节点用 LAN 命令）
 # AGENT_LATEST_VERSION=0.2.1   # 可选：与已部署 agent 的 buildVersion 一致时，升级默认值/推荐 URL 与节点自报一致；一键部署脚本会写入与编译相同的值
-# 跨域：管理台与 API 不同源时设置（逗号分隔多个来源；仅开发可用 * 表示任意来源）
+# 跨域：管理台与 API 不同源时**必须**设置其一（逗号分隔多个来源；仅开发可用 * 表示任意来源）
 # CORS_ALLOWED_ORIGINS=https://vpn-admin.example.com,http://localhost:56701
+# 与上一行等价：单独列出「管理台页面」的源（常与 EXTERNAL_URL=API 地址 搭配使用）
+# WEB_APP_ORIGINS=https://vpn.example.com
+# WEB_APP_ORIGIN=https://vpn.example.com
 #
 # IPLIST_DUAL_ENABLED：已废弃；控制面始终启用「国内 + 海外」双库与 /api/ip-lists/download/*，
 # 以便 vpn-agent 与「分流规则 → 全网立即更新」能同步节点。详见 docs/operations.md §8。
@@ -91,7 +94,7 @@ EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTER
 
 ### 前后端分离 / 跨域
 
-1. **API**：设置 `CORS_ALLOWED_ORIGINS` 为管理台页面所在源（协议+主机+端口），例如 `https://vpn.example.com`。未设置时不启用 CORS 中间件（适合同域或由 Nginx 统一反代）。
+1. **API**：设置 `CORS_ALLOWED_ORIGINS` **或** `WEB_APP_ORIGINS`（或单值 `WEB_APP_ORIGIN`）为管理台页面所在 **Origin**（协议 + 主机 + 端口，无路径），例如 `https://vpn.gaiasc.com`。三者会合并去重。未设置时不启用 CORS 中间件（适合同域或由 Nginx 统一反代）。**典型问题**：页面在 `https://vpn.*`、接口在 `https://vpnapi.*` 时，若未配置上述变量，浏览器控制台会出现 `XMLHttpRequest ... due to access control checks`，节点管理、升级任务轮询等接口会全部失败。
 2. **管理台**：构建前设置 `VITE_API_BASE_URL` 为 API 根地址（如 `https://api.example.com`），再执行 `npm run build`。开发时可在 `.env.local` 中配置并配合 `vite` 代理省略该变量。
 3. **请求关联**：每个 HTTP 请求会设置并回显 `X-Request-ID`（若客户端已传入则沿用）。排查 `database is locked` 等 500 时可在日志中检索该值。
 4. **子路径与 Nginx**：管理台挂在子路径或需同时反代 `/api` 与 WebSocket 时，见仓库根目录 [`docs/deployment-web.md`](../docs/deployment-web.md)。

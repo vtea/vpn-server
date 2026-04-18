@@ -13,7 +13,6 @@
       </div>
       <div class="sidebar-menu">
         <el-menu
-          :key="activeMenu"
           :default-active="activeMenu"
           :collapse="isCollapsed"
           :collapse-transition="false"
@@ -107,7 +106,7 @@
 
       <main class="layout-content">
         <router-view v-slot="{ Component }">
-          <transition name="fade-transform" mode="out-in">
+          <transition name="page-fade" mode="default">
             <component :is="Component" />
           </transition>
         </router-view>
@@ -154,6 +153,23 @@ import {
   isSuperAdminSession,
   hasModulePermission
 } from './utils/adminSession'
+import {
+  Odometer,
+  User,
+  Share,
+  Monitor,
+  Guide,
+  Connection,
+  Document,
+  Setting,
+  Link,
+  Fold,
+  Expand,
+  UserFilled,
+  ArrowDown,
+  Lock,
+  SwitchButton
+} from '@element-plus/icons-vue'
 
 const route = useRoute()
 const isCollapsed = ref(false)
@@ -174,8 +190,14 @@ const syncCollapsedForViewport = () => {
   }
 }
 
+/** 节流 resize，避免拖拽窗口时频繁触发布局与重绘 */
+let resizeRaf = 0
 const handleResize = () => {
-  syncCollapsedForViewport()
+  if (resizeRaf) cancelAnimationFrame(resizeRaf)
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = 0
+    syncCollapsedForViewport()
+  })
 }
 
 const fullPages = ['/login', '/self-service']
@@ -461,5 +483,15 @@ const handleCommand = (cmd) => {
   .user-dropdown :deep(.el-tag) {
     display: none;
   }
+}
+
+/* 主内容路由切换：短淡出，避免 out-in 串行与位移动画带来的卡顿感 */
+.layout-content :deep(.page-fade-enter-active),
+.layout-content :deep(.page-fade-leave-active) {
+  transition: opacity 0.14s ease;
+}
+.layout-content :deep(.page-fade-enter-from),
+.layout-content :deep(.page-fade-leave-to) {
+  opacity: 0;
 }
 </style>

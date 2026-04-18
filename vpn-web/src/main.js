@@ -2,7 +2,6 @@
 import { createPinia } from 'pinia'
 import { ID_INJECTION_KEY } from 'element-plus/es/hooks/use-id/index.mjs'
 import { ZINDEX_INJECTION_KEY } from 'element-plus/es/hooks/use-z-index/index.mjs'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import './assets/styles/global.scss'
 import App from './App.vue'
 import { routes } from './router/routes'
@@ -29,9 +28,7 @@ export const createApp = ViteSSG(
     })
     app.provide(ZINDEX_INJECTION_KEY, { current: 0 })
 
-    for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-      app.component(key, component)
-    }
+    /** 图标在各视图按需 `@element-plus/icons-vue` 引入，避免全量注册拖慢首屏 */
 
     app.use(createPinia())
   }

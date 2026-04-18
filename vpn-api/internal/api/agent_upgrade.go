@@ -20,6 +20,9 @@ import (
 	"vpn-api/internal/model"
 )
 
+// agentUpgradeDispatchWait 与 cmd/agent 中 downloadHTTPTimeout（30m）对齐并留余量，避免节点仍在下载时控制面已判超时。
+const agentUpgradeDispatchWait = 32 * time.Minute
+
 // logAgentUpgradeDB 记录升级任务协程内写库失败（便于排查任务项状态与 UI 不一致）。
 func logAgentUpgradeDB(ctx string, err error) {
 	if err != nil {
@@ -519,7 +522,7 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 		return
 	}
 
-	if !h.dispatchUpgradeTaskItem(task, *canary, 3*time.Minute) {
+	if !h.dispatchUpgradeTaskItem(task, *canary, agentUpgradeDispatchWait) {
 		logAgentUpgradeDB(fmt.Sprintf("canary_failed_mark_skipped task_id=%d", taskID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND id <> ? AND status = ?", taskID, canary.ID, "pending").Updates(map[string]any{
 			"status":  "skipped",
 			"message": "canary failed",
@@ -537,7 +540,7 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			_ = h.dispatchUpgradeTaskItem(task, it, 3*time.Minute)
+			_ = h.dispatchUpgradeTaskItem(task, it, agentUpgradeDispatchWait)
 		}()
 	}
 	wg.Wait()

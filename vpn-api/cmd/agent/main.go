@@ -198,8 +198,11 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 	connMu.Unlock()
 	log.Printf("connected, node=%s", cfg.NodeID)
 
-	sendReport(conn, cfg)
-	sendStartupIPListStatus(conn)
+	// 与 handleCommand 中的 sendResult、心跳写入共用，避免并发 WriteMessage；升级下载可能长达数十分钟，必须在独立 goroutine 执行升级以免阻塞 ReadMessage（否则无法响应服务端 ping，连接易被断开）。
+	writeMu := &sync.Mutex{}
+
+	sendReport(conn, cfg, writeMu)
+	sendStartupIPListStatus(conn, writeMu)
 
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
@@ -218,7 +221,7 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 				log.Printf("ws: skip non-json message (%d bytes): %v", len(raw), err)
 				continue
 			}
-			handleCommand(conn, cfg, msg)
+			handleCommand(conn, cfg, writeMu, msg)
 		}
 	}()
 
@@ -233,14 +236,17 @@ func connectAndServe(cfg *Config, activeConn **websocket.Conn, connMu *sync.Mute
 				log.Printf("heartbeat json.Marshal: %v", err)
 				continue
 			}
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			writeMu.Lock()
+			err = conn.WriteMessage(websocket.TextMessage, data)
+			writeMu.Unlock()
+			if err != nil {
 				return fmt.Errorf("heartbeat write: %w", err)
 			}
 		}
 	}
 }
 
-func sendReport(conn *websocket.Conn, cfg *Config) {
+func sendReport(conn *websocket.Conn, cfg *Config, writeMu *sync.Mutex) {
 	wgKey := readWGPublicKey()
 	payload, err := json.Marshal(map[string]any{
 		"agent_version": agentVersion(),
@@ -258,10 +264,14 @@ func sendReport(conn *websocket.Conn, cfg *Config) {
 		log.Printf("sendReport: marshal message: %v", err)
 		return
 	}
-	conn.WriteMessage(websocket.TextMessage, data)
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		log.Printf("sendReport: write: %v", err)
+	}
 }
 
-func sendStartupIPListStatus(conn *websocket.Conn) {
+func sendStartupIPListStatus(conn *websocket.Conn, writeMu *sync.Mutex) {
 	startupIPListReportOnce.Do(func() {
 		for _, scope := range []string{"domestic", "overseas"} {
 			count := countIPListEntries(scope)
@@ -269,7 +279,7 @@ func sendStartupIPListStatus(conn *websocket.Conn) {
 				continue
 			}
 			version := ipListLocalVersion(scope)
-			sendResult(conn, "iplist_result", map[string]any{
+			sendResult(conn, writeMu, "iplist_result", map[string]any{
 				"success":     true,
 				"scope":       scope,
 				"version":     version,
@@ -572,7 +582,7 @@ func resolveClientProtoForIssueCert(apiProto, mode string) string {
 	return localP
 }
 
-func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
+func handleCommand(conn *websocket.Conn, cfg *Config, writeMu *sync.Mutex, msg WSMessage) {
 	switch msg.Type {
 	case "issue_cert":
 		var req struct {
@@ -584,7 +594,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
 			log.Printf("issue_cert: invalid payload: %v", err)
-			sendResult(conn, "cert_result", map[string]any{
+			sendResult(conn, writeMu, "cert_result", map[string]any{
 				"success": false,
 				"error":   "invalid payload: " + err.Error(),
 			})
@@ -607,7 +617,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 				result["ovpn"] = string(ovpnUDP)
 			}
 		}
-		sendResult(conn, "cert_result", result)
+		sendResult(conn, writeMu, "cert_result", result)
 
 	case "revoke_cert":
 		var req struct {
@@ -615,7 +625,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
 			log.Printf("revoke_cert: invalid payload: %v", err)
-			sendResult(conn, "cert_result", map[string]any{
+			sendResult(conn, writeMu, "cert_result", map[string]any{
 				"cert_cn": "",
 				"success": false,
 				"error":   "invalid payload: " + err.Error(),
@@ -631,7 +641,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		} else {
 			result["success"] = true
 		}
-		sendResult(conn, "cert_result", result)
+		sendResult(conn, writeMu, "cert_result", result)
 
 	case "update_config":
 		log.Printf("received config update, applying...")
@@ -652,14 +662,14 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		log.Printf("received wg config update, applying...")
 		var req wgRefreshPayload
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
-			sendResult(conn, "wg_refresh_result", map[string]any{
+			sendResult(conn, writeMu, "wg_refresh_result", map[string]any{
 				"success": false,
 				"error":   "invalid payload: " + err.Error(),
 			})
 			return
 		}
 		result := applyWGConfigRefresh(req)
-		sendResult(conn, "wg_refresh_result", result)
+		sendResult(conn, writeMu, "wg_refresh_result", result)
 
 	case "update_exceptions":
 		log.Printf("applying exception rules...")
@@ -680,7 +690,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
 			log.Printf("update_iplist: invalid payload: %v", err)
-			sendResult(conn, "iplist_result", map[string]any{
+			sendResult(conn, writeMu, "iplist_result", map[string]any{
 				"scope":   "",
 				"success": false,
 				"error":   "invalid payload: " + err.Error(),
@@ -706,7 +716,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 					result["entry_count"] = cnt
 				}
 			}
-			sendResult(conn, "iplist_result", result)
+			sendResult(conn, writeMu, "iplist_result", result)
 		}
 	case "upgrade_agent":
 		var req struct {
@@ -718,7 +728,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
 			log.Printf("upgrade_agent: invalid payload: %v", err)
-			sendResult(conn, "upgrade_result", map[string]any{
+			sendResult(conn, writeMu, "upgrade_result", map[string]any{
 				"task_id":         0,
 				"success":         false,
 				"current_version": agentVersion(),
@@ -729,23 +739,30 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 			return
 		}
 		log.Printf("upgrade_agent: task=%d version=%s", req.TaskID, req.Version)
-		execRes := performAgentUpgradeLocked(req.Version, req.DownloadURLs, req.SHA256, req.RestartService)
-		res := map[string]any{
-			"task_id":         req.TaskID,
-			"success":         execRes.Success,
-			"current_version": agentVersion(),
-			"step":            execRes.Step,
-			"error_code":      execRes.ErrorCode,
-			"stdout_tail":     execRes.StdoutTail,
-			"stderr_tail":     execRes.StderrTail,
-		}
-		if execRes.Success && strings.TrimSpace(req.Version) != "" {
-			res["current_version"] = strings.TrimSpace(req.Version)
-		}
-		if !execRes.Success && strings.TrimSpace(execRes.Error) != "" {
-			res["error"] = execRes.Error
-		}
-		sendResult(conn, "upgrade_result", res)
+		tid := req.TaskID
+		ver := req.Version
+		urls := append([]string(nil), req.DownloadURLs...)
+		sha := req.SHA256
+		rs := req.RestartService
+		go func() {
+			execRes := performAgentUpgradeLocked(ver, urls, sha, rs)
+			res := map[string]any{
+				"task_id":         tid,
+				"success":         execRes.Success,
+				"current_version": agentVersion(),
+				"step":            execRes.Step,
+				"error_code":      execRes.ErrorCode,
+				"stdout_tail":     execRes.StdoutTail,
+				"stderr_tail":     execRes.StderrTail,
+			}
+			if execRes.Success && strings.TrimSpace(ver) != "" {
+				res["current_version"] = strings.TrimSpace(ver)
+			}
+			if !execRes.Success && strings.TrimSpace(execRes.Error) != "" {
+				res["error"] = execRes.Error
+			}
+			sendResult(conn, writeMu, "upgrade_result", res)
+		}()
 	case "upgrade_precheck":
 		var req struct {
 			TaskID       uint     `json:"task_id"`
@@ -753,7 +770,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		}
 		if err := json.Unmarshal(msg.Payload, &req); err != nil {
 			log.Printf("upgrade_precheck: invalid payload: %v", err)
-			sendResult(conn, "upgrade_precheck_result", map[string]any{
+			sendResult(conn, writeMu, "upgrade_precheck_result", map[string]any{
 				"task_id": 0,
 				"success": false,
 				"error":   err.Error(),
@@ -769,7 +786,7 @@ func handleCommand(conn *websocket.Conn, cfg *Config, msg WSMessage) {
 		if err != nil {
 			res["error"] = err.Error()
 		}
-		sendResult(conn, "upgrade_precheck_result", res)
+		sendResult(conn, writeMu, "upgrade_precheck_result", res)
 	}
 }
 
@@ -959,7 +976,7 @@ func runManualUpgrade() {
 	log.Printf("upgrade apply done")
 }
 
-func sendResult(conn *websocket.Conn, msgType string, payload any) {
+func sendResult(conn *websocket.Conn, writeMu *sync.Mutex, msgType string, payload any) {
 	p, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("sendResult %s: marshal payload: %v", msgType, err)
@@ -971,6 +988,8 @@ func sendResult(conn *websocket.Conn, msgType string, payload any) {
 		log.Printf("sendResult %s: marshal envelope: %v", msgType, err)
 		return
 	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		log.Printf("sendResult %s: write: %v", msgType, err)
 	}

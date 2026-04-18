@@ -270,7 +270,17 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search } from '@element-plus/icons-vue'
+import {
+  Search,
+  Plus,
+  Key,
+  Edit,
+  Delete,
+  Refresh,
+  Close,
+  Download,
+  CircleClose
+} from '@element-plus/icons-vue'
 import http from '../api/http'
 import {
   getAdminProfile,

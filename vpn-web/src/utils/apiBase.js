@@ -2,6 +2,12 @@
 export const API_BASE_STORAGE_KEY = 'vpn_admin_api_base_url'
 
 /**
+ * 用户曾在登录页或「API 连接」中点击过保存时置为 `1`。
+ * 用于登录页输入框：不展示「仅由构建注入、从未经用户保存」的隐式地址。
+ */
+export const API_BASE_USER_EXPLICIT_KEY = 'vpn_admin_api_base_user_explicit'
+
+/**
  * 规范化用户输入的 API 根地址：去空白、去尾部斜杠、剥离误填的 `/api`（避免请求变成 `/api/api/...`）。
  * @param {string} s - 原始输入
  * @returns {string} 无尾部斜杠的 origin 或空串
@@ -120,16 +126,46 @@ export function repairStoredApiBaseIfNeeded () {
   }
 }
 
-/** 保存用户输入的 API 根地址；传空字符串表示「强制同域」；需恢复构建默认请用 clearApiBaseURL */
+/**
+ * 保存用户输入的 API 根地址；传空字符串表示「强制同域」；需恢复构建默认请用 clearApiBaseURL。
+ * 会标记为「用户显式配置」，登录页才会在折叠区中回填。
+ * @param {string} url - 原始输入
+ */
 export function setApiBaseURL (url) {
   if (typeof localStorage === 'undefined') return
   localStorage.setItem(API_BASE_STORAGE_KEY, normalizeApiBase(url))
+  try {
+    localStorage.setItem(API_BASE_USER_EXPLICIT_KEY, '1')
+  } catch (_) {
+    /* ignore */
+  }
 }
 
 /** 删除覆盖项，重新使用 VITE_API_BASE_URL 或同域 */
 export function clearApiBaseURL () {
   if (typeof localStorage === 'undefined') return
   localStorage.removeItem(API_BASE_STORAGE_KEY)
+  try {
+    localStorage.removeItem(API_BASE_USER_EXPLICIT_KEY)
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/**
+ * 供登录页「API 根地址」输入框使用：仅当用户曾显式保存过时返回已保存值，否则返回空串（不展示构建默认或历史隐式值）。
+ * @returns {string}
+ */
+export function getUserConfiguredApiBaseForForm () {
+  if (typeof localStorage === 'undefined') return ''
+  try {
+    if (localStorage.getItem(API_BASE_USER_EXPLICIT_KEY) !== '1') return ''
+    const raw = localStorage.getItem(API_BASE_STORAGE_KEY)
+    if (raw === null) return ''
+    return normalizeApiBase(raw)
+  } catch (_) {
+    return ''
+  }
 }
 
 /** 构建时默认（不受 localStorage 影响），用于设置页展示说明 */

@@ -143,6 +143,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Edit, Lock, Delete } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { formatDate, recordCardToneFromTagType } from '../utils'
 import { isSuperAdminSession } from '../utils/adminSession'

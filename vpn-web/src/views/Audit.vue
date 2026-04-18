@@ -80,7 +80,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { Search } from '@element-plus/icons-vue'
+import { Search, Download } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { hasModulePermission } from '../utils/adminSession'
 import { formatDate, downloadBlob } from '../utils'

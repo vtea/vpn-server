@@ -24,6 +24,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if len(cfg.CORSAllowedOrigins) == 0 {
+		log.Printf("NOTICE: 未配置 CORS_ALLOWED_ORIGINS / WEB_APP_ORIGINS；若管理台页面与 API 不同域名（例如页面与 vpnapi 分域），浏览器会拦截跨域请求。请设置其一为管理台 Origin，例如 WEB_APP_ORIGINS=https://vpn.example.com（见 README「前后端分离 / 跨域」）。")
+	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("IPLIST_DUAL_ENABLED")), "false") {
 		log.Printf("NOTICE: IPLIST_DUAL_ENABLED=false is ignored; dual IP list mode is always enabled (see vpn-api/README.md).")
 	}
