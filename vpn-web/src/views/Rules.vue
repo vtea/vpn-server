@@ -14,6 +14,16 @@
         </el-button>
         </div>
       </div>
+      <p v-if="artifactHintVisible" class="rules-artifact-hint text-muted">
+        控制面当前制品（节点成功同步后条目数应与之一致）：
+        <template v-if="ipArtifacts.domestic">
+          国内 {{ ipArtifacts.domestic.version }} · {{ ipArtifacts.domestic.entry_count }} 条 · {{ formatDate(ipArtifacts.domestic.created_at) }}
+        </template>
+        <template v-if="ipArtifacts.domestic && ipArtifacts.overseas">；</template>
+        <template v-if="ipArtifacts.overseas">
+          海外 {{ ipArtifacts.overseas.version }} · {{ ipArtifacts.overseas.entry_count }} 条 · {{ formatDate(ipArtifacts.overseas.created_at) }}
+        </template>
+      </p>
       <div v-loading="loadingIP" class="record-grid">
         <div v-for="row in ipListRows" :key="row.node_id" class="record-card">
           <div class="record-card__head">
@@ -35,6 +45,14 @@
             <div class="kv-row">
               <span class="kv-label">海外条目 / 更新</span>
               <span class="kv-value">{{ row.overseas_entry_count ?? 0 }} · {{ formatDate(row.overseas_last_update_at) }}</span>
+            </div>
+            <div v-if="row.domestic_last_sync_error" class="kv-row kv-row--sync-err">
+              <span class="kv-label">国内同步错误</span>
+              <span class="kv-value">{{ row.domestic_last_sync_error }}</span>
+            </div>
+            <div v-if="row.overseas_last_sync_error" class="kv-row kv-row--sync-err">
+              <span class="kv-label">海外同步错误</span>
+              <span class="kv-value">{{ row.overseas_last_sync_error }}</span>
             </div>
           </div>
         </div>
@@ -188,13 +206,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Plus, Delete } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { formatDate, recordCardToneFromTagType } from '../utils'
 
 const ipListRows = ref([])
+const ipArtifacts = ref({})
 const loadingIP = ref(false)
 const updating = ref(false)
 const updateScope = ref('all')
@@ -217,10 +236,16 @@ const loadingEx = ref(false)
 const showAddEx = ref(false)
 const exForm = reactive({ cidr: '', domain: '', direction: 'foreign', note: '' })
 
+/** 是否存在控制面返回的制品摘要（用于与节点条目数对照）。 */
+const artifactHintVisible = computed(
+  () => !!(ipArtifacts.value?.domestic || ipArtifacts.value?.overseas)
+)
+
 const loadIP = async () => {
   loadingIP.value = true
   try {
     const resp = await http.get('/api/ip-list/status')
+    ipArtifacts.value = resp.data.artifacts || {}
     const rows = resp.data.items || []
     ipListRows.value = rows.map((row) => {
       // 兼容旧后端返回字段：version/entry_count/last_update_at
@@ -230,12 +255,18 @@ const loadIP = async () => {
           domestic_version: row.version || '未更新',
           domestic_entry_count: row.entry_count || 0,
           domestic_last_update_at: row.last_update_at || '',
+          domestic_last_sync_error: '',
           overseas_version: '未更新',
           overseas_entry_count: 0,
-          overseas_last_update_at: ''
+          overseas_last_update_at: '',
+          overseas_last_sync_error: ''
         }
       }
-      return row
+      return {
+        ...row,
+        domestic_last_sync_error: row.domestic_last_sync_error || '',
+        overseas_last_sync_error: row.overseas_last_sync_error || ''
+      }
     })
   } finally {
     loadingIP.value = false
@@ -276,13 +307,16 @@ const triggerUpdate = async () => {
     const resp = await http.post('/api/ip-list/update', { scope })
     const sent = resp.data?.sent_to
     const total = resp.data?.total_nodes
+    const offline = resp.data?.offline_node_count
     if (typeof sent === 'number' && typeof total === 'number') {
       if (sent === 0) {
         ElMessage.warning(
           `没有 WebSocket 在线的节点（0 / ${total}），指令未下发。请确认各节点 vpn-agent 已运行且能连上控制面。`
         )
       } else {
-        ElMessage.success(`更新指令已下发（在线 ${sent} / 共 ${total} 节点）`)
+        const offPart =
+          typeof offline === 'number' && offline > 0 ? `，${offline} 个节点离线未下发` : ''
+        ElMessage.success(`更新指令已下发（在线 ${sent} / 共 ${total} 节点${offPart}）`)
       }
     } else {
       ElMessage.success('更新指令已下发')
@@ -347,6 +381,18 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.rules-artifact-hint {
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+.text-muted {
+  color: var(--el-text-color-secondary);
+}
+.kv-row--sync-err .kv-value {
+  color: var(--el-color-danger);
+  word-break: break-word;
+}
 @media (max-width: 768px) {
   .rules-actions {
     width: 100%;

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -27,6 +28,27 @@ func logWSHubDBErr(ctx string, err error) {
 	if err != nil {
 		log.Printf("ws_hub db: %s: %v", ctx, err)
 	}
+}
+
+// truncateIPListSyncError 将同步失败原因截断至 DB 字段上限，并避免截断半个 UTF-8 字符。
+func truncateIPListSyncError(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	const maxBytes = 512
+	if len(s) <= maxBytes {
+		return s
+	}
+	s = s[:maxBytes]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		_, size := utf8.DecodeLastRuneInString(s)
+		if size == 0 {
+			break
+		}
+		s = s[:len(s)-size]
+	}
+	return s + "…"
 }
 
 type AgentConn struct {
@@ -583,24 +605,38 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 			if json.Unmarshal(msg.Payload, &res) == nil {
 				scope := strings.ToLower(strings.TrimSpace(res.Scope))
 				if !res.Success {
-					log.Printf("iplist_result failed: node=%s scope=%s error=%s", ac.NodeID, scope, singleLine(res.Error))
+					errMsg := truncateIPListSyncError(res.Error)
+					log.Printf("IPLIST_SYNC_FAIL iplist_result failed: node=%s scope=%s error=%s", ac.NodeID, scope, singleLine(res.Error))
+					updates := map[string]any{}
+					switch scope {
+					case "overseas":
+						updates["overseas_ip_list_last_error"] = errMsg
+					case "domestic":
+						updates["domestic_ip_list_last_error"] = errMsg
+					default:
+						// scope 为空（如 payload 解析失败）时写入国内库字段，便于控制台展示。
+						updates["domestic_ip_list_last_error"] = errMsg
+					}
+					logWSHubDBErr("iplist_result failure persist", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates).Error)
 					break
 				}
 				now := time.Now()
 				if scope == "" || scope == "domestic" {
 					logWSHubDBErr("iplist_result domestic", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
-						"ip_list_version":            res.Version,
-						"ip_list_count":              res.EntryCount,
-						"ip_list_update_at":          &now,
-						"domestic_ip_list_version":   res.Version,
-						"domestic_ip_list_count":     res.EntryCount,
-						"domestic_ip_list_update_at": &now,
+						"ip_list_version":               res.Version,
+						"ip_list_count":                 res.EntryCount,
+						"ip_list_update_at":             &now,
+						"domestic_ip_list_version":      res.Version,
+						"domestic_ip_list_count":        res.EntryCount,
+						"domestic_ip_list_update_at":    &now,
+						"domestic_ip_list_last_error":   "",
 					}).Error)
 				} else if scope == "overseas" {
 					logWSHubDBErr("iplist_result overseas", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
-						"overseas_ip_list_version":   res.Version,
-						"overseas_ip_list_count":     res.EntryCount,
-						"overseas_ip_list_update_at": &now,
+						"overseas_ip_list_version":    res.Version,
+						"overseas_ip_list_count":      res.EntryCount,
+						"overseas_ip_list_update_at":  &now,
+						"overseas_ip_list_last_error": "",
 					}).Error)
 				}
 				log.Printf("iplist_result applied: node=%s scope=%s version=%s entries=%d", ac.NodeID, scope, strings.TrimSpace(res.Version), res.EntryCount)

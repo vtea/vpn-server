@@ -1276,7 +1276,11 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 			}
 		}
 		h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("legacy sent_to=%d nodes exceptions=%d", sent, len(exceptions)))
-		c.JSON(http.StatusOK, gin.H{"sent_to": sent, "total_nodes": len(nodes)})
+		legacyOffline := len(nodes) - sent
+		if legacyOffline < 0 {
+			legacyOffline = 0
+		}
+		c.JSON(http.StatusOK, gin.H{"sent_to": sent, "total_nodes": len(nodes), "offline_node_count": legacyOffline})
 		return
 	}
 
@@ -1358,7 +1362,17 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		}
 	}
 	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s sent_to=%d nodes exceptions=%d", listScope, sent, len(exceptions)))
-	c.JSON(http.StatusOK, gin.H{"scope": listScope, "synced": synced, "sent_to": sent, "total_nodes": len(nodes)})
+	offlineCount := len(nodes) - sent
+	if offlineCount < 0 {
+		offlineCount = 0
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"scope":              listScope,
+		"synced":             synced,
+		"sent_to":            sent,
+		"total_nodes":        len(nodes),
+		"offline_node_count": offlineCount,
+	})
 }
 
 func (h *Handler) IPListStatus(c *gin.Context) {
@@ -1408,13 +1422,15 @@ func (h *Handler) IPListStatus(c *gin.Context) {
 		return
 	}
 	type row struct {
-		NodeID               string `json:"node_id"`
-		DomesticVersion      string `json:"domestic_version"`
-		DomesticEntryCount   int    `json:"domestic_entry_count"`
-		DomesticLastUpdateAt string `json:"domestic_last_update_at"`
-		OverseasVersion      string `json:"overseas_version"`
-		OverseasEntryCount   int    `json:"overseas_entry_count"`
-		OverseasLastUpdateAt string `json:"overseas_last_update_at"`
+		NodeID                  string `json:"node_id"`
+		DomesticVersion         string `json:"domestic_version"`
+		DomesticEntryCount      int    `json:"domestic_entry_count"`
+		DomesticLastUpdateAt    string `json:"domestic_last_update_at"`
+		DomesticLastSyncError   string `json:"domestic_last_sync_error,omitempty"`
+		OverseasVersion         string `json:"overseas_version"`
+		OverseasEntryCount      int    `json:"overseas_entry_count"`
+		OverseasLastUpdateAt    string `json:"overseas_last_update_at"`
+		OverseasLastSyncError   string `json:"overseas_last_sync_error,omitempty"`
 	}
 	items := make([]row, 0, len(nodes))
 	for _, n := range nodes {
@@ -1444,13 +1460,15 @@ func (h *Handler) IPListStatus(c *gin.Context) {
 			dCount = n.IPListCount
 		}
 		items = append(items, row{
-			NodeID:               n.ID,
-			DomesticVersion:      dVer,
-			DomesticEntryCount:   dCount,
-			DomesticLastUpdateAt: dAt,
-			OverseasVersion:      oVer,
-			OverseasEntryCount:   n.OverseasIPListCount,
-			OverseasLastUpdateAt: oAt,
+			NodeID:                n.ID,
+			DomesticVersion:       dVer,
+			DomesticEntryCount:    dCount,
+			DomesticLastUpdateAt:  dAt,
+			DomesticLastSyncError: strings.TrimSpace(n.DomesticIPListLastError),
+			OverseasVersion:       oVer,
+			OverseasEntryCount:    n.OverseasIPListCount,
+			OverseasLastUpdateAt:  oAt,
+			OverseasLastSyncError: strings.TrimSpace(n.OverseasIPListLastError),
 		})
 	}
 	artifacts := map[string]gin.H{}

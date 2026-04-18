@@ -52,6 +52,9 @@ var buildVersion string
 var startupIPListReportOnce sync.Once
 var upgradeExecMu sync.Mutex
 
+// ipListDownloadClient 拉取控制面 /api/ip-lists/download 时使用，避免无超时导致长时间挂起。
+var ipListDownloadClient = &http.Client{Timeout: 120 * time.Second}
+
 func agentVersion() string {
 	if strings.TrimSpace(buildVersion) != "" {
 		return normalizeVersion(strings.TrimSpace(buildVersion))
@@ -1244,7 +1247,7 @@ func updateIPListFromAPI(cfg *Config, scope, downloadURL, version string) error 
 			targetURL = targetURL + "?version=" + url.QueryEscape(strings.TrimSpace(version))
 		}
 	}
-	resp, err := http.Get(targetURL)
+	resp, err := ipListDownloadClient.Get(targetURL)
 	if err != nil {
 		return err
 	}

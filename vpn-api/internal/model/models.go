@@ -80,7 +80,11 @@ type Node struct {
 	OverseasIPListVersion  string     `json:"overseas_ip_list_version"`
 	OverseasIPListCount    int        `json:"overseas_ip_list_count" gorm:"default:0"`
 	OverseasIPListUpdateAt *time.Time `json:"overseas_ip_list_update_at"`
-	CreatedAt              time.Time  `json:"created_at"`
+	// DomesticIPListLastError 最近一次国内库同步失败原因（成功后会清空）。
+	DomesticIPListLastError string `json:"domestic_ip_list_last_error" gorm:"size:512"`
+	// OverseasIPListLastError 最近一次海外库同步失败原因（成功后会清空）。
+	OverseasIPListLastError string `json:"overseas_ip_list_last_error" gorm:"size:512"`
+	CreatedAt               time.Time `json:"created_at"`
 }
 
 type IPListSource struct {
