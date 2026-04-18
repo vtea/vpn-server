@@ -83,7 +83,14 @@ http.interceptors.response.use(
     } else if (status === 403) {
       const suppress403 = Boolean(err.config?.meta?.suppress403)
       if (!suppress403) {
-        ElMessage.error(msg || '没有操作权限')
+        const d = err.response?.data
+        const detail =
+          d && typeof d === 'object' && typeof d.detail === 'string'
+            ? d.detail
+            : ''
+        ElMessage.error(
+          detail ? `${msg || '没有操作权限'}：${detail}` : (msg || '没有操作权限')
+        )
       }
     } else if (status === 404) {
       if (suppress404) return Promise.reject(err)

@@ -21,11 +21,15 @@ type AdminScope struct {
 }
 
 // AdminIsUnrestricted 超级管理员或 permissions 为 * 时不使用节点白名单。
+// Role 与数据库中大小写/空格差异做归一化，避免界面与接口判定不一致。
 func AdminIsUnrestricted(a *model.Admin) bool {
 	if a == nil {
 		return false
 	}
-	return a.Role == "admin" || strings.TrimSpace(a.Permissions) == "*"
+	if strings.EqualFold(strings.TrimSpace(a.Role), "admin") {
+		return true
+	}
+	return strings.TrimSpace(a.Permissions) == "*"
 }
 
 // loadAdminScope 从数据库解析当前 JWT 对应管理员的节点范围。

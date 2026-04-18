@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Admin struct {
 	ID           uint      `json:"id" gorm:"primaryKey"`
@@ -22,7 +25,7 @@ type AdminNodeScope struct {
 //
 //	nodes, users, rules, tunnels, audit, admins
 func (a *Admin) HasPermission(module string) bool {
-	if a.Role == "admin" || a.Permissions == "*" {
+	if strings.EqualFold(strings.TrimSpace(a.Role), "admin") || strings.TrimSpace(a.Permissions) == "*" {
 		return true
 	}
 	for _, p := range splitPerms(a.Permissions) {

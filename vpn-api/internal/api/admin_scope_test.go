@@ -10,6 +10,9 @@ func TestAdminIsUnrestricted(t *testing.T) {
 	if !AdminIsUnrestricted(&model.Admin{Role: "admin", Permissions: "nodes"}) {
 		t.Fatal("admin role should be unrestricted")
 	}
+	if !AdminIsUnrestricted(&model.Admin{Role: "Admin", Permissions: "nodes"}) {
+		t.Fatal("Admin role casing should be unrestricted")
+	}
 	if !AdminIsUnrestricted(&model.Admin{Role: "operator", Permissions: "*"}) {
 		t.Fatal("star perms should be unrestricted")
 	}

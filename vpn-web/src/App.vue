@@ -215,14 +215,27 @@ const normalizeAdminInfo = (info) => {
   return { username, role, perms, node_scope: nodeScope, node_ids: nodeIds }
 }
 
+/**
+ * 与 isSuperAdminSession 一致：JWT 中的 role/perms 覆盖本地缓存，避免顶栏误判「超级管理员」。
+ * 合并 profile 是为保留 JWT 不含的 node_scope / node_ids（来自登录或 /api/me）。
+ */
 const adminInfo = computed(() => {
   const profile = normalizeAdminInfo(getAdminProfile())
-  if (profile.username || profile.role || profile.perms) return profile
   const token = getSessionToken()
-  if (!token) return {}
-  const payload = parseJwtPayload(token)
-  if (!payload) return {}
-  return normalizeAdminInfo(payload)
+  const payload = token ? parseJwtPayload(token) : null
+  const fromJwt =
+    payload &&
+    typeof payload === 'object' &&
+    (payload.role || payload.permissions || payload.perms)
+      ? normalizeAdminInfo(payload)
+      : null
+  if (!fromJwt && !(profile.username || profile.role || profile.perms)) {
+    return {}
+  }
+  return {
+    ...profile,
+    ...(fromJwt || {})
+  }
 })
 
 const roleLabel = computed(() => {

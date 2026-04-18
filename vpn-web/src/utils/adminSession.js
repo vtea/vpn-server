@@ -84,16 +84,26 @@ function normalizeRolePerms(info) {
 
 /**
  * 当前会话是否为超级管理员（role=admin 或 permissions=*），供路由守卫与侧栏使用。
- * 优先读已缓存的 admin 资料，否则从 JWT 解析，避免仅带 token 时误判。
+ * **优先使用 JWT payload**（登录时由后端签发，与当时库中账号一致），再回退到本地缓存的 `/me` 资料。
+ * 避免仅因 localStorage 中过期的 `admin_profile` 误判为超管，导致界面显示「超级管理员」但接口 403。
  * @returns {boolean}
  */
 export function isSuperAdminSession() {
-  let info = getAdminProfile()
-  if (!info || (!info.role && !info.permissions && !info.perms)) {
-    const token = getSessionToken()
-    const payload = token ? parseJwtPayload(token) : null
-    info = payload && typeof payload === 'object' ? payload : null
+  const token = getSessionToken()
+  const fromJwt = token ? parseJwtPayload(token) : null
+  let info = null
+  if (
+    fromJwt &&
+    typeof fromJwt === 'object' &&
+    (fromJwt.role || fromJwt.permissions || fromJwt.perms)
+  ) {
+    info = fromJwt
   }
+  if (!info) {
+    const p = getAdminProfile()
+    if (p && typeof p === 'object') info = p
+  }
+  if (!info) return false
   const { role, perms } = normalizeRolePerms(info)
   return role === 'admin' || perms === '*'
 }

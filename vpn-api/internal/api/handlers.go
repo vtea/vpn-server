@@ -25,6 +25,7 @@ import (
 	"gorm.io/gorm"
 	"vpn-api/internal/config"
 	"vpn-api/internal/debuglog"
+	"vpn-api/internal/middleware"
 	"vpn-api/internal/model"
 	"vpn-api/internal/service"
 )
@@ -837,8 +838,29 @@ type createUserReq struct {
 }
 
 func (h *Handler) CreateUser(c *gin.Context) {
-	if _, ok := h.ensureUnrestrictedAdmin(c); !ok {
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
 		return
+	}
+	// 库表判定与 JWT 声明任一为超管即允许：避免库字段/驱动与登录签发不一致导致长期 403；降级为运维后需待 Token 过期或重新登录使新 JWT 生效。
+	jwtOK := middleware.JWTClaimsUnrestricted(c)
+	if !scope.Unrestricted && !jwtOK {
+		log.Printf(
+			"vpn-api: CreateUser forbidden admin=%s db_role=%q db_permissions=%q jwt_unrestricted=%v",
+			scope.Admin.Username,
+			scope.Admin.Role,
+			scope.Admin.Permissions,
+			jwtOK,
+		)
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "仅超级管理员可创建 VPN 用户",
+			"code":  "require_super_admin",
+			"detail": "需数据库 admins 中 role=admin 或 permissions=*，且登录 Token 中含相同超管声明；修改库后请重新登录。",
+		})
+		return
+	}
+	if !scope.Unrestricted && jwtOK {
+		log.Printf("vpn-api: CreateUser allowed by JWT (db unrestricted=false) admin=%s", scope.Admin.Username)
 	}
 	var req createUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2770,15 +2792,9 @@ func (h *Handler) RollbackConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": ver})
 }
 
-// callerCanManageAdmins 与 AdminIsUnrestricted 一致：JWT 中 role=admin 或 permissions（perms）为 *。
+// callerCanManageAdmins 与 AdminIsUnrestricted / JWTClaimsUnrestricted 一致（claims 层面，不查库）。
 func callerCanManageAdmins(c *gin.Context) bool {
-	role, _ := c.Get("role")
-	if rs, ok := role.(string); ok && rs == "admin" {
-		return true
-	}
-	perms, _ := c.Get("permissions")
-	ps, ok := perms.(string)
-	return ok && strings.TrimSpace(ps) == "*"
+	return middleware.JWTClaimsUnrestricted(c)
 }
 
 func (h *Handler) ListAdmins(c *gin.Context) {
