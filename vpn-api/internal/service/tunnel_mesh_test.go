@@ -52,7 +52,9 @@ func TestEnsureFullMeshTunnels_fillsMissingEdges(t *testing.T) {
 	}
 
 	var total int64
-	db.Model(&model.Tunnel{}).Count(&total)
+	if err := db.Model(&model.Tunnel{}).Count(&total).Error; err != nil {
+		t.Fatal(err)
+	}
 	if total != 3 {
 		t.Fatalf("expected 3 tunnels total, got %d", total)
 	}

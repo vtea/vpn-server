@@ -22,6 +22,13 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// logWSHubDBErr 记录 Agent WebSocket 路径写库失败（不中断连接，便于排查节点/隧道状态漂移）。
+func logWSHubDBErr(ctx string, err error) {
+	if err != nil {
+		log.Printf("ws_hub db: %s: %v", ctx, err)
+	}
+}
+
 type AgentConn struct {
 	NodeID string
 	Conn   *websocket.Conn
@@ -301,9 +308,9 @@ func (hub *WSHub) HandleWS(c *gin.Context) {
 	hub.conns[bt.NodeID] = ac
 	hub.mu.Unlock()
 
-	hub.db.Model(&model.Node{}).Where("id = ?", bt.NodeID).Updates(map[string]any{
+	logWSHubDBErr("node_online status", hub.db.Model(&model.Node{}).Where("id = ?", bt.NodeID).Updates(map[string]any{
 		"status": "online",
-	})
+	}).Error)
 	if hub.OnEvent != nil {
 		hub.OnEvent("node_online", map[string]any{"node_id": bt.NodeID})
 	}
@@ -321,9 +328,9 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 		hub.mu.Unlock()
 		ac.Conn.Close()
 
-		hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
+		logWSHubDBErr("node_offline status", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
 			"status": "offline",
-		})
+		}).Error)
 		if hub.OnEvent != nil {
 			hub.OnEvent("node_offline", map[string]any{"node_id": ac.NodeID})
 		}
@@ -348,9 +355,9 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 
 		switch msg.Type {
 		case "heartbeat":
-			hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
+			logWSHubDBErr("heartbeat status", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
 				"status": "online",
-			})
+			}).Error)
 		case "report":
 			var rpt struct {
 				AgentVersion string   `json:"agent_version"`
@@ -375,7 +382,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				if len(rpt.Capabilities) > 0 {
 					updates["agent_capabilities"] = strings.Join(rpt.Capabilities, ",")
 				}
-				hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates)
+				logWSHubDBErr("report", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates).Error)
 				log.Printf("agent report: node=%s version=%s arch=%s capabilities=%d wg_pubkey=%t", ac.NodeID, normalizeAgentVersion(rpt.AgentVersion), strings.TrimSpace(rpt.AgentArch), len(rpt.Capabilities), strings.TrimSpace(rpt.WGPublicKey) != "")
 				newWG := strings.TrimSpace(rpt.WGPublicKey)
 				if hub.AutoWireGuardRefresh != nil && newWG != "" && newWG != prevWG {
@@ -511,7 +518,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				if h.WGPublicKey != "" {
 					updates["wg_public_key"] = h.WGPublicKey
 				}
-				hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates)
+				logWSHubDBErr("health node", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(updates).Error)
 				now := time.Now()
 				for _, t := range h.Tunnels {
 					var tunnel model.Tunnel
@@ -538,7 +545,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 							eval.Reason = "非主上报端未降低已报状态"
 						}
 					}
-					hub.db.Model(&model.Tunnel{}).
+					logWSHubDBErr(fmt.Sprintf("health tunnel id=%d", tunnel.ID), hub.db.Model(&model.Tunnel{}).
 						Where("id = ?", tunnel.ID).
 						Updates(map[string]any{
 							"latency_ms":           t.LatencyMs,
@@ -548,13 +555,13 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 							"status_updated_at":    now,
 							"consecutive_failures": eval.ConsecutiveFailures,
 							"last_healthy_at":      eval.LastHealthyAt,
-						})
+						}).Error)
 					if tid := hub.findTunnelID(ac.NodeID, t.PeerNodeID); tid != 0 {
-						hub.db.Create(&model.TunnelMetric{
+						logWSHubDBErr(fmt.Sprintf("tunnel_metric tunnel_id=%d", tid), hub.db.Create(&model.TunnelMetric{
 							TunnelID:  tid,
 							LatencyMs: t.LatencyMs,
 							LossPct:   t.LossPct,
-						})
+						}).Error)
 					}
 				}
 				if hub.OnEvent != nil {
@@ -581,20 +588,20 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				}
 				now := time.Now()
 				if scope == "" || scope == "domestic" {
-					hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
+					logWSHubDBErr("iplist_result domestic", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
 						"ip_list_version":            res.Version,
 						"ip_list_count":              res.EntryCount,
 						"ip_list_update_at":          &now,
 						"domestic_ip_list_version":   res.Version,
 						"domestic_ip_list_count":     res.EntryCount,
 						"domestic_ip_list_update_at": &now,
-					})
+					}).Error)
 				} else if scope == "overseas" {
-					hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
+					logWSHubDBErr("iplist_result overseas", hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Updates(map[string]any{
 						"overseas_ip_list_version":   res.Version,
 						"overseas_ip_list_count":     res.EntryCount,
 						"overseas_ip_list_update_at": &now,
-					})
+					}).Error)
 				}
 				log.Printf("iplist_result applied: node=%s scope=%s version=%s entries=%d", ac.NodeID, scope, strings.TrimSpace(res.Version), res.EntryCount)
 			}
@@ -621,7 +628,7 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					if reason == "" {
 						reason = "WireGuard 刷新失败"
 					}
-					hub.db.Model(&model.Tunnel{}).
+					logWSHubDBErr(fmt.Sprintf("wg_refresh_result peer=%s", it.PeerNodeID), hub.db.Model(&model.Tunnel{}).
 						Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",
 							ac.NodeID, it.PeerNodeID, it.PeerNodeID, ac.NodeID).
 						Updates(map[string]any{
@@ -629,15 +636,15 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 							"status_reason":        reason,
 							"status_updated_at":    now,
 							"consecutive_failures": gorm.Expr("COALESCE(consecutive_failures, 0) + 1"),
-						})
+						}).Error)
 				}
 				detail := fmt.Sprintf("success=%t ok_peers=%d total_peers=%d error=%s", res.Success, okPeers, len(res.Results), singleLine(res.Error))
-				hub.db.Create(&model.AuditLog{
+				logWSHubDBErr("wg_refresh_result audit", hub.db.Create(&model.AuditLog{
 					AdminUser: "system",
 					Action:    "wg_refresh_result",
 					Target:    "node:" + ac.NodeID,
 					Detail:    detail,
-				})
+				}).Error)
 				log.Printf("wg_refresh_result: node=%s %s", ac.NodeID, detail)
 			}
 		case "upgrade_result":
@@ -668,11 +675,11 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 					updates["status"] = "failed"
 					updates["message"] = singleLine(res.Error)
 				}
-				hub.db.Model(&model.AgentUpgradeTaskItem{}).
+				logWSHubDBErr(fmt.Sprintf("upgrade_result task=%d node=%s", res.TaskID, ac.NodeID), hub.db.Model(&model.AgentUpgradeTaskItem{}).
 					Where("task_id = ? AND node_id = ? AND status IN ?", res.TaskID, ac.NodeID, []string{"pending", "running", "verifying"}).
-					Updates(updates)
+					Updates(updates).Error)
 				if res.CurrentVersion != "" {
-					hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Update("agent_version", res.CurrentVersion)
+					logWSHubDBErr(fmt.Sprintf("upgrade_result agent_version node=%s", ac.NodeID), hub.db.Model(&model.Node{}).Where("id = ?", ac.NodeID).Update("agent_version", res.CurrentVersion).Error)
 				}
 			}
 		case "upgrade_precheck_result":
@@ -695,9 +702,9 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 				updates["step"] = "precheck"
 				updates["error_code"] = map[bool]string{true: "", false: "precheck_failed"}[res.Success]
 				updates["last_seen_at"] = &now
-				hub.db.Model(&model.AgentUpgradeTaskItem{}).
+				logWSHubDBErr(fmt.Sprintf("upgrade_precheck_result task=%d node=%s", res.TaskID, ac.NodeID), hub.db.Model(&model.AgentUpgradeTaskItem{}).
 					Where("task_id = ? AND node_id = ? AND status = ?", res.TaskID, ac.NodeID, "prechecking").
-					Updates(updates)
+					Updates(updates).Error)
 			}
 		}
 	}
@@ -705,12 +712,14 @@ func (hub *WSHub) readPump(ac *AgentConn) {
 
 func (hub *WSHub) findTunnelID(nodeA, nodeB string) uint {
 	var t model.Tunnel
-	hub.db.
+	if err := hub.db.
 		Select("id").
 		Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)",
 			nodeA, nodeB, nodeB, nodeA).
 		Limit(1).
-		Find(&t)
+		Find(&t).Error; err != nil {
+		logWSHubDBErr(fmt.Sprintf("findTunnelID %s-%s", nodeA, nodeB), err)
+	}
 	return t.ID
 }
 

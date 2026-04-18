@@ -209,7 +209,10 @@ func (h *Handler) PatchNetworkSegment(c *gin.Context) {
 			log.Printf("patch segment: distinct node_id: %v", err)
 		} else {
 			for _, nid := range nodeIDs {
-				h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
+				if err := h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1)).Error; err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
 				h.pushInstancesConfigToNode(nid)
 			}
 		}
@@ -236,8 +239,13 @@ func (h *Handler) DeleteNetworkSegment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("segment still used by %d node binding(s)", n)})
 		return
 	}
-	if err := h.db.Where("id = ?", id).Delete(&model.NetworkSegment{}).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	res := h.db.Where("id = ?", id).Delete(&model.NetworkSegment{})
+	if res.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": res.Error.Error()})
+		return
+	}
+	if res.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "segment not found"})
 		return
 	}
 	h.audit(c, "delete_network_segment", fmt.Sprintf("segment:%s", id), "")

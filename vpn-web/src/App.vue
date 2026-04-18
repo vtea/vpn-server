@@ -158,6 +158,13 @@ const route = useRoute()
 const isCollapsed = ref(false)
 const isMobile = ref(false)
 
+/** 去掉尾部斜杠，避免 /login 与 /login/ 在全屏页、菜单高亮上不一致（History 模式 + 子路径部署时更稳） */
+const normalizedPath = computed(() => {
+  const p = route.path
+  if (p.length > 1 && p.endsWith('/')) return p.replace(/\/+$/, '')
+  return p
+})
+
 const syncCollapsedForViewport = () => {
   const mobile = window.innerWidth <= 768
   isMobile.value = mobile
@@ -171,7 +178,7 @@ const handleResize = () => {
 }
 
 const fullPages = ['/login', '/self-service']
-const isFullPage = computed(() => fullPages.includes(route.path))
+const isFullPage = computed(() => fullPages.includes(normalizedPath.value))
 
 const menuMap = {
   '/': '仪表盘',
@@ -186,16 +193,18 @@ const menuMap = {
 }
 
 const activeMenu = computed(() => {
-  if (route.path.startsWith('/nodes/')) return '/nodes'
-  if (route.path.startsWith('/settings')) return '/settings/api'
-  if (route.path === '/network-segments') return '/network-segments'
-  return route.path
+  const p = normalizedPath.value
+  if (p.startsWith('/nodes/')) return '/nodes'
+  if (p.startsWith('/settings')) return '/settings/api'
+  if (p === '/network-segments') return '/network-segments'
+  return p
 })
 
 const currentBreadcrumb = computed(() => {
-  if (route.path.startsWith('/nodes/')) return '节点管理'
-  if (route.path.startsWith('/settings')) return 'API 连接'
-  return menuMap[route.path] || ''
+  const p = normalizedPath.value
+  if (p.startsWith('/nodes/')) return '节点管理'
+  if (p.startsWith('/settings')) return 'API 连接'
+  return menuMap[p] || ''
 })
 
 const normalizeAdminInfo = (info) => {

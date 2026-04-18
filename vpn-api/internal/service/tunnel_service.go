@@ -245,7 +245,9 @@ func BuildTunnelConfigsForNode(db *gorm.DB, nodeID string) ([]TunnelPeerConfig, 
 		}
 
 		var peerInstances []model.Instance
-		db.Where("node_id = ?", peerNodeID).Find(&peerInstances)
+		if err := db.Where("node_id = ?", peerNodeID).Find(&peerInstances).Error; err != nil {
+			return nil, err
+		}
 		localIP = strings.TrimSpace(localIP)
 		peerIP = strings.TrimSpace(peerIP)
 		allowedCIDRs := peerIP + "/32"

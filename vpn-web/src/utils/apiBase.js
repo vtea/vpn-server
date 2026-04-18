@@ -1,13 +1,21 @@
 /** localStorage 中保存用户选择的 API 根地址；未设置时使用构建时 VITE_API_BASE_URL */
 export const API_BASE_STORAGE_KEY = 'vpn_admin_api_base_url'
 
+/**
+ * 规范化用户输入的 API 根地址：去空白、去尾部斜杠、剥离误填的 `/api`（避免请求变成 `/api/api/...`）。
+ * @param {string} s - 原始输入
+ * @returns {string} 无尾部斜杠的 origin 或空串
+ */
 export function normalizeApiBase (s) {
   if (typeof s !== 'string') return ''
   let t = s.trim()
-  if (t.endsWith('/')) t = t.slice(0, -1)
-  // 前端请求路径均为 /api/...；若用户误将根填成 http://host:56700/api，会拼成 /api/api/... → 404
-  if (t.endsWith('/api')) {
-    t = t.slice(0, -4)
+  if (t === '') return ''
+  // 前端请求路径均为 /api/...；误填 .../api、.../api/、.../api/api 时会拼成 /api/api/... → 404
+  for (let i = 0; i < 8; i++) {
+    const before = t
+    while (t.endsWith('/')) t = t.slice(0, -1)
+    if (t.endsWith('/api')) t = t.slice(0, -4)
+    if (t === before) break
   }
   return t
 }

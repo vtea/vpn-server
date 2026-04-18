@@ -27,6 +27,30 @@ const apiProxy = {
 export default defineConfig({
   plugins: [vue()],
   /**
+   * 拆分 element-plus / d3 / vue 生态，利于缓存与并行下载（首屏仍可能拉取含业务的主 chunk）。
+   */
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks (id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('element-plus')) return 'el-plus'
+          if (id.includes('d3')) return 'd3'
+          if (
+            id.includes('/vue/') ||
+            id.includes('@vue') ||
+            id.includes('vue-router') ||
+            id.includes('pinia')
+          ) {
+            return 'vue-vendor'
+          }
+        }
+      }
+    },
+    /** element-plus 单包仍可能 >700kB，属预期 */
+    chunkSizeWarningLimit: 1200
+  },
+  /**
    * vite-ssg：nested 产出 network-segments/index.html，便于静态服务器按目录访问 /network-segments/
    * （无尾斜杠的 /network-segments 仍依赖服务器是否重定向到目录，见文档）
    */

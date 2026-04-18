@@ -52,16 +52,24 @@ func JWT(secret string) gin.HandlerFunc {
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
-		if ok {
-			// 与 role/perms 一致：sub 可能为 JSON 数字等非 string，需规范为字符串再写入上下文。
-			c.Set("admin", jwtClaimString(claims["sub"]))
-			c.Set("role", jwtClaimString(claims["role"]))
-			permsVal := claims["perms"]
-			if permsVal == nil {
-				permsVal = claims["permissions"]
-			}
-			c.Set("permissions", jwtClaimString(permsVal))
+		if !ok {
+			// 本 API 仅支持 MapClaims（与 Login 签发一致）；否则不设上下文仍 Next 会导致鉴权/审计异常。
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token claims"})
+			return
 		}
+		// 与 role/perms 一致：sub 可能为 JSON 数字等非 string，需规范为字符串再写入上下文。
+		sub := jwtClaimString(claims["sub"])
+		if sub == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token: missing sub"})
+			return
+		}
+		c.Set("admin", sub)
+		c.Set("role", jwtClaimString(claims["role"]))
+		permsVal := claims["perms"]
+		if permsVal == nil {
+			permsVal = claims["permissions"]
+		}
+		c.Set("permissions", jwtClaimString(permsVal))
 		c.Next()
 	}
 }

@@ -20,6 +20,13 @@ import (
 	"vpn-api/internal/model"
 )
 
+// logAgentUpgradeDB 记录升级任务协程内写库失败（便于排查任务项状态与 UI 不一致）。
+func logAgentUpgradeDB(ctx string, err error) {
+	if err != nil {
+		log.Printf("agent_upgrade db: %s: %v", ctx, err)
+	}
+}
+
 func readFirstLineTrimmed(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -306,9 +313,13 @@ func (h *Handler) CreateAgentUpgradeTask(c *gin.Context) {
 }
 
 func (h *Handler) GetAgentUpgradeTask(c *gin.Context) {
-	id := c.Param("id")
+	taskID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+		return
+	}
 	var task model.AgentUpgradeTask
-	if err := h.db.First(&task, id).Error; err != nil {
+	if err := h.db.First(&task, uint(taskID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
@@ -328,9 +339,13 @@ func (h *Handler) ListAgentUpgradeTaskItems(c *gin.Context) {
 	if !ok {
 		return
 	}
-	id := c.Param("id")
+	taskID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task id"})
+		return
+	}
 	var task model.AgentUpgradeTask
-	if err := h.db.First(&task, id).Error; err != nil {
+	if err := h.db.First(&task, uint(taskID)).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
@@ -339,7 +354,7 @@ func (h *Handler) ListAgentUpgradeTaskItems(c *gin.Context) {
 		return
 	}
 	var items []model.AgentUpgradeTaskItem
-	if err := h.db.Where("task_id = ?", id).Order("id asc").Find(&items).Error; err != nil {
+	if err := h.db.Where("task_id = ?", task.ID).Order("id asc").Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -448,10 +463,13 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 		return
 	}
 	now := time.Now()
-	h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
+	if err := h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
 		"status":     "running",
 		"started_at": &now,
-	})
+	}).Error; err != nil {
+		log.Printf("runAgentUpgradeTask: mark running task_id=%d: %v", taskID, err)
+		return
+	}
 
 	var items []model.AgentUpgradeTaskItem
 	if err := h.db.Where("task_id = ?", taskID).Order("id asc").Find(&items).Error; err != nil {
@@ -468,11 +486,11 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 		if nodeSupportsCapability(h.db, it.NodeID, "upgrade_precheck") {
 			h.dispatchUpgradePrecheck(taskID, it, urls, 25*time.Second)
 		} else {
-			h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", it.ID, "prechecking").Updates(map[string]any{
+			logAgentUpgradeDB(fmt.Sprintf("legacy_skip_precheck item_id=%d", it.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", it.ID, "prechecking").Updates(map[string]any{
 				"status":  "pending",
 				"step":    "precheck",
 				"message": "legacy_agent: precheck skipped",
-			})
+			}).Error)
 		}
 	}
 	if err := h.db.Where("task_id = ?", taskID).Order("id asc").Find(&items).Error; err != nil {
@@ -493,19 +511,19 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 	if canary == nil {
 		// All candidates may fail at precheck stage. Reuse finalize logic so
 		// success/failed counters are populated consistently for the UI.
-		h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
+		logAgentUpgradeDB(fmt.Sprintf("task_no_canary task_id=%d", taskID), h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
 			"status":        "failed",
 			"error_summary": "canary precheck failed or unavailable",
-		})
+		}).Error)
 		h.finalizeUpgradeTask(taskID)
 		return
 	}
 
 	if !h.dispatchUpgradeTaskItem(task, *canary, 3*time.Minute) {
-		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND id <> ? AND status = ?", taskID, canary.ID, "pending").Updates(map[string]any{
+		logAgentUpgradeDB(fmt.Sprintf("canary_failed_mark_skipped task_id=%d", taskID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND id <> ? AND status = ?", taskID, canary.ID, "pending").Updates(map[string]any{
 			"status":  "skipped",
 			"message": "canary failed",
-		})
+		}).Error)
 		h.finalizeUpgradeTask(taskID)
 		return
 	}
@@ -527,11 +545,11 @@ func (h *Handler) runAgentUpgradeTask(taskID uint) {
 }
 
 func (h *Handler) dispatchUpgradeTaskItem(task model.AgentUpgradeTask, item model.AgentUpgradeTaskItem, timeout time.Duration) bool {
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+	logAgentUpgradeDB(fmt.Sprintf("dispatch_mark_running item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
 		"status":  "running",
 		"step":    "dispatch",
 		"message": "dispatching upgrade command",
-	})
+	}).Error)
 
 	payload, merr := json.Marshal(map[string]any{
 		"task_id":         task.ID,
@@ -542,17 +560,17 @@ func (h *Handler) dispatchUpgradeTaskItem(task model.AgentUpgradeTask, item mode
 	})
 	if merr != nil {
 		log.Printf("dispatchUpgradeTaskItem: marshal upgrade_agent: %v", merr)
-		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+		logAgentUpgradeDB(fmt.Sprintf("dispatch_marshal_fail item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
 			"status":  "failed",
 			"message": "marshal upgrade payload failed",
-		})
+		}).Error)
 		return false
 	}
 	if h.hub == nil || h.hub.SendToNode(item.NodeID, WSMessage{Type: "upgrade_agent", Payload: payload}) != nil {
-		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+		logAgentUpgradeDB(fmt.Sprintf("dispatch_ws_fail item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
 			"status":  "failed",
 			"message": "agent is offline or ws send failed",
-		})
+		}).Error)
 		return false
 	}
 
@@ -569,13 +587,13 @@ func (h *Handler) dispatchUpgradeTaskItem(task model.AgentUpgradeTask, item mode
 		if cur.Status == "verifying" {
 			if verifyNodeVersionApplied(h.db, item.NodeID, task.Version) {
 				now := time.Now()
-				h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
-					"status":       "succeeded",
-					"step":         "verify_version",
-					"message":      "node reported target version",
+				logAgentUpgradeDB(fmt.Sprintf("dispatch_verify_succeeded item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+					"status":         "succeeded",
+					"step":           "verify_version",
+					"message":        "node reported target version",
 					"result_version": task.Version,
-					"last_seen_at":  &now,
-				})
+					"last_seen_at":   &now,
+				}).Error)
 				return true
 			}
 		}
@@ -583,17 +601,17 @@ func (h *Handler) dispatchUpgradeTaskItem(task model.AgentUpgradeTask, item mode
 			return false
 		}
 	}
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", item.ID, "running").Updates(map[string]any{
-		"status":  "timeout",
-		"message": "upgrade timed out",
+	logAgentUpgradeDB(fmt.Sprintf("dispatch_timeout_running item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", item.ID, "running").Updates(map[string]any{
+		"status":     "timeout",
+		"message":    "upgrade timed out",
 		"error_code": "upgrade_timeout",
-	})
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", item.ID, "verifying").Updates(map[string]any{
-		"status":  "failed",
-		"step":    "verify_version",
-		"message": "version_not_applied before timeout",
+	}).Error)
+	logAgentUpgradeDB(fmt.Sprintf("dispatch_timeout_verifying item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", item.ID, "verifying").Updates(map[string]any{
+		"status":     "failed",
+		"step":       "verify_version",
+		"message":    "version_not_applied before timeout",
 		"error_code": "version_not_applied",
-	})
+	}).Error)
 	return false
 }
 
@@ -617,21 +635,21 @@ func (h *Handler) dispatchUpgradePrecheck(taskID uint, item model.AgentUpgradeTa
 	})
 	if merr != nil {
 		log.Printf("dispatchUpgradePrecheck: marshal payload: %v", merr)
-		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+		logAgentUpgradeDB(fmt.Sprintf("precheck_marshal_fail item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
 			"status":     "failed",
 			"step":       "precheck",
 			"error_code": "marshal_failed",
 			"message":    "marshal precheck payload failed",
-		})
+		}).Error)
 		return
 	}
 	if h.hub == nil || h.hub.SendToNode(item.NodeID, WSMessage{Type: "upgrade_precheck", Payload: payload}) != nil {
-		h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
-			"status":  "failed",
-			"step":    "precheck",
+		logAgentUpgradeDB(fmt.Sprintf("precheck_ws_fail item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ?", item.ID).Updates(map[string]any{
+			"status":     "failed",
+			"step":       "precheck",
 			"error_code": "ws_send_failed",
-			"message": "unreachable: ws send failed",
-		})
+			"message":    "unreachable: ws send failed",
+		}).Error)
 		return
 	}
 	deadline := time.Now().Add(timeout)
@@ -645,12 +663,12 @@ func (h *Handler) dispatchUpgradePrecheck(taskID uint, item model.AgentUpgradeTa
 			return
 		}
 	}
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", item.ID, "prechecking").Updates(map[string]any{
-		"status":  "failed",
-		"step":    "precheck",
+	logAgentUpgradeDB(fmt.Sprintf("precheck_timeout item_id=%d", item.ID), h.db.Model(&model.AgentUpgradeTaskItem{}).Where("id = ? AND status = ?", item.ID, "prechecking").Updates(map[string]any{
+		"status":     "failed",
+		"step":       "precheck",
 		"error_code": "precheck_timeout",
-		"message": "unreachable: precheck timeout",
-	})
+		"message":    "unreachable: precheck timeout",
+	}).Error)
 }
 
 func nodeSupportsCapability(db *gorm.DB, nodeID, capability string) bool {
@@ -704,9 +722,18 @@ func compareSemver(a, b string) int {
 
 func (h *Handler) finalizeUpgradeTask(taskID uint) {
 	var total, success, failed int64
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ?", taskID).Count(&total)
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND status = ?", taskID, "succeeded").Count(&success)
-	h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND status IN ?", taskID, []string{"failed", "timeout"}).Count(&failed)
+	if err := h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ?", taskID).Count(&total).Error; err != nil {
+		log.Printf("finalizeUpgradeTask: count total task_id=%d: %v", taskID, err)
+		return
+	}
+	if err := h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND status = ?", taskID, "succeeded").Count(&success).Error; err != nil {
+		log.Printf("finalizeUpgradeTask: count success task_id=%d: %v", taskID, err)
+		return
+	}
+	if err := h.db.Model(&model.AgentUpgradeTaskItem{}).Where("task_id = ? AND status IN ?", taskID, []string{"failed", "timeout"}).Count(&failed).Error; err != nil {
+		log.Printf("finalizeUpgradeTask: count failed task_id=%d: %v", taskID, err)
+		return
+	}
 	status := "succeeded"
 	summary := ""
 	if failed > 0 {
@@ -714,11 +741,13 @@ func (h *Handler) finalizeUpgradeTask(taskID uint) {
 		summary = fmt.Sprintf("failed=%d", failed)
 	}
 	finish := time.Now()
-	h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
+	if err := h.db.Model(&model.AgentUpgradeTask{}).Where("id = ?", taskID).Updates(map[string]any{
 		"status":        status,
 		"success_count": int(success),
 		"failed_count":  int(failed),
 		"error_summary": summary,
 		"finished_at":   &finish,
-	})
+	}).Error; err != nil {
+		log.Printf("finalizeUpgradeTask: update task task_id=%d: %v", taskID, err)
+	}
 }

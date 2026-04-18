@@ -221,7 +221,9 @@ func ensureSegmentsAndBackfill(db *gorm.DB) error {
 	}
 	for _, node := range nodes {
 		var c int64
-		db.Model(&model.NodeSegment{}).Where("node_id = ?", node.ID).Count(&c)
+		if err := db.Model(&model.NodeSegment{}).Where("node_id = ?", node.ID).Count(&c).Error; err != nil {
+			return err
+		}
 		if c == 0 {
 			if err := db.Create(&model.NodeSegment{NodeID: node.ID, SegmentID: "default", Slot: 0}).Error; err != nil {
 				return err
@@ -331,7 +333,9 @@ func autoMigrateAndSeed(db *gorm.DB) error {
 		if err := db.Create(&admin).Error; err != nil {
 			return err
 		}
-		db.Create(&model.AuditLog{AdminUser: "system", Action: "seed_admin", Target: "admin", Detail: "created default admin account"})
+		if err := db.Create(&model.AuditLog{AdminUser: "system", Action: "seed_admin", Target: "admin", Detail: "created default admin account"}).Error; err != nil {
+			log.Printf("vpn-api: seed admin audit log failed: %v", err)
+		}
 	}
 	return nil
 }

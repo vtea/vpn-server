@@ -16,12 +16,12 @@
 
 | 主题 | 说明 |
 |------|------|
-| **节点 ID** | 控制面生成格式为 `node-{node_number}`（与节点号十进制对应）；列表/详情页展示即数据库主键。规划讨论见 `.cursor/plans/节点id与地址唯一性.plan.md`。 |
+| **节点 ID** | 控制面生成格式为 `node-{node_number}`（与节点号十进制对应）；列表/详情页展示即数据库主键。 |
 | **OpenVPN 子网** | 按节点号与所选组网网段、槽位自动分配（见下文 1.1）；管理台「添加节点」弹窗有简要提示。 |
-| **删除节点** | 需管理员密码：`POST /api/nodes/:id/delete`；详见 `.cursor/plans/节点管理-展示与删除鉴权.plan.md`。 |
+| **删除节点** | 需管理员密码：`POST /api/nodes/:id/delete`（实现见 `vpn-api` 路由与 `DeleteNodeWithPassword`）。 |
 | **Bootstrap 令牌** | 仅首次 `POST /api/agent/register` 有效；重装需在控制台「重新生成部署令牌」或调用 `POST /api/nodes/:id/rotate-bootstrap-token`。 |
 | **WireGuard 隧道 /30** | 骨干地址池见 1.2；高级编辑走 `PATCH /api/tunnels/:id`（须为 /30，且子网与端点 IP 全局不冲突）。 |
-| **总清单** | `.cursor/plans/MASTER-TODO.md` |
+| **总清单** | 以仓库 Issue / 迭代记录与 `vpn-api`、`vpn-web` 源码为准（原 `.cursor/plans` 清单不随仓库分发）。 |
 
 ---
 

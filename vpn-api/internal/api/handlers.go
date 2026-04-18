@@ -302,7 +302,10 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 	admin.PasswordHash = string(hash)
-	h.db.Save(admin)
+	if err := h.db.Save(admin).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	h.audit(c, "change_password", fmt.Sprintf("admin:%s", admin.Username), "self")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -822,7 +825,10 @@ func (h *Handler) PatchTunnel(c *gin.Context) {
 		return
 	}
 	for _, nid := range []string{tun.NodeA, tun.NodeB} {
-		h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
+		if err := h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1)).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	h.audit(c, "patch_tunnel", fmt.Sprintf("tunnel:%d", tun.ID), fmt.Sprintf("subnet=%s ip_a=%s ip_b=%s wg_port=%d", tun.Subnet, tun.IPA, tun.IPB, tun.WGPort))
 	h.pushWireGuardRefreshToOnlineNodes([]string{tun.NodeA, tun.NodeB}, fmt.Sprintf("patch_tunnel:%d", tun.ID))
@@ -1027,7 +1033,10 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 	}
 
 	var total int64
-	q.Count(&total)
+	if err := q.Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	var logs []model.AuditLog
 	if err := q.Order("created_at desc").Offset(offset).Limit(limit).Find(&logs).Error; err != nil {
@@ -1036,7 +1045,10 @@ func (h *Handler) ListAuditLogs(c *gin.Context) {
 	}
 
 	var actions []string
-	h.db.Model(&model.AuditLog{}).Distinct("action").Pluck("action", &actions)
+	if err := h.db.Model(&model.AuditLog{}).Distinct("action").Pluck("action", &actions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"items": logs, "total": total, "page": page, "limit": limit, "actions": actions})
 }
@@ -1078,7 +1090,10 @@ func (h *Handler) RepairTunnelMesh(c *gin.Context) {
 		affected[t.NodeB] = struct{}{}
 	}
 	for nid := range affected {
-		h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
+		if err := h.db.Model(&model.Node{}).Where("id = ?", nid).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1)).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	h.audit(c, "repair_tunnel_mesh", "tunnels", fmt.Sprintf("created=%d", len(created)))
 	if len(affected) > 0 {
@@ -1112,7 +1127,10 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 			return
 		}
 		var exceptions []model.IPListException
-		h.db.Find(&exceptions)
+		if err := h.db.Find(&exceptions).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		sent := 0
 		for _, n := range nodes {
 			if h.hub != nil && h.hub.IsOnline(n.ID) {
@@ -1185,7 +1203,10 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 	}
 
 	var exceptions []model.IPListException
-	h.db.Find(&exceptions)
+	if err := h.db.Find(&exceptions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	sent := 0
 	for _, n := range nodes {
@@ -1311,13 +1332,18 @@ func (h *Handler) IPListStatus(c *gin.Context) {
 	for _, scope := range []string{"domestic", "overseas"} {
 		var a model.IPListArtifact
 		err := h.db.Where("scope = ?", scope).Order("created_at desc").First(&a).Error
-		if err == nil {
-			artifacts[scope] = gin.H{
-				"version":     a.Version,
-				"entry_count": a.EntryCount,
-				"created_at":  a.CreatedAt.Format(time.RFC3339),
-				"sha256":      a.SHA256,
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
 			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		artifacts[scope] = gin.H{
+			"version":     a.Version,
+			"entry_count": a.EntryCount,
+			"created_at":  a.CreatedAt.Format(time.RFC3339),
+			"sha256":      a.SHA256,
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "artifacts": artifacts})
@@ -1489,7 +1515,11 @@ func (h *Handler) PatchIPListSource(c *gin.Context) {
 	}
 	var item model.IPListSource
 	if err := h.db.Where("scope = ?", scope).First(&item).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if req.PrimaryURL != nil {
@@ -1534,7 +1564,11 @@ func (h *Handler) DownloadIPList(c *gin.Context) {
 		q = h.db.Where("scope = ? AND version = ?", scope, version).Order("created_at desc")
 	}
 	if err := q.First(&artifact).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if _, err := os.Stat(artifact.FilePath); err != nil {
@@ -1820,7 +1854,10 @@ func (h *Handler) RevokeGrant(c *gin.Context) {
 			}
 		} else {
 			grant.CertStatus = "revoked"
-			h.db.Save(&grant)
+			if err := h.db.Save(&grant).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 	}
 
@@ -1941,14 +1978,20 @@ func (h *Handler) broadcastExceptions() {
 		return
 	}
 	var exceptions []model.IPListException
-	h.db.Find(&exceptions)
+	if err := h.db.Find(&exceptions).Error; err != nil {
+		log.Printf("broadcastExceptions: load exceptions: %v", err)
+		return
+	}
 	payload, err := json.Marshal(map[string]any{"exceptions": exceptions})
 	if err != nil {
 		log.Printf("broadcastExceptions: json.Marshal: %v", err)
 		return
 	}
 	var nodes []model.Node
-	h.db.Find(&nodes)
+	if err := h.db.Find(&nodes).Error; err != nil {
+		log.Printf("broadcastExceptions: load nodes: %v", err)
+		return
+	}
 	for _, n := range nodes {
 		if h.hub.IsOnline(n.ID) {
 			if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: payload}); err != nil {
@@ -2004,43 +2047,66 @@ func (h *Handler) deleteNode(c *gin.Context, id string) {
 
 	var meshPeers []string
 	var meshTuns []model.Tunnel
-	if err := h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&meshTuns).Error; err == nil {
-		seen := make(map[string]struct{})
-		for _, t := range meshTuns {
-			peer := t.NodeA
-			if peer == id {
-				peer = t.NodeB
-			}
-			if peer == "" || peer == id {
-				continue
-			}
-			if _, ok := seen[peer]; ok {
-				continue
-			}
-			seen[peer] = struct{}{}
-			meshPeers = append(meshPeers, peer)
+	if err := h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&meshTuns).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	seen := make(map[string]struct{})
+	for _, t := range meshTuns {
+		peer := t.NodeA
+		if peer == id {
+			peer = t.NodeB
 		}
+		if peer == "" || peer == id {
+			continue
+		}
+		if _, ok := seen[peer]; ok {
+			continue
+		}
+		seen[peer] = struct{}{}
+		meshPeers = append(meshPeers, peer)
 	}
 
 	var instanceIDs []uint
-	h.db.Model(&model.Instance{}).Where("node_id = ?", id).Pluck("id", &instanceIDs)
-	if len(instanceIDs) > 0 {
-		// 物理删除授权行，避免仅吊销仍占用 cert_cn 唯一约束；节点重建后同一用户+实例模式才能重新授权
-		h.db.Where("instance_id IN ?", instanceIDs).Delete(&model.UserGrant{})
-	}
-
 	var tunnelIDs []uint
-	h.db.Model(&model.Tunnel{}).Where("node_a = ? OR node_b = ?", id, id).Pluck("id", &tunnelIDs)
-	if len(tunnelIDs) > 0 {
-		h.db.Where("tunnel_id IN ?", tunnelIDs).Delete(&model.TunnelMetric{})
+	if err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Instance{}).Where("node_id = ?", id).Pluck("id", &instanceIDs).Error; err != nil {
+			return err
+		}
+		if len(instanceIDs) > 0 {
+			// 物理删除授权行，避免仅吊销仍占用 cert_cn 唯一约束；节点重建后同一用户+实例模式才能重新授权
+			if err := tx.Where("instance_id IN ?", instanceIDs).Delete(&model.UserGrant{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(&model.Tunnel{}).Where("node_a = ? OR node_b = ?", id, id).Pluck("id", &tunnelIDs).Error; err != nil {
+			return err
+		}
+		if len(tunnelIDs) > 0 {
+			if err := tx.Where("tunnel_id IN ?", tunnelIDs).Delete(&model.TunnelMetric{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("node_id = ?", id).Delete(&model.ConfigVersion{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("node_id = ?", id).Delete(&model.NodeSegment{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("node_id = ?", id).Delete(&model.Instance{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("node_id = ?", id).Delete(&model.NodeBootstrapToken{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("node_a = ? OR node_b = ?", id, id).Delete(&model.Tunnel{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&node).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-
-	h.db.Where("node_id = ?", id).Delete(&model.ConfigVersion{})
-	h.db.Where("node_id = ?", id).Delete(&model.NodeSegment{})
-	h.db.Where("node_id = ?", id).Delete(&model.Instance{})
-	h.db.Where("node_id = ?", id).Delete(&model.NodeBootstrapToken{})
-	h.db.Where("node_a = ? OR node_b = ?", id, id).Delete(&model.Tunnel{})
-	h.db.Delete(&node)
 	h.audit(c, "delete_node", fmt.Sprintf("node:%s", id), fmt.Sprintf("instances=%d cleaned_tunnels=%d", len(instanceIDs), len(tunnelIDs)))
 	h.pushWireGuardRefreshToOnlineNodes(meshPeers, "delete_node removed "+id)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -2119,7 +2185,10 @@ func (h *Handler) UpdateUser(c *gin.Context) {
 	if req.Status != nil {
 		user.Status = *req.Status
 	}
-	h.db.Save(&user)
+	if err := h.db.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	h.audit(c, "update_user", fmt.Sprintf("user:%s", user.Username), "")
 	c.JSON(http.StatusOK, gin.H{"user": user})
 }
@@ -2152,11 +2221,17 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 		}
 	}
 	var grants []model.UserGrant
-	h.db.Where("user_id = ?", user.ID).Find(&grants)
+	if err := h.db.Where("user_id = ?", user.ID).Find(&grants).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	for _, g := range grants {
 		if g.CertStatus == "active" || g.CertStatus == "placeholder" {
 			g.CertStatus = "revoked"
-			h.db.Save(&g)
+			if err := h.db.Save(&g).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 	}
 	if err := h.db.Where("user_id = ?", user.ID).Delete(&model.UserGrant{}).Error; err != nil {
@@ -2181,7 +2256,10 @@ func (h *Handler) ListNodeInstances(c *gin.Context) {
 		return
 	}
 	var instances []model.Instance
-	h.db.Where("node_id = ?", nodeID).Find(&instances)
+	if err := h.db.Where("node_id = ?", nodeID).Find(&instances).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": instances})
 }
 
@@ -2228,15 +2306,25 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		}
 	}
 	var nsCount int64
-	h.db.Model(&model.NodeSegment{}).Where("node_id = ? AND segment_id = ?", nodeID, segID).Count(&nsCount)
+	if err := h.db.Model(&model.NodeSegment{}).Where("node_id = ? AND segment_id = ?", nodeID, segID).Count(&nsCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if nsCount == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "node is not a member of this segment"})
 		return
 	}
 	exitTrim := strings.TrimSpace(req.ExitNode)
-	if instanceModeUsesExitPeer(mode) && exitTrim != "" && !h.tunnelConnectsPeers(nodeID, exitTrim) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "exit_node 须为本节点「相关隧道」中的对端节点 ID"})
-		return
+	if instanceModeUsesExitPeer(mode) && exitTrim != "" {
+		ok, err := h.tunnelConnectsPeers(nodeID, exitTrim)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "exit_node 须为本节点「相关隧道」中的对端节点 ID"})
+			return
+		}
 	}
 	inst := model.Instance{
 		NodeID: nodeID, SegmentID: segID, Mode: mode, Port: req.Port,
@@ -2246,7 +2334,10 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	h.db.Model(&model.Node{}).Where("id = ?", nodeID).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
+	if err := h.db.Model(&model.Node{}).Where("id = ?", nodeID).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	h.pushInstancesConfigToNode(nodeID)
 	h.audit(c, "create_instance", fmt.Sprintf("node:%s", nodeID), fmt.Sprintf("mode=%s port=%d", mode, req.Port))
 	c.JSON(http.StatusCreated, gin.H{"instance": inst})
@@ -2270,15 +2361,17 @@ func instanceModeUsesExitPeer(mode string) bool {
 }
 
 // tunnelConnectsPeers 是否存在一条隧道，两端分别为 nodeID 与 peerID。
-func (h *Handler) tunnelConnectsPeers(nodeID, peerID string) bool {
+func (h *Handler) tunnelConnectsPeers(nodeID, peerID string) (bool, error) {
 	if peerID == "" {
-		return false
+		return false, nil
 	}
 	var n int64
-	h.db.Model(&model.Tunnel{}).
+	if err := h.db.Model(&model.Tunnel{}).
 		Where("(node_a = ? AND node_b = ?) OR (node_a = ? AND node_b = ?)", nodeID, peerID, peerID, nodeID).
-		Count(&n)
-	return n > 0
+		Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (h *Handler) PatchInstance(c *gin.Context) {
@@ -2344,9 +2437,16 @@ func (h *Handler) PatchInstance(c *gin.Context) {
 	if req.ExitNode != nil {
 		v := strings.TrimSpace(*req.ExitNode)
 		if instanceModeUsesExitPeer(inst.Mode) {
-			if v != "" && !h.tunnelConnectsPeers(inst.NodeID, v) {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "exit_node 须为本节点「相关隧道」中的对端节点 ID"})
-				return
+			if v != "" {
+				ok, err := h.tunnelConnectsPeers(inst.NodeID, v)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				if !ok {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "exit_node 须为本节点「相关隧道」中的对端节点 ID"})
+					return
+				}
 			}
 			if inst.ExitNode != v {
 				inst.ExitNode = v
@@ -2362,7 +2462,10 @@ func (h *Handler) PatchInstance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	h.db.Model(&model.Node{}).Where("id = ?", inst.NodeID).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1))
+	if err := h.db.Model(&model.Node{}).Where("id = ?", inst.NodeID).UpdateColumn("config_version", gorm.Expr("config_version + ?", 1)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	h.pushInstancesConfigToNode(inst.NodeID)
 	detail := fmt.Sprintf("enabled=%v subnet=%s port=%d proto=%s exit_node=%s", inst.Enabled, inst.Subnet, inst.Port, inst.Proto, inst.ExitNode)
 	h.audit(c, "patch_instance", fmt.Sprintf("instance:%d", inst.ID), detail)
@@ -2403,7 +2506,10 @@ func (h *Handler) GetNodeStatus(c *gin.Context) {
 		return
 	}
 	var tunnels []model.Tunnel
-	h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&tunnels)
+	if err := h.db.Where("node_a = ? OR node_b = ?", id, id).Find(&tunnels).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"node_id":       node.ID,
 		"status":        node.Status,
@@ -2534,7 +2640,10 @@ func (h *Handler) GetTunnelMetrics(c *gin.Context) {
 		return
 	}
 	var metrics []model.TunnelMetric
-	h.db.Where("tunnel_id = ?", uint(tunnelID)).Order("created_at desc").Limit(100).Find(&metrics)
+	if err := h.db.Where("tunnel_id = ?", uint(tunnelID)).Order("created_at desc").Limit(100).Find(&metrics).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": metrics})
 }
 
@@ -2576,7 +2685,12 @@ func (h *Handler) DeleteException(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if err := h.db.Delete(&model.IPListException{}, uint(id)).Error; err != nil {
+	res := h.db.Delete(&model.IPListException{}, uint(id))
+	if res.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": res.Error.Error()})
+		return
+	}
+	if res.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -2742,26 +2856,44 @@ func (h *Handler) PrometheusMetrics(c *gin.Context) {
 		return
 	}
 	var nodeCount, userCount, tunnelCount, grantCount int64
-	scopedNodesQuery().Count(&nodeCount)
-	h.db.Model(&model.User{}).Count(&userCount)
+	if err := scopedNodesQuery().Count(&nodeCount).Error; err != nil {
+		c.Data(http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(err.Error()))
+		return
+	}
+	if err := h.db.Model(&model.User{}).Count(&userCount).Error; err != nil {
+		c.Data(http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(err.Error()))
+		return
+	}
 	tunQ := h.db.Model(&model.Tunnel{})
 	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		tunQ = tunQ.Where("node_a IN ? AND node_b IN ?", admScope.AllowedNodeIDs, admScope.AllowedNodeIDs)
 	}
-	tunQ.Count(&tunnelCount)
+	if err := tunQ.Count(&tunnelCount).Error; err != nil {
+		c.Data(http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(err.Error()))
+		return
+	}
 	grantQ := h.db.Model(&model.UserGrant{})
 	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		grantQ = grantQ.Joins("JOIN instances ON instances.id = user_grants.instance_id").
 			Where("instances.node_id IN ?", admScope.AllowedNodeIDs)
 	}
-	grantQ.Count(&grantCount)
+	if err := grantQ.Count(&grantCount).Error; err != nil {
+		c.Data(http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(err.Error()))
+		return
+	}
 
 	var onlineNodes int64
-	scopedNodesQuery().Where("status = ?", "online").Count(&onlineNodes)
+	if err := scopedNodesQuery().Where("status = ?", "online").Count(&onlineNodes).Error; err != nil {
+		c.Data(http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(err.Error()))
+		return
+	}
 
 	var totalOnlineUsers int
 	var nodes []model.Node
-	scopedNodesQuery().Find(&nodes)
+	if err := scopedNodesQuery().Find(&nodes).Error; err != nil {
+		c.Data(http.StatusInternalServerError, "text/plain; charset=utf-8", []byte(err.Error()))
+		return
+	}
 	for _, n := range nodes {
 		totalOnlineUsers += n.OnlineUsers
 	}
@@ -2792,7 +2924,10 @@ func (h *Handler) ListConfigVersions(c *gin.Context) {
 		q = q.Where("node_id IN ?", admScope.AllowedNodeIDs)
 	}
 	var versions []model.ConfigVersion
-	q.Find(&versions)
+	if err := q.Find(&versions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": versions})
 }
 
@@ -2846,7 +2981,10 @@ func (h *Handler) ListAdmins(c *gin.Context) {
 		return
 	}
 	var admins []model.Admin
-	h.db.Order("id asc").Find(&admins)
+	if err := h.db.Order("id asc").Find(&admins).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	items, err := h.adminsToPublicItems(admins)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -2909,12 +3047,16 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	}
 	if !AdminIsUnrestricted(&admin) {
 		if err := validateNodeIDsExist(h.db, req.NodeIDs); err != nil {
-			h.db.Delete(&admin)
+			if delErr := h.db.Delete(&admin).Error; delErr != nil {
+				log.Printf("CreateAdmin: rollback delete admin id=%d: %v", admin.ID, delErr)
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		if err := h.replaceAdminNodeScopes(h.db, admin.ID, req.NodeIDs); err != nil {
-			h.db.Delete(&admin)
+			if delErr := h.db.Delete(&admin).Error; delErr != nil {
+				log.Printf("CreateAdmin: rollback delete admin id=%d: %v", admin.ID, delErr)
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -2967,7 +3109,10 @@ func (h *Handler) UpdateAdmin(c *gin.Context) {
 		return
 	}
 	if AdminIsUnrestricted(&admin) {
-		_ = h.db.Where("admin_id = ?", admin.ID).Delete(&model.AdminNodeScope{}).Error
+		if err := h.db.Where("admin_id = ?", admin.ID).Delete(&model.AdminNodeScope{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	} else if req.NodeIDs != nil {
 		if err := validateNodeIDsExist(h.db, *req.NodeIDs); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -3027,7 +3172,10 @@ func (h *Handler) ResetAdminPassword(c *gin.Context) {
 		return
 	}
 	admin.PasswordHash = string(hash)
-	h.db.Save(&admin)
+	if err := h.db.Save(&admin).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	h.audit(c, "reset_admin_password", fmt.Sprintf("admin:%s", admin.Username), "by super admin")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -3051,8 +3199,15 @@ func (h *Handler) DeleteAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete default admin"})
 		return
 	}
-	h.db.Where("admin_id = ?", admin.ID).Delete(&model.AdminNodeScope{})
-	h.db.Delete(&admin)
+	if err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("admin_id = ?", admin.ID).Delete(&model.AdminNodeScope{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&admin).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	h.audit(c, "delete_admin", fmt.Sprintf("admin:%s", admin.Username), "")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -3069,7 +3224,10 @@ func (h *Handler) SelfServiceLookup(c *gin.Context) {
 		return
 	}
 	var grants []model.UserGrant
-	h.db.Where("user_id = ?", user.ID).Find(&grants)
+	if err := h.db.Where("user_id = ?", user.ID).Find(&grants).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"user": user, "grants": grants})
 }
 
