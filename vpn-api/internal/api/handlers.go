@@ -1300,15 +1300,78 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		listScope = "all"
 	}
 
+	// 「全部」时仅刷新已启用的同步源；未启用则跳过（不拉取、不报错）。已启用项并行拉取，墙钟时间约 max(启用路数)。
 	synced := []string{}
-	if listScope == "all" || listScope == "domestic" {
+	if listScope == "all" {
+		var domSrc, ovrSrc model.IPListSource
+		if err := h.db.Where("scope = ?", "domestic").First(&domSrc).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if err := h.db.Where("scope = ?", "overseas").First(&ovrSrc).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		var domErr, ovrErr error
+		var wg sync.WaitGroup
+		if domSrc.Enabled {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, domErr = h.refreshIPListArtifact("domestic")
+			}()
+		}
+		if ovrSrc.Enabled {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, ovrErr = h.refreshIPListArtifact("overseas")
+			}()
+		}
+		wg.Wait()
+		if domSrc.Enabled && domErr != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "refresh domestic ip list failed: " + domErr.Error()})
+			return
+		}
+		if ovrSrc.Enabled && ovrErr != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "refresh overseas ip list failed: " + ovrErr.Error()})
+			return
+		}
+		if domSrc.Enabled {
+			synced = append(synced, "domestic")
+		}
+		if ovrSrc.Enabled {
+			synced = append(synced, "overseas")
+		}
+		if len(synced) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "国内与海外 IP 库同步源均已关闭，无法刷新"})
+			return
+		}
+	} else if listScope == "domestic" {
+		var src model.IPListSource
+		if err := h.db.Where("scope = ?", "domestic").First(&src).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !src.Enabled {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "国内 IP 库同步源已关闭，无法刷新"})
+			return
+		}
 		if _, err := h.refreshIPListArtifact("domestic"); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "refresh domestic ip list failed: " + err.Error()})
 			return
 		}
 		synced = append(synced, "domestic")
-	}
-	if listScope == "all" || listScope == "overseas" {
+	} else if listScope == "overseas" {
+		var src model.IPListSource
+		if err := h.db.Where("scope = ?", "overseas").First(&src).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !src.Enabled {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "海外 IP 库同步源已关闭，无法刷新"})
+			return
+		}
 		if _, err := h.refreshIPListArtifact("overseas"); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "refresh overseas ip list failed: " + err.Error()})
 			return
@@ -1316,11 +1379,27 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		synced = append(synced, "overseas")
 	}
 
+	effectiveScope := listScope
+	if listScope == "all" {
+		if len(synced) == 1 {
+			effectiveScope = synced[0]
+		} else {
+			effectiveScope = "all"
+		}
+	}
+
 	nq := h.db.Model(&model.Node{})
 	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		if len(admScope.AllowedNodeIDs) == 0 {
 			h.audit(c, "trigger_iplist_update", "scoped", "sent_to=0 (no allowed nodes)")
-			c.JSON(http.StatusOK, gin.H{"scope": listScope, "synced": synced, "sent_to": 0, "total_nodes": 0})
+			c.JSON(http.StatusOK, gin.H{
+				"scope":            listScope,
+				"effective_scope":  effectiveScope,
+				"synced":           synced,
+				"sent_to":          0,
+				"total_nodes":      0,
+				"offline_node_count": 0,
+			})
 			return
 		}
 		nq = nq.Where("id IN ?", admScope.AllowedNodeIDs)
@@ -1340,7 +1419,7 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 	sent := 0
 	for _, n := range nodes {
 		if h.hub != nil && h.hub.IsOnline(n.ID) {
-			scopePayload, merr := json.Marshal(gin.H{"scope": listScope})
+			scopePayload, merr := json.Marshal(gin.H{"scope": effectiveScope})
 			if merr != nil {
 				log.Printf("TriggerIPListUpdate: marshal iplist scope: %v", merr)
 			} else {
@@ -1361,13 +1440,14 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 			sent++
 		}
 	}
-	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s sent_to=%d nodes exceptions=%d", listScope, sent, len(exceptions)))
+	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s effective=%s sent_to=%d nodes exceptions=%d", listScope, effectiveScope, sent, len(exceptions)))
 	offlineCount := len(nodes) - sent
 	if offlineCount < 0 {
 		offlineCount = 0
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"scope":              listScope,
+		"effective_scope":    effectiveScope,
 		"synced":             synced,
 		"sent_to":            sent,
 		"total_nodes":        len(nodes),

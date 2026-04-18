@@ -137,11 +137,18 @@ http.interceptors.response.use(
       )
     } else if (status >= 500) {
       const raw = err.response?.data
-      const detail =
+      let detail =
         typeof raw === 'string'
           ? raw
           : raw?.error ||
             (raw && typeof raw === 'object' ? JSON.stringify(raw) : '')
+      if (
+        typeof detail === 'string' &&
+        (detail.includes('<html') || detail.includes('<!DOCTYPE'))
+      ) {
+        detail =
+          '网关返回 502（多为反代等待上游超时或上游未响应）。若操作「全网立即更新」：请将 Nginx 等反代的 proxy_read_timeout 设为至少 180s，并重启 vpn-api 后再试'
+      }
       if (import.meta.env.DEV) {
         console.error('[vpn-api]', status, err.config?.url, raw)
       }

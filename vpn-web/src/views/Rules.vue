@@ -304,10 +304,20 @@ const triggerUpdate = async () => {
   updating.value = true
   try {
     const scope = sourceApiSupported.value ? updateScope.value : 'all'
-    const resp = await http.post('/api/ip-list/update', { scope })
+    // 控制面顺序拉取上游时海外库可能接近 120s；并行后仍可能达单路上限，需长于默认 45s axios 与常见反代 60s
+    const resp = await http.post('/api/ip-list/update', { scope }, { timeout: 180000 })
     const sent = resp.data?.sent_to
     const total = resp.data?.total_nodes
     const offline = resp.data?.offline_node_count
+    const synced = resp.data?.synced
+    /** 选「全部」但某一侧同步源关闭时，后端只刷新已启用的一侧 */
+    let scopeNote = ''
+    if (scope === 'all' && Array.isArray(synced) && synced.length === 1) {
+      scopeNote =
+        synced[0] === 'domestic'
+          ? '本次仅刷新国内库（海外同步源已关闭）。'
+          : '本次仅刷新海外库（国内同步源已关闭）。'
+    }
     if (typeof sent === 'number' && typeof total === 'number') {
       if (sent === 0) {
         ElMessage.warning(
@@ -316,10 +326,11 @@ const triggerUpdate = async () => {
       } else {
         const offPart =
           typeof offline === 'number' && offline > 0 ? `，${offline} 个节点离线未下发` : ''
-        ElMessage.success(`更新指令已下发（在线 ${sent} / 共 ${total} 节点${offPart}）`)
+        const prefix = scopeNote ? `${scopeNote} ` : ''
+        ElMessage.success(`${prefix}更新指令已下发（在线 ${sent} / 共 ${total} 节点${offPart}）`)
       }
     } else {
-      ElMessage.success('更新指令已下发')
+      ElMessage.success(scopeNote || '更新指令已下发')
     }
     setTimeout(loadIP, 3000)
   } finally {
