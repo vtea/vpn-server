@@ -3,7 +3,7 @@
     <div class="page-card">
       <div class="page-card-header">
         <span class="page-card-title">授权管理</span>
-        <el-button v-if="isSuperAdminSession()" type="primary" @click="showAdd = true">
+        <el-button v-if="hasModulePermission('users')" type="primary" @click="openAddDialog">
           <el-icon><Plus /></el-icon> 添加用户
         </el-button>
       </div>
@@ -106,7 +106,14 @@
     <el-dialog v-model="showAdd" title="添加用户" width="min(450px, 92vw)" destroy-on-close class="user-form-dialog">
       <el-form :model="addForm" label-width="80px">
         <el-form-item label="用户名">
-          <el-input v-model="addForm.username" />
+          <el-input
+            v-model="addForm.username"
+            :readonly="!isSuperAdminSession()"
+            placeholder="与登录名一致"
+          />
+          <el-text v-if="!isSuperAdminSession()" type="info" size="small" style="display: block; margin-top: 4px">
+            非超级管理员仅可创建与当前登录名一致的 VPN 用户，用于后续在本账户下签发证书。
+          </el-text>
         </el-form-item>
         <el-form-item label="姓名">
           <el-input v-model="addForm.display_name" />
@@ -265,7 +272,12 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import http from '../api/http'
-import { getAdminProfile, isSuperAdminSession } from '../utils/adminSession'
+import {
+  getAdminProfile,
+  getSessionAdminUsername,
+  hasModulePermission,
+  isSuperAdminSession,
+} from '../utils/adminSession'
 import { getStatusInfo, recordCardToneClass } from '../utils'
 
 /** 已选「按节点」但未分配任何节点时：授权列表恒为空，需超管配置 */
@@ -285,7 +297,7 @@ const scopedNodeHint = computed(() => {
     if (!Array.isArray(p.node_ids) || p.node_ids.length === 0) return ''
     return '列表已隐藏「仅在其它节点存在未结授权、且与您管辖节点无任何授权记录」的用户（超级管理员仍可见全量）。您仅能管理所选节点上的 VPN 授权；外区授权在已吊销、吊销中或失败状态下不计入跨区占用；若仍存在其它跨区未结授权，对其「编辑」或「删除」将被禁用，请联系超级管理员处理。'
   }
-  return '仅超级管理员可查看全部用户并新增 VPN 用户。当前列表仅显示「VPN 用户名与登录管理员用户名一致」的账户；若尚未创建同名 VPN 用户则列表为空。'
+  return '超级管理员可查看全部用户并为任意名称创建 VPN 用户。当前列表仅显示「VPN 用户名与登录名一致」的账户；可通过「添加用户」创建同名 VPN 用户后再发起证书授权；若尚未创建则列表为空。'
 })
 
 const rows = ref([])
@@ -359,6 +371,16 @@ const loadUsers = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const openAddDialog = () => {
+  if (isSuperAdminSession()) {
+    Object.assign(addForm, { username: '', display_name: '', group_name: '' })
+  } else {
+    const u = getSessionAdminUsername()
+    Object.assign(addForm, { username: u, display_name: '', group_name: '' })
+  }
+  showAdd.value = true
 }
 
 const doAdd = async () => {

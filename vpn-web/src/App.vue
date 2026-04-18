@@ -51,7 +51,7 @@
             <el-icon><Document /></el-icon>
             <template #title>审计日志</template>
           </el-menu-item>
-          <el-menu-item index="/admins" v-if="hasPerm('admins')">
+          <el-menu-item index="/admins" v-if="hasPerm('admins') && isSuperAdmin">
             <el-icon><Setting /></el-icon>
             <template #title>管理员管理</template>
           </el-menu-item>

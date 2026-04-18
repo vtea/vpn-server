@@ -9,8 +9,20 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"vpn-api/internal/middleware"
 	"vpn-api/internal/model"
 )
+
+// adminClaimString 将 gin 上下文中 admin 规范为 trim 后的字符串（兼容非 string 历史写入）。
+func adminClaimString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
+}
 
 // AdminScope 当前管理员可访问的节点范围（超级管理员为全局）。
 type AdminScope struct {
@@ -35,8 +47,7 @@ func AdminIsUnrestricted(a *model.Admin) bool {
 // loadAdminScope 从数据库解析当前 JWT 对应管理员的节点范围。
 func (h *Handler) loadAdminScope(c *gin.Context) (*AdminScope, error) {
 	username, _ := c.Get("admin")
-	usernameStr, _ := username.(string)
-	return h.adminScopeForUsername(usernameStr)
+	return h.adminScopeForUsername(adminClaimString(username))
 }
 
 // respondAdminScopeLoadError 将 loadAdminScope 错误映射为 HTTP 状态（管理员记录不存在时返回 401）。
@@ -58,13 +69,26 @@ func (h *Handler) loadAdminScopeOrAbort(c *gin.Context) (*AdminScope, bool) {
 	return scope, true
 }
 
-func (h *Handler) adminScopeForUsername(username string) (*AdminScope, error) {
+// firstAdminByUsernameCI 按用户名查找管理员（trim + 忽略大小写），与 JWT sub、VPN 自助查询一致，避免 sub 与库中大小写不一致时整站 401。
+func (h *Handler) firstAdminByUsernameCI(username string) (*model.Admin, error) {
+	u := strings.TrimSpace(username)
+	if u == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
 	var admin model.Admin
-	if err := h.db.Where("username = ?", strings.TrimSpace(username)).First(&admin).Error; err != nil {
+	if err := h.db.Where("LOWER(TRIM(username)) = LOWER(?)", u).First(&admin).Error; err != nil {
 		return nil, err
 	}
-	if AdminIsUnrestricted(&admin) {
-		return &AdminScope{Admin: admin, Unrestricted: true}, nil
+	return &admin, nil
+}
+
+func (h *Handler) adminScopeForUsername(username string) (*AdminScope, error) {
+	admin, err := h.firstAdminByUsernameCI(username)
+	if err != nil {
+		return nil, err
+	}
+	if AdminIsUnrestricted(admin) {
+		return &AdminScope{Admin: *admin, Unrestricted: true}, nil
 	}
 	var rows []model.AdminNodeScope
 	if err := h.db.Where("admin_id = ?", admin.ID).Find(&rows).Error; err != nil {
@@ -85,7 +109,7 @@ func (h *Handler) adminScopeForUsername(username string) (*AdminScope, error) {
 	}
 	sort.Strings(ids)
 	return &AdminScope{
-		Admin:          admin,
+		Admin:          *admin,
 		Unrestricted:   false,
 		AllowedNodeIDs: ids,
 		allowedSet:     set,
@@ -160,12 +184,20 @@ func (h *Handler) adminsToPublicItems(admins []model.Admin) ([]gin.H, error) {
 	return out, nil
 }
 
+// scopeEffectiveUnrestricted 库表超管或 JWT 超管声明（与 CreateUser、ListUsers、节点校验等一致）。
+func (h *Handler) scopeEffectiveUnrestricted(c *gin.Context, scope *AdminScope) bool {
+	if scope == nil {
+		return false
+	}
+	return scope.Unrestricted || middleware.JWTClaimsUnrestricted(c)
+}
+
 func (h *Handler) ensureNodeAllowed(c *gin.Context, scope *AdminScope, nodeID string) bool {
 	if scope == nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "permission denied"})
 		return false
 	}
-	if scope.Unrestricted || scope.AllowsNode(nodeID) {
+	if h.scopeEffectiveUnrestricted(c, scope) || scope.AllowsNode(nodeID) {
 		return true
 	}
 	c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this node"})
@@ -201,6 +233,10 @@ func (h *Handler) ensureGrantAllowed(c *gin.Context, scope *AdminScope, grantID 
 	if _, ok := h.ensureInstanceAllowed(c, scope, grant.InstanceID); !ok {
 		return nil, false
 	}
+	// 与按 user_id 的接口一致：仅节点命中不够，受限管理员只能操作「VPN 用户名与本人登录名一致」的授权。
+	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, grant.UserID) {
+		return nil, false
+	}
 	return &grant, true
 }
 
@@ -209,7 +245,7 @@ func (h *Handler) ensureUnrestrictedAdmin(c *gin.Context) (*AdminScope, bool) {
 	if !ok {
 		return nil, false
 	}
-	if !scope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, scope) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only super administrators can perform this action"})
 		return nil, false
 	}
@@ -217,8 +253,9 @@ func (h *Handler) ensureUnrestrictedAdmin(c *gin.Context) (*AdminScope, bool) {
 }
 
 // scopedUserGrantsQuery 构造某 VPN 用户的授权行查询；受限管理员仅包含其节点白名单内实例上的授权。
-func (h *Handler) scopedUserGrantsQuery(scope *AdminScope, userID uint) *gorm.DB {
-	if scope.Unrestricted {
+// 须与 scopeEffectiveUnrestricted 一致：JWT 超管但库为运维时仍返回该用户全部授权行。
+func (h *Handler) scopedUserGrantsQuery(c *gin.Context, scope *AdminScope, userID uint) *gorm.DB {
+	if h.scopeEffectiveUnrestricted(c, scope) {
 		return h.db.Model(&model.UserGrant{}).Where("user_id = ?", userID)
 	}
 	if len(scope.AllowedNodeIDs) == 0 {

@@ -27,5 +27,5 @@ export const routes = [
   { path: '/rules', component: Rules },
   { path: '/tunnels', component: Tunnels },
   { path: '/audit', component: Audit },
-  { path: '/admins', component: Admins }
+  { path: '/admins', component: Admins, meta: { requiresSuperAdmin: true } }
 ]

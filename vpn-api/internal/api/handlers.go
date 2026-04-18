@@ -71,7 +71,7 @@ func (h *Handler) normalizePersistedAgentVersions() {
 
 func (h *Handler) audit(c *gin.Context, action, target, detail string) {
 	admin, _ := c.Get("admin")
-	adminStr, _ := admin.(string)
+	adminStr := adminClaimString(admin)
 	if adminStr == "" {
 		adminStr = "system"
 	}
@@ -203,8 +203,8 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	var admin model.Admin
-	if err := h.db.Where("username = ?", req.Username).First(&admin).Error; err != nil {
+	admin, err := h.firstAdminByUsernameCI(req.Username)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
@@ -248,9 +248,8 @@ func (h *Handler) Login(c *gin.Context) {
 
 func (h *Handler) GetCurrentAdmin(c *gin.Context) {
 	username, _ := c.Get("admin")
-	usernameStr, _ := username.(string)
-	var admin model.Admin
-	if err := h.db.Where("username = ?", usernameStr).First(&admin).Error; err != nil {
+	admin, err := h.firstAdminByUsernameCI(adminClaimString(username))
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "admin not found"})
 		return
 	}
@@ -276,7 +275,6 @@ type changePasswordReq struct {
 
 func (h *Handler) ChangePassword(c *gin.Context) {
 	username, _ := c.Get("admin")
-	usernameStr, _ := username.(string)
 
 	var req changePasswordReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -288,8 +286,8 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	var admin model.Admin
-	if err := h.db.Where("username = ?", usernameStr).First(&admin).Error; err != nil {
+	admin, err := h.firstAdminByUsernameCI(adminClaimString(username))
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "admin not found"})
 		return
 	}
@@ -304,7 +302,7 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 	admin.PasswordHash = string(hash)
-	h.db.Save(&admin)
+	h.db.Save(admin)
 	h.audit(c, "change_password", fmt.Sprintf("admin:%s", admin.Username), "self")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -491,7 +489,7 @@ func (h *Handler) ListNodes(c *gin.Context) {
 		return
 	}
 	q := h.db.Model(&model.Node{})
-	if !scope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, scope) {
 		if len(scope.AllowedNodeIDs) == 0 {
 			c.JSON(http.StatusOK, gin.H{"items": []gin.H{}})
 			return
@@ -788,7 +786,7 @@ func (h *Handler) PatchTunnel(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tunnel not found"})
 		return
 	}
-	if !scope.Unrestricted && (!scope.AllowsNode(tun.NodeA) || !scope.AllowsNode(tun.NodeB)) {
+	if !h.scopeEffectiveUnrestricted(c, scope) && (!scope.AllowsNode(tun.NodeA) || !scope.AllowsNode(tun.NodeB)) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this tunnel"})
 		return
 	}
@@ -837,34 +835,54 @@ type createUserReq struct {
 	GroupName   string `json:"group_name"`
 }
 
+// firstVPNUserByUsernameCI 按 VPN 用户名查找（trim + 忽略大小写）。SQLite 下 uniqueIndex 对大小写敏感，创建前需显式查重。
+func (h *Handler) firstVPNUserByUsernameCI(username string) (*model.User, error) {
+	u := strings.TrimSpace(username)
+	if u == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var user model.User
+	if err := h.db.Where("LOWER(TRIM(username)) = LOWER(?)", u).First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (h *Handler) CreateUser(c *gin.Context) {
 	scope, ok := h.loadAdminScopeOrAbort(c)
 	if !ok {
 		return
 	}
-	// 库表判定与 JWT 声明任一为超管即允许：避免库字段/驱动与登录签发不一致导致长期 403；降级为运维后需待 Token 过期或重新登录使新 JWT 生效。
-	jwtOK := middleware.JWTClaimsUnrestricted(c)
-	if !scope.Unrestricted && !jwtOK {
-		log.Printf(
-			"vpn-api: CreateUser forbidden admin=%s db_role=%q db_permissions=%q jwt_unrestricted=%v",
-			scope.Admin.Username,
-			scope.Admin.Role,
-			scope.Admin.Permissions,
-			jwtOK,
-		)
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "仅超级管理员可创建 VPN 用户",
-			"code":  "require_super_admin",
-			"detail": "需数据库 admins 中 role=admin 或 permissions=*，且登录 Token 中含相同超管声明；修改库后请重新登录。",
-		})
-		return
-	}
-	if !scope.Unrestricted && jwtOK {
-		log.Printf("vpn-api: CreateUser allowed by JWT (db unrestricted=false) admin=%s", scope.Admin.Username)
-	}
 	var req createUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username required"})
+		return
+	}
+
+	// 超级管理员：可创建任意 VPN 用户。非超管：仅允许创建与当前管理员登录名一致的 VPN 用户（自助建档，便于后续在本账号下签发证书）。
+	unrestricted := h.scopeEffectiveUnrestricted(c, scope)
+	if !unrestricted {
+		if !strings.EqualFold(req.Username, strings.TrimSpace(scope.Admin.Username)) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "非超级管理员仅可创建与当前登录名一致的 VPN 用户",
+				"code":  "create_user_self_username_only",
+			})
+			return
+		}
+		// 与 admins 表规范一致，避免 SQLite 下写入与登录名仅大小写不同的字符串导致列表/授权语义分裂。
+		req.Username = strings.TrimSpace(scope.Admin.Username)
+	}
+
+	if _, err := h.firstVPNUserByUsernameCI(req.Username); err == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username already exists"})
+		return
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -881,8 +899,9 @@ func (h *Handler) CreateUser(c *gin.Context) {
 }
 
 // ensureVPNUserVisibleToScopedAdmin 受限管理员仅能访问列表中出现的 VPN 用户；不可见时返回 403 及 code，便于前端区分「不存在」与「存在但不在可见范围」。
+// 与 CreateUser 等一致：JWT 声明为超管时也视为全量可见（避免库表与 Token 不一致时接口行为分裂）。
 func (h *Handler) ensureVPNUserVisibleToScopedAdmin(c *gin.Context, scope *AdminScope, userID uint) bool {
-	if scope.Unrestricted {
+	if h.scopeEffectiveUnrestricted(c, scope) {
 		return true
 	}
 	vis, err := h.userVisibleToScopedList(scope, userID)
@@ -918,13 +937,21 @@ func (h *Handler) ListUsers(c *gin.Context) {
 	if !ok {
 		return
 	}
+	unrestricted := h.scopeEffectiveUnrestricted(c, scope)
+
 	var users []model.User
 	if err := h.db.Order("username ASC").Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	var blocked map[uint]struct{}
-	if !scope.Unrestricted {
+	if !unrestricted {
+		blockedIDs, err := h.userIDsWithCrossScopeEditBlocked(scope)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		blocked = blockedIDs
 		adminName := strings.TrimSpace(scope.Admin.Username)
 		filtered := make([]model.User, 0, 1)
 		for _, u := range users {
@@ -937,7 +964,7 @@ func (h *Handler) ListUsers(c *gin.Context) {
 	items := make([]gin.H, 0, len(users))
 	for _, u := range users {
 		flag := false
-		if !scope.Unrestricted {
+		if !unrestricted {
 			_, flag = blocked[u.ID]
 		}
 		items = append(items, userListItemJSON(u, flag))
@@ -956,7 +983,7 @@ func (h *Handler) GetDashboardStats(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if scope.Unrestricted {
+	if h.scopeEffectiveUnrestricted(c, scope) {
 		c.JSON(http.StatusOK, gin.H{
 			"users_total":   usersTotal,
 			"users_visible": usersTotal,
@@ -1020,7 +1047,7 @@ func (h *Handler) ListTunnels(c *gin.Context) {
 		return
 	}
 	q := h.db.Model(&model.Tunnel{})
-	if !scope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, scope) {
 		if len(scope.AllowedNodeIDs) == 0 {
 			c.JSON(http.StatusOK, gin.H{"items": []model.Tunnel{}})
 			return
@@ -1071,7 +1098,7 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 	}
 	if !h.ipListDualEnabled {
 		q := h.db.Model(&model.Node{})
-		if !admScope.Unrestricted {
+		if !h.scopeEffectiveUnrestricted(c, admScope) {
 			if len(admScope.AllowedNodeIDs) == 0 {
 				h.audit(c, "trigger_iplist_update", "scoped", "legacy sent_to=0 (no allowed nodes)")
 				c.JSON(http.StatusOK, gin.H{"sent_to": 0, "total_nodes": 0})
@@ -1143,7 +1170,7 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 	}
 
 	nq := h.db.Model(&model.Node{})
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		if len(admScope.AllowedNodeIDs) == 0 {
 			h.audit(c, "trigger_iplist_update", "scoped", "sent_to=0 (no allowed nodes)")
 			c.JSON(http.StatusOK, gin.H{"scope": listScope, "synced": synced, "sent_to": 0, "total_nodes": 0})
@@ -1194,7 +1221,7 @@ func (h *Handler) IPListStatus(c *gin.Context) {
 		return
 	}
 	nq := h.db.Model(&model.Node{})
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		if len(admScope.AllowedNodeIDs) == 0 {
 			if !h.ipListDualEnabled {
 				c.JSON(http.StatusOK, gin.H{"items": []any{}})
@@ -1621,16 +1648,20 @@ func (h *Handler) CreateUserGrant(c *gin.Context) {
 		return
 	}
 
+	scope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
+		return
+	}
+
 	var inst model.Instance
 	if err := h.db.First(&inst, req.InstanceID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "instance not found"})
 		return
 	}
 
-	scope, ok := h.loadAdminScopeOrAbort(c)
-	if !ok {
-		return
-	}
 	if !h.ensureNodeAllowed(c, scope, inst.NodeID) {
 		return
 	}
@@ -1700,12 +1731,24 @@ func (h *Handler) ListUserGrants(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
 		return
 	}
+	var user model.User
+	if err := h.db.First(&user, uint(userID)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	scope, ok := h.loadAdminScopeOrAbort(c)
 	if !ok {
 		return
 	}
+	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
+		return
+	}
 	var grants []model.UserGrant
-	if err := h.scopedUserGrantsQuery(scope, uint(userID)).Find(&grants).Error; err != nil {
+	if err := h.scopedUserGrantsQuery(c, scope, uint(userID)).Find(&grants).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1717,16 +1760,6 @@ func (h *Handler) DownloadGrantOVPN(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid grant id"})
 		return
-	}
-
-	if tokenQ := c.Query("token"); tokenQ != "" {
-		token, parseErr := jwt.Parse(tokenQ, func(t *jwt.Token) (interface{}, error) {
-			return []byte(h.jwtSecret), nil
-		})
-		if parseErr != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-			return
-		}
 	}
 
 	scope, ok := h.loadAdminScopeOrAbort(c)
@@ -1945,9 +1978,8 @@ func (h *Handler) DeleteNodeWithPassword(c *gin.Context) {
 		return
 	}
 	username, _ := c.Get("admin")
-	usernameStr, _ := username.(string)
-	var admin model.Admin
-	if err := h.db.Where("username = ?", usernameStr).First(&admin).Error; err != nil {
+	admin, err := h.firstAdminByUsernameCI(adminClaimString(username))
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "admin not found"})
 		return
 	}
@@ -2033,7 +2065,7 @@ func (h *Handler) GetUser(c *gin.Context) {
 		return
 	}
 	var grants []model.UserGrant
-	if err := h.scopedUserGrantsQuery(scope, user.ID).Find(&grants).Error; err != nil {
+	if err := h.scopedUserGrantsQuery(c, scope, user.ID).Find(&grants).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -2064,12 +2096,14 @@ func (h *Handler) UpdateUser(c *gin.Context) {
 	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
 		return
 	}
-	if outside, err := h.userHasOutOfScopeGrants(scope, user.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	} else if outside {
-		c.JSON(http.StatusForbidden, gin.H{"error": "该用户在您可管辖的节点范围外仍有 VPN 授权，无法修改资料；请联系超级管理员"})
-		return
+	if !h.scopeEffectiveUnrestricted(c, scope) {
+		if outside, err := h.userHasOutOfScopeGrants(scope, user.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		} else if outside {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该用户在您可管辖的节点范围外仍有 VPN 授权，无法修改资料；请联系超级管理员"})
+			return
+		}
 	}
 	var req updateUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2108,12 +2142,14 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 	if !h.ensureVPNUserVisibleToScopedAdmin(c, scope, user.ID) {
 		return
 	}
-	if outside, err := h.userHasOutOfScopeGrants(scope, user.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	} else if outside {
-		c.JSON(http.StatusForbidden, gin.H{"error": "该用户在您可管辖的节点范围外仍有 VPN 授权，无法删除；请联系超级管理员"})
-		return
+	if !h.scopeEffectiveUnrestricted(c, scope) {
+		if outside, err := h.userHasOutOfScopeGrants(scope, user.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		} else if outside {
+			c.JSON(http.StatusForbidden, gin.H{"error": "该用户在您可管辖的节点范围外仍有 VPN 授权，无法删除；请联系超级管理员"})
+			return
+		}
 	}
 	var grants []model.UserGrant
 	h.db.Where("user_id = ?", user.ID).Find(&grants)
@@ -2432,7 +2468,7 @@ func (h *Handler) GetNodeStateConsistency(c *gin.Context) {
 		return
 	}
 	q := h.db.Model(&model.Node{})
-	if !scope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, scope) {
 		if len(scope.AllowedNodeIDs) == 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"total": 0, "mismatch": 0, "consistent": true,
@@ -2493,7 +2529,7 @@ func (h *Handler) GetTunnelMetrics(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tunnel not found"})
 		return
 	}
-	if !scope.Unrestricted && (!scope.AllowsNode(tun.NodeA) || !scope.AllowsNode(tun.NodeB)) {
+	if !h.scopeEffectiveUnrestricted(c, scope) && (!scope.AllowsNode(tun.NodeA) || !scope.AllowsNode(tun.NodeB)) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this tunnel"})
 		return
 	}
@@ -2693,7 +2729,7 @@ func (h *Handler) PrometheusMetrics(c *gin.Context) {
 	}
 	scopedNodesQuery := func() *gorm.DB {
 		q := h.db.Model(&model.Node{})
-		if !admScope.Unrestricted {
+		if !h.scopeEffectiveUnrestricted(c, admScope) {
 			if len(admScope.AllowedNodeIDs) == 0 {
 				return q.Where("1 = 0")
 			}
@@ -2701,7 +2737,7 @@ func (h *Handler) PrometheusMetrics(c *gin.Context) {
 		}
 		return q
 	}
-	if !admScope.Unrestricted && len(admScope.AllowedNodeIDs) == 0 {
+	if !h.scopeEffectiveUnrestricted(c, admScope) && len(admScope.AllowedNodeIDs) == 0 {
 		c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte("vpn_nodes_total 0\nvpn_nodes_online 0\nvpn_users_total 0\nvpn_tunnels_total 0\nvpn_grants_total 0\nvpn_online_users 0\n"))
 		return
 	}
@@ -2709,12 +2745,12 @@ func (h *Handler) PrometheusMetrics(c *gin.Context) {
 	scopedNodesQuery().Count(&nodeCount)
 	h.db.Model(&model.User{}).Count(&userCount)
 	tunQ := h.db.Model(&model.Tunnel{})
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		tunQ = tunQ.Where("node_a IN ? AND node_b IN ?", admScope.AllowedNodeIDs, admScope.AllowedNodeIDs)
 	}
 	tunQ.Count(&tunnelCount)
 	grantQ := h.db.Model(&model.UserGrant{})
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		grantQ = grantQ.Joins("JOIN instances ON instances.id = user_grants.instance_id").
 			Where("instances.node_id IN ?", admScope.AllowedNodeIDs)
 	}
@@ -2741,14 +2777,14 @@ func (h *Handler) ListConfigVersions(c *gin.Context) {
 		return
 	}
 	nodeID := c.Query("node_id")
-	if nodeID != "" && !admScope.Unrestricted && !admScope.AllowsNode(nodeID) {
+	if nodeID != "" && !h.scopeEffectiveUnrestricted(c, admScope) && !admScope.AllowsNode(nodeID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this node"})
 		return
 	}
 	q := h.db.Order("created_at desc").Limit(50)
 	if nodeID != "" {
 		q = q.Where("node_id = ?", nodeID)
-	} else if !admScope.Unrestricted {
+	} else if !h.scopeEffectiveUnrestricted(c, admScope) {
 		if len(admScope.AllowedNodeIDs) == 0 {
 			c.JSON(http.StatusOK, gin.H{"items": []model.ConfigVersion{}})
 			return
@@ -2792,12 +2828,23 @@ func (h *Handler) RollbackConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "version": ver})
 }
 
-// callerCanManageAdmins 与 AdminIsUnrestricted / JWTClaimsUnrestricted 一致（claims 层面，不查库）。
-func callerCanManageAdmins(c *gin.Context) bool {
-	return middleware.JWTClaimsUnrestricted(c)
+// canManageAdminsRequest 是否可对管理员账号做增删改查：JWT 超管声明或与库表一致的超管（避免仅 claims 与库不同步时行为分裂）。
+func (h *Handler) canManageAdminsRequest(c *gin.Context) bool {
+	if middleware.JWTClaimsUnrestricted(c) {
+		return true
+	}
+	scope, err := h.loadAdminScope(c)
+	if err != nil {
+		return false
+	}
+	return AdminIsUnrestricted(&scope.Admin)
 }
 
 func (h *Handler) ListAdmins(c *gin.Context) {
+	if !h.canManageAdminsRequest(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only super administrators can list admins"})
+		return
+	}
 	var admins []model.Admin
 	h.db.Order("id asc").Find(&admins)
 	items, err := h.adminsToPublicItems(admins)
@@ -2817,7 +2864,7 @@ type createAdminReq struct {
 }
 
 func (h *Handler) CreateAdmin(c *gin.Context) {
-	if !callerCanManageAdmins(c) {
+	if !h.canManageAdminsRequest(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can manage admins"})
 		return
 	}
@@ -2837,6 +2884,18 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		} else {
 			req.Permissions = "nodes,users,rules,tunnels,audit"
 		}
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username required"})
+		return
+	}
+	if _, err := h.firstAdminByUsernameCI(req.Username); err == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username already exists"})
+		return
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -2878,7 +2937,7 @@ type updateAdminReq struct {
 }
 
 func (h *Handler) UpdateAdmin(c *gin.Context) {
-	if !callerCanManageAdmins(c) {
+	if !h.canManageAdminsRequest(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can manage admins"})
 		return
 	}
@@ -2939,7 +2998,7 @@ type resetPasswordReq struct {
 }
 
 func (h *Handler) ResetAdminPassword(c *gin.Context) {
-	if !callerCanManageAdmins(c) {
+	if !h.canManageAdminsRequest(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can reset passwords"})
 		return
 	}
@@ -2974,7 +3033,7 @@ func (h *Handler) ResetAdminPassword(c *gin.Context) {
 }
 
 func (h *Handler) DeleteAdmin(c *gin.Context) {
-	if !callerCanManageAdmins(c) {
+	if !h.canManageAdminsRequest(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admin can manage admins"})
 		return
 	}
@@ -2999,13 +3058,13 @@ func (h *Handler) DeleteAdmin(c *gin.Context) {
 }
 
 func (h *Handler) SelfServiceLookup(c *gin.Context) {
-	username := c.Query("username")
+	username := strings.TrimSpace(c.Query("username"))
 	if username == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
 		return
 	}
 	var user model.User
-	if err := h.db.Where("username = ?", username).First(&user).Error; err != nil {
+	if err := h.db.Where("LOWER(TRIM(username)) = LOWER(?)", username).First(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
@@ -3020,7 +3079,7 @@ func (h *Handler) SelfServiceDownload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid grant id"})
 		return
 	}
-	username := c.Query("username")
+	username := strings.TrimSpace(c.Query("username"))
 	if username == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
 		return
@@ -3031,7 +3090,7 @@ func (h *Handler) SelfServiceDownload(c *gin.Context) {
 		return
 	}
 	var user model.User
-	if err := h.db.First(&user, grant.UserID).Error; err != nil || user.Username != username {
+	if err := h.db.First(&user, grant.UserID).Error; err != nil || !strings.EqualFold(strings.TrimSpace(user.Username), username) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		return
 	}

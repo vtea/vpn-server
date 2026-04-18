@@ -60,13 +60,13 @@
           </div>
         </div>
         <el-alert
-          v-if="!canManageAdmins && admins.length"
+          v-if="!canManageAdmins"
           type="info"
           :closable="false"
           show-icon
           style="margin-top: 12px"
         >
-          当前账号仅有「管理员管理」查看权限；添加、编辑、重置密码、删除需超级管理员（角色为超级管理员，或权限为 *）。
+          仅超级管理员可查看管理员列表并进行添加、编辑、重置密码、删除（角色为 admin 或权限为 *）。非超管不再从接口拉取列表。
         </el-alert>
         <el-empty v-if="!loading && !admins.length" description="暂无管理员" :image-size="60" />
       </div>
@@ -203,6 +203,10 @@ const roleTagType = (r) => {
 }
 
 const fetchAdmins = async () => {
+  if (!canManageAdmins.value) {
+    admins.value = []
+    return
+  }
   loading.value = true
   try {
     admins.value = (await http.get('/api/admins')).data.items || []

@@ -77,11 +77,28 @@ func (h *Handler) effectiveLatestAgentVersion() string {
 }
 
 type createAgentUpgradeReq struct {
-	Version      string `json:"version" binding:"required"`
-	DownloadURL  string `json:"download_url" binding:"required"`
+	Version        string `json:"version" binding:"required"`
+	DownloadURL    string `json:"download_url" binding:"required"`
 	DownloadURLLAN string `json:"download_url_lan"`
-	SHA256       string `json:"sha256" binding:"required"`
-	CanaryNodeID string `json:"canary_node_id"`
+	SHA256         string `json:"sha256" binding:"required"`
+	CanaryNodeID   string `json:"canary_node_id"`
+}
+
+// agentUpgradeTaskVisible 非超管仅当任务下至少有一条子项落在其节点白名单内时可读该任务（与 JWT 超管声明一致）。
+func (h *Handler) agentUpgradeTaskVisible(c *gin.Context, admScope *AdminScope, taskID uint) bool {
+	if h.scopeEffectiveUnrestricted(c, admScope) {
+		return true
+	}
+	if len(admScope.AllowedNodeIDs) == 0 {
+		return false
+	}
+	var n int64
+	if err := h.db.Model(&model.AgentUpgradeTaskItem{}).
+		Where("task_id = ? AND node_id IN ?", taskID, admScope.AllowedNodeIDs).
+		Count(&n).Error; err != nil {
+		return false
+	}
+	return n > 0
 }
 
 func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
@@ -119,7 +136,7 @@ func (h *Handler) GetAgentUpgradeDefaults(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		filtered := make([]model.Node, 0, len(online))
 		for _, n := range online {
 			if admScope.AllowsNode(n.ID) {
@@ -223,7 +240,7 @@ func (h *Handler) CreateAgentUpgradeTask(c *gin.Context) {
 	online := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if h.hub != nil && h.hub.IsOnline(n.ID) {
-			if !admScope.Unrestricted && !admScope.AllowsNode(n.ID) {
+			if !h.scopeEffectiveUnrestricted(c, admScope) && !admScope.AllowsNode(n.ID) {
 				continue
 			}
 			online = append(online, n)
@@ -251,7 +268,7 @@ func (h *Handler) CreateAgentUpgradeTask(c *gin.Context) {
 	}
 
 	adminAny, _ := c.Get("admin")
-	adminUser, _ := adminAny.(string)
+	adminUser := adminClaimString(adminAny)
 	task := model.AgentUpgradeTask{
 		Version:      req.Version,
 		DownloadURL:  req.DownloadURL,
@@ -295,6 +312,14 @@ func (h *Handler) GetAgentUpgradeTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	if !h.agentUpgradeTaskVisible(c, admScope, task.ID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this task"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"task": task})
 }
 
@@ -304,12 +329,21 @@ func (h *Handler) ListAgentUpgradeTaskItems(c *gin.Context) {
 		return
 	}
 	id := c.Param("id")
+	var task model.AgentUpgradeTask
+	if err := h.db.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if !h.agentUpgradeTaskVisible(c, admScope, task.ID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this task"})
+		return
+	}
 	var items []model.AgentUpgradeTaskItem
 	if err := h.db.Where("task_id = ?", id).Order("id asc").Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		filtered := make([]model.AgentUpgradeTaskItem, 0, len(items))
 		for _, it := range items {
 			if admScope.AllowsNode(it.NodeID) {
@@ -393,7 +427,7 @@ ORDER BY i.updated_at DESC;
 			NeedsUpdate:   compareSemver(cur, latest) < 0,
 		})
 	}
-	if !admScope.Unrestricted {
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		filtered := make([]item, 0, len(out))
 		for _, it := range out {
 			if admScope.AllowsNode(it.NodeID) {

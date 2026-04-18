@@ -27,7 +27,11 @@ export function installNavigationGuards (router) {
     const token = localStorage.getItem('token')
     if (!token) return '/login'
     if (to.meta?.requiresSuperAdmin && !isSuperAdminSession()) {
-      ElMessage.warning('仅超级管理员可访问 API 连接')
+      ElMessage.warning(
+        to.path.startsWith('/settings')
+          ? '仅超级管理员可访问 API 连接'
+          : '仅超级管理员可访问该页面'
+      )
       return { path: '/', replace: true }
     }
     return true

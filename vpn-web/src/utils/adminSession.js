@@ -107,3 +107,50 @@ export function isSuperAdminSession() {
   const { role, perms } = normalizeRolePerms(info)
   return role === 'admin' || perms === '*'
 }
+
+/**
+ * 当前登录管理员用户名（优先本地 `/me` 缓存，其次 JWT `sub`），用于非超管自助创建同名 VPN 用户。
+ * @returns {string}
+ */
+export function getSessionAdminUsername() {
+  const token = getSessionToken()
+  const fromJwt = token ? parseJwtPayload(token) : null
+  const sub =
+    fromJwt && typeof fromJwt.sub === 'string' ? fromJwt.sub.trim() : ''
+  const p = getAdminProfile()
+  const fromProfile =
+    p && typeof p.username === 'string' ? p.username.trim() : ''
+  return fromProfile || sub || ''
+}
+
+/**
+ * 会话是否对某功能模块有权（与 `/me` 及 JWT 的 `permissions` / `perms` 一致；超管视为全模块）。
+ * @param {string} module
+ * @returns {boolean}
+ */
+export function hasModulePermission(module) {
+  const mod = typeof module === 'string' ? module.trim() : ''
+  if (!mod) return false
+  const token = getSessionToken()
+  const fromJwt = token ? parseJwtPayload(token) : null
+  let info = null
+  if (
+    fromJwt &&
+    typeof fromJwt === 'object' &&
+    (fromJwt.role || fromJwt.permissions || fromJwt.perms)
+  ) {
+    info = fromJwt
+  }
+  if (!info) {
+    const p = getAdminProfile()
+    if (p && typeof p === 'object') info = p
+  }
+  if (!info) return false
+  const { role, perms } = normalizeRolePerms(info)
+  if (role === 'admin' || perms === '*') return true
+  if (!perms) return false
+  return perms
+    .split(',')
+    .map((s) => s.trim())
+    .includes(mod)
+}

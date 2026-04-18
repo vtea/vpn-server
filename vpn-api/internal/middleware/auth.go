@@ -53,11 +53,14 @@ func JWT(secret string) gin.HandlerFunc {
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if ok {
-			c.Set("admin", claims["sub"])
+			// 与 role/perms 一致：sub 可能为 JSON 数字等非 string，需规范为字符串再写入上下文。
+			c.Set("admin", jwtClaimString(claims["sub"]))
 			c.Set("role", jwtClaimString(claims["role"]))
-			if _, exists := claims["perms"]; exists {
-				c.Set("permissions", jwtClaimString(claims["perms"]))
+			permsVal := claims["perms"]
+			if permsVal == nil {
+				permsVal = claims["permissions"]
 			}
+			c.Set("permissions", jwtClaimString(permsVal))
 		}
 		c.Next()
 	}
@@ -71,7 +74,7 @@ func RequirePermission(module string) gin.HandlerFunc {
 		}
 
 		perms, _ := c.Get("permissions")
-		permsStr, _ := perms.(string)
+		permsStr := jwtClaimString(perms)
 
 		for _, p := range strings.Split(permsStr, ",") {
 			if strings.TrimSpace(p) == module || strings.TrimSpace(p) == "*" {
@@ -93,7 +96,7 @@ func RequireAnyPermission(modules ...string) gin.HandlerFunc {
 		}
 
 		perms, _ := c.Get("permissions")
-		permsStr, _ := perms.(string)
+		permsStr := jwtClaimString(perms)
 
 		want := make(map[string]struct{}, len(modules))
 		for _, m := range modules {
