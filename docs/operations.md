@@ -269,6 +269,8 @@ bash /opt/vpn-api/scripts/verify-split-exceptions.sh
 # 若仓库路径不同，使用源码内 vpn-api/scripts/verify-split-exceptions.sh
 ```
 
+**故障：海外站点全超时、但国内正常**：在 **`cn-split` + 手工例外** 场景下，若 **`ip rule del from <子网>` 删不净带 fwmark 的策略行**，重跑 **`policy-routing.sh`** 时 **`ip rule add` 可能失败**（`set -e` 提前退出），导致 **未重新写入 `lookup 101`**，来自 VPN 的流量不再走策略表，表现为 **GitHub 等境外站 `ERR_CONNECTION_TIMED_OUT`**。请 **`ip -4 rule list` 检查是否存在重复 prio 或缺失主策略**；更新 **`node-setup.sh` 生成的脚本**后执行 **`systemctl restart vpn-routing.service`**（或重跑 **`node-setup.sh`**）以套用「先按 fwmark/lookup 精确删除再 add」的逻辑。
+
 ### 8.4 Agent 日志「ip list anomaly detected」
 
 **现象**：Agent 日志显示 "ip list anomaly detected"。

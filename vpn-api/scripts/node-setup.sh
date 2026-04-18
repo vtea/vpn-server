@@ -2193,7 +2193,12 @@ for i in $(seq 0 $((INSTANCE_COUNT - 1))); do
         fi
         ip route replace default via "$HK_IP" dev "$HK_DEV" table 105 2>/dev/null || true
 
+        # 旧版仅用「from SUBNET」删除时，可能删不掉 fwmark 行，重复 add 会在 set -e 下整段失败，导致漏掉 lookup 101（海外全断）
+        while ip -4 rule del from "$SUBNET" fwmark 0x65 lookup 105 prio 3185 2>/dev/null; do :; done
+        while ip -4 rule del from "$SUBNET" fwmark 0x64 lookup 104 prio 3190 2>/dev/null; do :; done
+        while ip -4 rule del from "$SUBNET" lookup "$TABLE_NUM" prio "$PRIO" 2>/dev/null; do :; done
         while ip -4 rule del from "$SUBNET" 2>/dev/null; do :; done
+
         ip -4 rule add from "$SUBNET" fwmark 0x65 lookup 105 prio 3185
         if [[ -n "$LOCAL_GW" && -n "$LOCAL_DEV" ]] && ip -4 route show table 104 2>/dev/null | grep -qE '^default'; then
           ip -4 rule add from "$SUBNET" fwmark 0x64 lookup 104 prio 3190
