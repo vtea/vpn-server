@@ -87,17 +87,25 @@ type Node struct {
 	CreatedAt               time.Time `json:"created_at"`
 }
 
+// IPListSourceKind：remote 从 URL 拉取；manual 仅接受本地上传生成制品。
+const (
+	IPListSourceKindRemote = "remote"
+	IPListSourceKindManual = "manual"
+)
+
 type IPListSource struct {
-	ID                uint      `json:"id" gorm:"primaryKey"`
-	Scope             string    `json:"scope" gorm:"uniqueIndex;not null"` // domestic | overseas
-	PrimaryURL        string    `json:"primary_url" gorm:"not null"`
-	MirrorURL         string    `json:"mirror_url"`
-	ConnectTimeoutSec int       `json:"connect_timeout_sec" gorm:"default:8"`
-	MaxTimeSec        int       `json:"max_time_sec" gorm:"default:30"`
-	RetryCount        int       `json:"retry_count" gorm:"default:2"`
-	Enabled           bool      `json:"enabled" gorm:"default:true"`
-	UpdatedAt         time.Time `json:"updated_at"`
-	CreatedAt         time.Time `json:"created_at"`
+	ID                uint       `json:"id" gorm:"primaryKey"`
+	Scope             string     `json:"scope" gorm:"uniqueIndex;not null"` // domestic | overseas
+	SourceKind        string     `json:"source_kind" gorm:"size:16;default:remote;not null"` // remote | manual
+	PrimaryURL        string     `json:"primary_url" gorm:"not null;default:''"`
+	MirrorURL         string     `json:"mirror_url"`
+	ConnectTimeoutSec int        `json:"connect_timeout_sec" gorm:"default:8"`
+	MaxTimeSec        int        `json:"max_time_sec" gorm:"default:30"`
+	RetryCount        int        `json:"retry_count" gorm:"default:2"`
+	Enabled           bool       `json:"enabled" gorm:"default:true"`
+	LastManualAt      *time.Time `json:"last_manual_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 type IPListArtifact struct {

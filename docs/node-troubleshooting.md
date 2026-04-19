@@ -149,7 +149,7 @@ systemctl --no-pager -l status 'wg-quick@wg-*'
 ### 1) 控制面与制品对齐（必须先做）
 
 1. **部署并重启**运行中的 `vpn-api`，确保二进制包含：海外源迁移（将误配的 `china6.txt` 改为 IPv4 段列表）、`refreshIPListArtifact("overseas")` 仅保留 IPv4 CIDR、以及磁盘上的 [`vpn-api/scripts/node-setup.sh`](../vpn-api/scripts/node-setup.sh) 与当前仓库一致（`ServeNodeSetupScript` 从部署目录读取该脚本）。
-2. 在 Web **「分流规则」**执行一次 **「全网立即更新」**，且列表中**包含 `overseas`**，以便重建仅 IPv4 的 overseas 制品；否则节点 `curl .../api/ip-lists/download/overseas` 仍可能拉到旧 IPv6 内容，Step 7 会继续刷屏。
+2. 在 Web **「分流规则」**执行一次 **「全网立即更新」**，且列表中**包含 `overseas`**，以便重建仅 IPv4 的 overseas 制品；否则节点 `curl .../api/ip-lists/download/overseas` 仍可能拉到旧 IPv6 内容，Step 7 会继续刷屏。若海外侧在控制台配置为 **本地上传**（`manual`）且从未上传过文件，控制面 **无 overseas 制品**，`curl` 会 **404**，需先在管理台 **上传列表** 或改回 **远端 URL** 并再点「全网立即更新」。
 3. **验收（在任意可访问控制面的机器上）**：
 
 ```bash

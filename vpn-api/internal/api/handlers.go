@@ -1402,69 +1402,37 @@ func (h *Handler) TriggerIPListUpdate(c *gin.Context) {
 		}
 	}
 
-	nq := h.db.Model(&model.Node{})
 	if !h.scopeEffectiveUnrestricted(c, admScope) {
 		if len(admScope.AllowedNodeIDs) == 0 {
 			h.audit(c, "trigger_iplist_update", "scoped", "sent_to=0 (no allowed nodes)")
 			c.JSON(http.StatusOK, gin.H{
-				"scope":            listScope,
-				"effective_scope":  effectiveScope,
-				"synced":           synced,
-				"sent_to":          0,
-				"total_nodes":      0,
+				"scope":              listScope,
+				"effective_scope":    effectiveScope,
+				"synced":             synced,
+				"sent_to":            0,
+				"total_nodes":        0,
 				"offline_node_count": 0,
 			})
 			return
 		}
-		nq = nq.Where("id IN ?", admScope.AllowedNodeIDs)
 	}
-	var nodes []model.Node
-	if err := nq.Find(&nodes).Error; err != nil {
+	var exceptionsCount int64
+	if err := h.db.Model(&model.IPListException{}).Count(&exceptionsCount).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	var exceptions []model.IPListException
-	if err := h.db.Find(&exceptions).Error; err != nil {
+	sent, totalNodes, offlineCount, err := h.pushIPListUpdateToOnlineNodes(c, admScope, effectiveScope)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	sent := 0
-	for _, n := range nodes {
-		if h.hub != nil && h.hub.IsOnline(n.ID) {
-			scopePayload, merr := json.Marshal(gin.H{"scope": effectiveScope})
-			if merr != nil {
-				log.Printf("TriggerIPListUpdate: marshal iplist scope: %v", merr)
-			} else {
-				if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_iplist", Payload: scopePayload}); err != nil {
-					log.Printf("TriggerIPListUpdate: send update_iplist to %s: %v", n.ID, err)
-				}
-			}
-			if len(exceptions) > 0 {
-				exPayload, exErr := json.Marshal(map[string]any{"exceptions": exceptions})
-				if exErr != nil {
-					log.Printf("TriggerIPListUpdate: marshal exceptions: %v", exErr)
-				} else {
-					if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: exPayload}); err != nil {
-						log.Printf("TriggerIPListUpdate: send update_exceptions to %s: %v", n.ID, err)
-					}
-				}
-			}
-			sent++
-		}
-	}
-	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s effective=%s sent_to=%d nodes exceptions=%d", listScope, effectiveScope, sent, len(exceptions)))
-	offlineCount := len(nodes) - sent
-	if offlineCount < 0 {
-		offlineCount = 0
-	}
+	h.audit(c, "trigger_iplist_update", "all_nodes", fmt.Sprintf("scope=%s effective=%s sent_to=%d nodes exceptions=%d", listScope, effectiveScope, sent, exceptionsCount))
 	c.JSON(http.StatusOK, gin.H{
 		"scope":              listScope,
 		"effective_scope":    effectiveScope,
 		"synced":             synced,
 		"sent_to":            sent,
-		"total_nodes":        len(nodes),
+		"total_nodes":        totalNodes,
 		"offline_node_count": offlineCount,
 	})
 }
@@ -1615,6 +1583,65 @@ func (h *Handler) ipListStorageDir() string {
 	return filepath.Join(".", "ip-lists")
 }
 
+// normalizeIPListSourceKind 将同步源类型规范为 remote 或 manual。
+func normalizeIPListSourceKind(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == model.IPListSourceKindManual {
+		return model.IPListSourceKindManual
+	}
+	return model.IPListSourceKindRemote
+}
+
+// buildIPListArtifactFromBytes 将原始列表文本解析为 IPv4 CIDR 行并落盘、写入 ip_list_artifacts（与 refresh 远端成功路径一致）。
+func (h *Handler) buildIPListArtifactFromBytes(scope string, raw []byte, sourceLabel string) (*model.IPListArtifact, error) {
+	scope = normalizeIPListScope(scope)
+	if scope == "all" {
+		return nil, fmt.Errorf("invalid scope for artifact")
+	}
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if scope == "overseas" {
+			ip, _, err := net.ParseCIDR(line)
+			if err != nil || ip.To4() == nil {
+				continue
+			}
+		}
+		filtered = append(filtered, line)
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("empty ip list")
+	}
+	content := []byte(strings.Join(filtered, "\n") + "\n")
+	hash := fmt.Sprintf("%x", sha256.Sum256(content))
+	version := time.Now().Format("20060102-150405")
+	storeDir := h.ipListStorageDir()
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return nil, err
+	}
+	filename := fmt.Sprintf("%s-%s.txt", scope, version)
+	path := filepath.Join(storeDir, filename)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return nil, err
+	}
+	artifact := &model.IPListArtifact{
+		Scope:      scope,
+		Version:    version,
+		EntryCount: len(filtered),
+		SHA256:     hash,
+		FilePath:   path,
+		SourceURL:  sourceLabel,
+	}
+	if err := h.db.Create(artifact).Error; err != nil {
+		return nil, err
+	}
+	return artifact, nil
+}
+
 func (h *Handler) refreshIPListArtifact(scope string) (*model.IPListArtifact, error) {
 	scope = normalizeIPListScope(scope)
 	if scope == "all" {
@@ -1626,6 +1653,20 @@ func (h *Handler) refreshIPListArtifact(scope string) (*model.IPListArtifact, er
 	}
 	if !src.Enabled {
 		return nil, fmt.Errorf("scope %s source disabled", scope)
+	}
+	kind := normalizeIPListSourceKind(src.SourceKind)
+	if kind == model.IPListSourceKindManual {
+		var art model.IPListArtifact
+		if err := h.db.Where("scope = ?", scope).Order("created_at desc").First(&art).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("manual scope %s: no artifact yet, upload a file first", scope)
+			}
+			return nil, err
+		}
+		if _, err := os.Stat(art.FilePath); err != nil {
+			return nil, fmt.Errorf("manual scope %s: artifact file missing: %w", scope, err)
+		}
+		return &art, nil
 	}
 	urls := []string{strings.TrimSpace(src.PrimaryURL), strings.TrimSpace(src.MirrorURL)}
 	client := &http.Client{Timeout: time.Duration(src.MaxTimeSec) * time.Second}
@@ -1671,48 +1712,55 @@ func (h *Handler) refreshIPListArtifact(scope string) (*model.IPListArtifact, er
 		}
 		return nil, lastErr
 	}
-	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
-	filtered := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	return h.buildIPListArtifactFromBytes(scope, body, used)
+}
+
+// pushIPListUpdateToOnlineNodes 向当前管理员可见的在线节点下发 update_iplist 与例外规则（与 TriggerIPListUpdate 一致）。
+func (h *Handler) pushIPListUpdateToOnlineNodes(c *gin.Context, admScope *AdminScope, effectiveScope string) (sent int, totalNodes int, offlineCount int, err error) {
+	nq := h.db.Model(&model.Node{})
+	if !h.scopeEffectiveUnrestricted(c, admScope) {
+		if len(admScope.AllowedNodeIDs) == 0 {
+			return 0, 0, 0, nil
 		}
-		if scope == "overseas" {
-			ip, _, err := net.ParseCIDR(line)
-			if err != nil || ip.To4() == nil {
-				continue
+		nq = nq.Where("id IN ?", admScope.AllowedNodeIDs)
+	}
+	var nodes []model.Node
+	if err := nq.Find(&nodes).Error; err != nil {
+		return 0, 0, 0, err
+	}
+	var exceptions []model.IPListException
+	if err := h.db.Find(&exceptions).Error; err != nil {
+		return 0, 0, 0, err
+	}
+	sent = 0
+	for _, n := range nodes {
+		if h.hub != nil && h.hub.IsOnline(n.ID) {
+			scopePayload, merr := json.Marshal(gin.H{"scope": effectiveScope})
+			if merr != nil {
+				log.Printf("pushIPListUpdateToOnlineNodes: marshal iplist scope: %v", merr)
+			} else {
+				if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_iplist", Payload: scopePayload}); err != nil {
+					log.Printf("pushIPListUpdateToOnlineNodes: send update_iplist to %s: %v", n.ID, err)
+				}
 			}
+			if len(exceptions) > 0 {
+				exPayload, exErr := json.Marshal(map[string]any{"exceptions": exceptions})
+				if exErr != nil {
+					log.Printf("pushIPListUpdateToOnlineNodes: marshal exceptions: %v", exErr)
+				} else {
+					if err := h.hub.SendToNode(n.ID, WSMessage{Type: "update_exceptions", Payload: exPayload}); err != nil {
+						log.Printf("pushIPListUpdateToOnlineNodes: send update_exceptions to %s: %v", n.ID, err)
+					}
+				}
+			}
+			sent++
 		}
-		filtered = append(filtered, line)
 	}
-	if len(filtered) == 0 {
-		return nil, fmt.Errorf("empty ip list")
+	offlineCount = len(nodes) - sent
+	if offlineCount < 0 {
+		offlineCount = 0
 	}
-	content := []byte(strings.Join(filtered, "\n") + "\n")
-	hash := fmt.Sprintf("%x", sha256.Sum256(content))
-	version := time.Now().Format("20060102-150405")
-	storeDir := h.ipListStorageDir()
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		return nil, err
-	}
-	filename := fmt.Sprintf("%s-%s.txt", scope, version)
-	path := filepath.Join(storeDir, filename)
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		return nil, err
-	}
-	artifact := &model.IPListArtifact{
-		Scope:      scope,
-		Version:    version,
-		EntryCount: len(filtered),
-		SHA256:     hash,
-		FilePath:   path,
-		SourceURL:  used,
-	}
-	if err := h.db.Create(artifact).Error; err != nil {
-		return nil, err
-	}
-	return artifact, nil
+	return sent, len(nodes), offlineCount, nil
 }
 
 func (h *Handler) ListIPListSources(c *gin.Context) {
@@ -1739,6 +1787,7 @@ func (h *Handler) PatchIPListSource(c *gin.Context) {
 		return
 	}
 	var req struct {
+		SourceKind        *string `json:"source_kind"`
 		PrimaryURL        *string `json:"primary_url"`
 		MirrorURL         *string `json:"mirror_url"`
 		ConnectTimeoutSec *int    `json:"connect_timeout_sec"`
@@ -1758,6 +1807,14 @@ func (h *Handler) PatchIPListSource(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if req.SourceKind != nil {
+		k := normalizeIPListSourceKind(*req.SourceKind)
+		if k != model.IPListSourceKindRemote && k != model.IPListSourceKindManual {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid source_kind"})
+			return
+		}
+		item.SourceKind = k
 	}
 	if req.PrimaryURL != nil {
 		item.PrimaryURL = strings.TrimSpace(*req.PrimaryURL)
@@ -1782,6 +1839,98 @@ func (h *Handler) PatchIPListSource(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"item": item})
+}
+
+// ipListUploadMaxBytes 本地上传 IP 库单文件大小上限。
+const ipListUploadMaxBytes = 32 << 20
+
+// UploadIPListSource 接受 multipart 文件，解析后生成制品并可选通知在线节点（source_kind 须为 manual）。
+func (h *Handler) UploadIPListSource(c *gin.Context) {
+	if !h.ipListDualEnabled {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ip-list source api disabled"})
+		return
+	}
+	admScope, ok := h.loadAdminScopeOrAbort(c)
+	if !ok {
+		return
+	}
+	scope := normalizeIPListScope(c.Param("scope"))
+	if scope == "all" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid scope"})
+		return
+	}
+	var src model.IPListSource
+	if err := h.db.Where("scope = ?", scope).First(&src).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "source not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if normalizeIPListSourceKind(src.SourceKind) != model.IPListSourceKindManual {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "当前为远端同步模式，请先在编辑中将来源切换为「本地上传」"})
+		return
+	}
+	if !src.Enabled {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "同步源已关闭，无法上传"})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, ipListUploadMaxBytes+4096)
+	if err := c.Request.ParseMultipartForm(ipListUploadMaxBytes + 4096); err != nil {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "上传过大或格式错误"})
+		return
+	}
+	fh, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 file 字段"})
+		return
+	}
+	f, err := fh.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(f, ipListUploadMaxBytes+1))
+	_ = f.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if len(body) > ipListUploadMaxBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "文件超过大小限制"})
+		return
+	}
+	label := fmt.Sprintf("upload://%s", filepath.Base(fh.Filename))
+	art, err := h.buildIPListArtifactFromBytes(scope, body, label)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now()
+	src.LastManualAt = &now
+	if err := h.db.Save(&src).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	sent, totalNodes, offlineCount, err := h.pushIPListUpdateToOnlineNodes(c, admScope, scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.audit(c, "upload_iplist", scope, fmt.Sprintf("version=%s entries=%d sent_to=%d/%d", art.Version, art.EntryCount, sent, totalNodes))
+	c.JSON(http.StatusOK, gin.H{
+		"artifact": gin.H{
+			"scope":       art.Scope,
+			"version":     art.Version,
+			"entry_count": art.EntryCount,
+			"sha256":      art.SHA256,
+			"created_at":  art.CreatedAt,
+		},
+		"sent_to":            sent,
+		"total_nodes":        totalNodes,
+		"offline_node_count": offlineCount,
+	})
 }
 
 func (h *Handler) DownloadIPList(c *gin.Context) {

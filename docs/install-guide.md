@@ -326,8 +326,8 @@ export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
 | 8 | 创建 systemd 服务 | 每个 OpenVPN 实例一个服务 + NAT 规则服务 |
 | 9 | 安装 Agent | 写入配置，创建 systemd 服务，连接控制面 WebSocket |
 
-> Step 7（NAT 规则）会下载 `china_ip_list`。当前脚本策略为：优先默认地址（GitHub raw），失败后自动回退中国镜像（jsDelivr）。  
-> 若两者都不可达，会在日志中打印代理配置示例（支持 HTTP/HTTPS 与 SOCKS5，均支持用户名密码）。
+> Step 7（NAT 规则）会下载国内/海外 IP 列表并灌入 ipset。**优先**从控制面 **`${API_URL}/api/ip-lists/download/{domestic,overseas}`** 拉取（与控制台「分流规则」聚合后的制品一致）；**仅当控制面不可达或下载失败时**，才回退脚本内置公网地址（如 GitHub raw、jsDelivr、ipdeny 等）。  
+> 若公网源仍不可达，会在日志中打印代理配置示例（支持 HTTP/HTTPS 与 SOCKS5，均支持用户名密码）。
 
 ### 2.5 安装后的目录结构
 

@@ -220,17 +220,30 @@ EASYRSA_BATCH=1 ./easyrsa gen-crl
 
 ## 9. IP 库更新异常
 
-### 8.1 双库、控制台「全网立即更新」与节点在线
+### 9.1 双库、同步源、控制台「全网立即更新」与节点在线
 
-控制面固定启用 **国内（domestic）+ 海外（overseas）** 两套 IP 库制品，并提供 **`GET /api/ip-lists/download/{domestic,overseas}`** 供 **vpn-agent** 拉取。
+控制面固定启用 **国内（domestic）+ 海外（overseas）** 两套 IP 库制品，并提供 **`GET /api/ip-lists/download/{domestic,overseas}`**（无需登录）供 **vpn-agent** 与 **node-setup.sh** 拉取。
 
-- **管理台「分流规则」→「全网立即更新」**：先刷新控制面制品，再经 **WebSocket** 向节点下发 **`update_iplist`**（可带 `scope`：`all` / `domestic` / `overseas`）。界面会提示 **在线节点数 / 总节点数**；若为 **0 / N**，说明当前 **没有任何节点 Agent 连上控制面 WS**，指令不会发到节点，需在节点上检查 **`systemctl status vpn-agent`** 与到控制面的网络。
-- **节点首次部署**：`node-setup.sh` Step 7 会初始化 **`china-ip` + `cn-ip-list.txt`**（国内），并尽量拉取 **`overseas-ip` + `overseas-ip-list.txt`**（优先从控制面 **`/api/ip-lists/download/overseas`**，失败则回退公网镜像）。
-- **节点侧文件**：国内 `/etc/vpn-agent/cn-ip-list.txt`，海外 `/etc/vpn-agent/overseas-ip-list.txt`；健康检查脚本会检查两套文件与对应 **ipset**。
+**制品从哪来（与节点解耦）**
 
-### 8.2 国内库与海外库在数据面上的作用（cn-split）
+- **远端 URL 同步**（`source_kind=remote`）：由控制面按「分流规则 → IP 库同步源配置」中的主地址/镜像 **HTTP 拉取外网列表**，解析后写入磁盘并登记 **`ip_list_artifacts`**。
+- **本地上传**（`source_kind=manual`）：管理员在管理台 **上传 `.txt`**（`POST /api/ip-list/sources/{scope}/upload`），控制面用同一套解析逻辑生成制品；**控制面不会为该类源访问外网**。若某侧从未上传过且已切为 manual，则 **`download` 端点可能 404**，节点 Step 7 / Agent 拉取会失败，需先上传或改回远端并执行「全网立即更新」生成制品。
 
-**与 8.1 节的关系**：控制面仍会下发并维护 **国内（domestic）+ 海外（overseas）** 两套制品，节点也会拉取两套列表与 ipset（见 8.1 节）。但就 **`cn-split` 在入口节点上的选路逻辑**而言，**只需要「中国 IP 段」这一套库**即可实现「命中则走国内、未命中则走出口」：**不需要**再维护一份「海外 IP 库」来判定「是否经 `exit_node`」——**未命中国内明细的目的地址**会落到策略路由表内的 **`default`**，自然经 **WireGuard 指向出口**。
+**管理台「分流规则」→「全网立即更新」**
+
+- 先按各侧 **启用状态** 刷新控制面制品：远端侧从 URL 拉取；本地上传侧 **不拉外网**，仅在校验已有制品存在后视为成功（无制品则报错）。
+- 再经 **WebSocket** 向在线节点下发 **`update_iplist`**（可带 `scope`：`all` / `domestic` / `overseas`）。界面会提示 **在线节点数 / 总节点数**；若为 **0 / N**，说明 **没有任何节点 Agent 连上控制面 WS**，指令不会发到节点，需在节点上检查 **`systemctl status vpn-agent`** 与到控制面的网络。
+
+**节点首次部署（`node-setup.sh` Step 7）**
+
+- **国内 / 海外列表**均 **优先**从控制面 **`${API_URL}/api/ip-lists/download/{domestic,overseas}`** 下载（与控制台聚合后的制品一致）；**仅当控制面不可达或下载失败时**，才回退脚本内置的公网地址（GitHub / jsDelivr、ipdeny 等）。
+- 初始化 **`china-ip` + `cn-ip-list.txt`**（国内），以及 **`overseas-ip` + `overseas-ip-list.txt`**（海外，除非 `--skip-overseas-ipset`）。
+
+**节点侧文件**：国内 `/etc/vpn-agent/cn-ip-list.txt`，海外 `/etc/vpn-agent/overseas-ip-list.txt`；**`scripts/health-check.sh`** 会检查两套文件与对应 **ipset**。
+
+### 9.2 国内库与海外库在数据面上的作用（cn-split）
+
+**与 9.1 节的关系**：控制面仍会下发并维护 **国内（domestic）+ 海外（overseas）** 两套制品，节点也会拉取两套列表与 ipset（见 9.1 节）。但就 **`cn-split` 在入口节点上的选路逻辑**而言，**只需要「中国 IP 段」这一套库**即可实现「命中则走国内、未命中则走出口」：**不需要**再维护一份「海外 IP 库」来判定「是否经 `exit_node`」——**未命中国内明细的目的地址**会落到策略路由表内的 **`default`**，自然经 **WireGuard 指向出口**。
 
 **cn-split 路由决策（仅国内库）**
 
@@ -248,13 +261,13 @@ flowchart LR
 - **海外库与 `overseas-ip`**：仍由 Agent/安装脚本维护，供健康检查或后续扩展；**当前 `policy-routing.sh` / `nat-rules.sh` 不依据海外库做 `cn-split` 选路**（详见下条）。
 
 - **国内库**：写入 **`china-ip`** ipset；**`policy-routing.sh`** 用 **`cn-ip-list.txt`** 注入策略路由表；**`nat-rules.sh`** 对 `cn-split` 用 **`china-ip`** 匹配目的地址做 SNAT。即 **国内分流主路径依赖国内库**。
-- **手工例外**：**`vpn-ex-domestic` / `vpn-ex-foreign`** 与 **`mangle` 链 `VPN_SPLIT_MARK`**、**fwmark → 表 104/105** 及 **`nat-rules.sh` 中优先于 `china-ip` 的 SNAT/MASQUERADE** 联动（详见 §8.3）。
+- **手工例外**：**`vpn-ex-domestic` / `vpn-ex-foreign`** 与 **`mangle` 链 `VPN_SPLIT_MARK`**、**fwmark → 表 104/105** 及 **`nat-rules.sh` 中优先于 `china-ip` 的 SNAT/MASQUERADE** 联动（详见 §9.3）。
 - **海外库**：由 Agent（及安装脚本）维护 **`overseas-ip`** ipset 与列表文件；**当前生成的 `nat-rules.sh` / `policy-routing.sh` 未引用 `overseas-ip`**。若需按「海外列表」进一步改 NAT/路由，需另行设计规则链后再改脚本模板。
 - **海外库与 ipset 类型**：`overseas-ip` 为 **`hash:net`（仅 IPv4 CIDR）**。数据源须为 IPv4 段列表；若误用 **仅含 IPv6** 的文本（例如历史上的 `china6.txt`），`ipset add` 会大量报错且无法入库。控制面默认海外源已改为 **IPv4 国家聚合段**；存量库在控制面 **重启迁移** 时会将仍指向 `china6.txt` 的 `overseas` 源自动升级。控制面与 Agent 在写入制品时会对 **`overseas` 范围**丢弃非 IPv4 CIDR 行。
 
 环境变量 **`IPLIST_DUAL_ENABLED=false` 已被忽略**（控制面始终为双库）；若仍见旧文档请勿再关闭该能力。
 
-### 8.3 手工例外（vpn-ex-*）、CDN 与验证
+### 9.3 手工例外（vpn-ex-*）、CDN 与验证
 
 **为何 Cloudflare 等站点会走海外**：`cn-split` 按 **目的 IP 是否在中国段** 选路；CDN **Anycast** 常解析到 **境外 POP**，不在 `china-ip` 中，默认会经 **`exit_node`**。控制台 **「走国内」** 例外将地址写入 **`vpn-ex-domestic`**，节点上通过 **fwmark 0x64 → 表 104（仅 default 走本机 WAN）** 与 **NAT 中优先于 `china-ip` 的 SNAT** 纠偏；**「走境外」** 写入 **`vpn-ex-foreign`**（**fwmark 0x65 → 表 105**，NAT 优先 **MASQUERADE**）。
 
@@ -271,7 +284,7 @@ bash /opt/vpn-api/scripts/verify-split-exceptions.sh
 
 **故障：海外站点全超时、但国内正常**：在 **`cn-split` + 手工例外** 场景下，若 **`ip rule del from <子网>` 删不净带 fwmark 的策略行**，重跑 **`policy-routing.sh`** 时 **`ip rule add` 可能失败**（`set -e` 提前退出），导致 **未重新写入 `lookup 101`**，来自 VPN 的流量不再走策略表，表现为 **GitHub 等境外站 `ERR_CONNECTION_TIMED_OUT`**。请 **`ip -4 rule list` 检查是否存在重复 prio 或缺失主策略**；更新 **`node-setup.sh` 生成的脚本**后执行 **`systemctl restart vpn-routing.service`**（或重跑 **`node-setup.sh`**）以套用「先按 fwmark/lookup 精确删除再 add」的逻辑。
 
-### 8.4 Agent 日志「ip list anomaly detected」
+### 9.4 Agent 日志「ip list anomaly detected」
 
 **现象**：Agent 日志显示 "ip list anomaly detected"。
 

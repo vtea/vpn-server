@@ -2265,6 +2265,9 @@ log "Step 7/${TOTAL_STEPS}: Configuring NAT rules ..."
 # 先摘 NAT/FORWARD 中对 china-ip/overseas-ip 的 match，避免后续 destroy/swap 异常；nat-rules.sh 末尾会重建规则
 vpn_ipset_clear_vpn_iptables_chains_for_reload
 
+# IP 列表来源：控制面已将外网列表或管理台本地上传解析为「制品」，节点应优先从
+#   ${API_URL}/api/ip-lists/download/{domestic,overseas}
+# 拉取；仅当控制面不可达或下载失败时再使用下方内置公网 URL（与 docs/operations.md §9.1 一致）。
 CHINA_LIST="$(mktemp)"
 CHINA_LIST_URL_DEFAULT="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 CHINA_LIST_URL_MIRROR="https://cdn.jsdelivr.net/gh/17mon/china_ip_list@master/china_ip_list.txt"

@@ -77,17 +77,29 @@
           </div>
           <div class="record-card__fields">
             <div class="kv-row">
-              <span class="kv-label">主地址</span>
-              <span class="kv-value">{{ row.primary_url || '—' }}</span>
+              <span class="kv-label">来源</span>
+              <span class="kv-value">{{ sourceKindLabel(row.source_kind) }}</span>
             </div>
-            <div class="kv-row">
-              <span class="kv-label">镜像</span>
-              <span class="kv-value">{{ row.mirror_url || '—' }}</span>
-            </div>
-            <div class="kv-row">
-              <span class="kv-label">超时 / 重试</span>
-              <span class="kv-value">{{ row.max_time_sec ?? '—' }}s · {{ row.retry_count ?? '—' }} 次</span>
-            </div>
+            <template v-if="isManualSourceKind(row.source_kind)">
+              <div class="kv-row">
+                <span class="kv-label">上次上传</span>
+                <span class="kv-value">{{ row.last_manual_at ? formatDate(row.last_manual_at) : '—' }}</span>
+              </div>
+            </template>
+            <template v-else>
+              <div class="kv-row">
+                <span class="kv-label">主地址</span>
+                <span class="kv-value">{{ row.primary_url || '—' }}</span>
+              </div>
+              <div class="kv-row">
+                <span class="kv-label">镜像</span>
+                <span class="kv-value">{{ row.mirror_url || '—' }}</span>
+              </div>
+              <div class="kv-row">
+                <span class="kv-label">超时 / 重试</span>
+                <span class="kv-value">{{ row.max_time_sec ?? '—' }}s · {{ row.retry_count ?? '—' }} 次</span>
+              </div>
+            </template>
           </div>
           <div class="record-card__actions">
             <el-button size="small" @click="openEditSource(row)">编辑</el-button>
@@ -178,21 +190,54 @@
 
     <el-dialog v-model="showEditSource" title="编辑同步源" width="min(560px, 92vw)" destroy-on-close class="rules-dialog">
       <el-form :model="sourceForm" label-width="110px">
-        <el-form-item label="主地址">
-          <el-input v-model="sourceForm.primary_url" />
+        <el-form-item label="来源类型">
+          <el-radio-group v-model="sourceForm.source_kind">
+            <el-radio value="remote">远端 URL 同步</el-radio>
+            <el-radio value="manual">本地上传</el-radio>
+          </el-radio-group>
         </el-form-item>
-        <el-form-item label="镜像地址">
-          <el-input v-model="sourceForm.mirror_url" />
-        </el-form-item>
-        <el-form-item label="连接超时(s)">
-          <el-input-number v-model="sourceForm.connect_timeout_sec" :min="1" :max="60" />
-        </el-form-item>
-        <el-form-item label="总超时(s)">
-          <el-input-number v-model="sourceForm.max_time_sec" :min="3" :max="300" />
-        </el-form-item>
-        <el-form-item label="重试次数">
-          <el-input-number v-model="sourceForm.retry_count" :min="0" :max="10" />
-        </el-form-item>
+        <template v-if="sourceForm.source_kind === 'remote'">
+          <el-form-item label="主地址">
+            <el-input v-model="sourceForm.primary_url" />
+          </el-form-item>
+          <el-form-item label="镜像地址">
+            <el-input v-model="sourceForm.mirror_url" />
+          </el-form-item>
+          <el-form-item label="连接超时(s)">
+            <el-input-number v-model="sourceForm.connect_timeout_sec" :min="1" :max="60" />
+          </el-form-item>
+          <el-form-item label="总超时(s)">
+            <el-input-number v-model="sourceForm.max_time_sec" :min="3" :max="300" />
+          </el-form-item>
+          <el-form-item label="重试次数">
+            <el-input-number v-model="sourceForm.retry_count" :min="0" :max="10" />
+          </el-form-item>
+        </template>
+        <template v-else>
+          <p class="text-muted rules-upload-hint">
+            将来源类型保存为「本地上传」后，可在此选择 .txt 文件上传；控制面解析后生成制品，节点仍从 API 下载同步。
+          </p>
+          <p v-if="manualUploadBlocked" class="text-muted rules-upload-hint">
+            请先在底部点击「保存」，将「本地上传」提交到服务器后再上传文件。
+          </p>
+          <el-form-item label="上传文件">
+            <el-upload
+              :disabled="uploadingIPList || manualUploadBlocked"
+              :show-file-list="false"
+              accept=".txt,text/plain"
+              :http-request="uploadIPListFile"
+            >
+              <el-button
+                type="primary"
+                size="small"
+                :loading="uploadingIPList"
+                :disabled="manualUploadBlocked"
+              >
+                选择并上传
+              </el-button>
+            </el-upload>
+          </el-form-item>
+        </template>
         <el-form-item label="启用">
           <el-switch v-model="sourceForm.enabled" />
         </el-form-item>
@@ -221,14 +266,19 @@ const ipSources = ref([])
 const loadingSources = ref(false)
 const sourceApiSupported = ref(true)
 const showEditSource = ref(false)
+const uploadingIPList = ref(false)
+/** 打开弹窗时服务端记录的 source_kind，用于判断「本地上传」是否已保存（未保存则禁止上传）。 */
+const editSourceServerKind = ref('remote')
 const sourceForm = reactive({
   scope: 'domestic',
+  source_kind: 'remote',
   primary_url: '',
   mirror_url: '',
   connect_timeout_sec: 8,
   max_time_sec: 30,
   retry_count: 2,
-  enabled: true
+  enabled: true,
+  last_manual_at: null
 })
 
 const exceptions = ref([])
@@ -239,6 +289,23 @@ const exForm = reactive({ cidr: '', domain: '', direction: 'foreign', note: '' }
 /** 是否存在控制面返回的制品摘要（用于与节点条目数对照）。 */
 const artifactHintVisible = computed(
   () => !!(ipArtifacts.value?.domestic || ipArtifacts.value?.overseas)
+)
+
+/**
+ * @param {string | undefined} kind
+ * @returns {boolean}
+ */
+const isManualSourceKind = (kind) => (kind || 'remote') === 'manual'
+
+/**
+ * @param {string | undefined} kind
+ * @returns {string}
+ */
+const sourceKindLabel = (kind) => (isManualSourceKind(kind) ? '本地上传' : '远端 URL')
+
+/** 已在界面选「本地上传」但尚未保存到服务端时，禁止上传（否则 API 仍按远端校验会失败）。 */
+const manualUploadBlocked = computed(
+  () => sourceForm.source_kind === 'manual' && editSourceServerKind.value !== 'manual'
 )
 
 const loadIP = async () => {
@@ -340,13 +407,58 @@ const triggerUpdate = async () => {
 
 const openEditSource = (row) => {
   if (!sourceApiSupported.value) return
-  Object.assign(sourceForm, row)
+  editSourceServerKind.value = row.source_kind === 'manual' ? 'manual' : 'remote'
+  Object.assign(sourceForm, {
+    ...row,
+    source_kind: row.source_kind === 'manual' ? 'manual' : 'remote'
+  })
   showEditSource.value = true
+}
+
+/**
+ * 本地上传：multipart 至 `/api/ip-list/sources/:scope/upload`。
+ * 自定义 `http-request` 必须调用 `onSuccess` / `onError`，否则 el-upload 内部状态会一直停在上传中。
+ * 切勿手动设置 `Content-Type: multipart/form-data`，否则缺少 boundary，服务端无法解析 `file` 字段。
+ * @param {import('element-plus').UploadRequestOptions} options
+ */
+const uploadIPListFile = async (options) => {
+  const { file, onSuccess, onError } = options
+  const raw =
+    file && typeof file === 'object' && 'raw' in file && file.raw instanceof Blob
+      ? file.raw
+      : file instanceof Blob
+        ? file
+        : null
+  if (!raw) {
+    const err = new Error('无法读取所选文件')
+    onError?.(err)
+    ElMessage.error(err.message)
+    return
+  }
+  uploadingIPList.value = true
+  try {
+    const fd = new FormData()
+    fd.append('file', raw)
+    const res = await http.post(`/api/ip-list/sources/${sourceForm.scope}/upload`, fd, {
+      timeout: 120000
+    })
+    onSuccess?.(res.data)
+    ElMessage.success('上传成功，已生成制品并尝试通知在线节点')
+    showEditSource.value = false
+    await loadSources()
+    await loadIP()
+  } catch (e) {
+    onError?.(e instanceof Error ? e : new Error(String(e)))
+    // 全局错误提示由 http 拦截器处理
+  } finally {
+    uploadingIPList.value = false
+  }
 }
 
 const saveSource = async () => {
   try {
     await http.patch(`/api/ip-list/sources/${sourceForm.scope}`, {
+      source_kind: sourceForm.source_kind,
       primary_url: sourceForm.primary_url,
       mirror_url: sourceForm.mirror_url,
       connect_timeout_sec: sourceForm.connect_timeout_sec,
@@ -355,6 +467,11 @@ const saveSource = async () => {
       enabled: sourceForm.enabled
     })
     ElMessage.success('同步源已更新')
+    if (sourceForm.source_kind === 'manual') {
+      editSourceServerKind.value = 'manual'
+    } else {
+      editSourceServerKind.value = 'remote'
+    }
     showEditSource.value = false
     loadSources()
   } catch {
@@ -399,6 +516,11 @@ onMounted(() => {
 }
 .text-muted {
   color: var(--el-text-color-secondary);
+}
+.rules-upload-hint {
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 12px;
 }
 .kv-row--sync-err .kv-value {
   color: var(--el-color-danger);

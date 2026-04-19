@@ -177,6 +177,7 @@ func main() {
 	rules.GET("/ip-list/status", h.IPListStatus)
 	rules.POST("/ip-list/update", h.TriggerIPListUpdate)
 	rules.GET("/ip-list/sources", h.ListIPListSources)
+	rules.POST("/ip-list/sources/:scope/upload", h.UploadIPListSource)
 	rules.PATCH("/ip-list/sources/:scope", h.PatchIPListSource)
 	rules.GET("/ip-list/exceptions", h.ListExceptions)
 	rules.POST("/ip-list/exceptions", h.CreateException)
@@ -316,6 +317,11 @@ func autoMigrateAndSeed(db *gorm.DB) error {
 	if err := ensureIPListSources(db); err != nil {
 		return err
 	}
+	if err := db.Model(&model.IPListSource{}).
+		Where("source_kind IS NULL OR TRIM(source_kind) = ? OR source_kind NOT IN ?", "", []string{model.IPListSourceKindRemote, model.IPListSourceKindManual}).
+		Update("source_kind", model.IPListSourceKindRemote).Error; err != nil {
+		return err
+	}
 	if err := upgradeLegacyOverseasIPListSource(db); err != nil {
 		return err
 	}
@@ -442,6 +448,7 @@ func ensureIPListSources(db *gorm.DB) error {
 	defaults := []model.IPListSource{
 		{
 			Scope:             "domestic",
+			SourceKind:        model.IPListSourceKindRemote,
 			PrimaryURL:        "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
 			MirrorURL:         "https://cdn.jsdelivr.net/gh/17mon/china_ip_list@master/china_ip_list.txt",
 			ConnectTimeoutSec: 8,
@@ -451,6 +458,7 @@ func ensureIPListSources(db *gorm.DB) error {
 		},
 		{
 			Scope:             "overseas",
+			SourceKind:        model.IPListSourceKindRemote,
 			PrimaryURL:        "https://www.ipdeny.com/ipblocks/data/countries/us.zone",
 			MirrorURL:         "https://www.ipdeny.com/ipblocks/data/countries/jp.zone",
 			ConnectTimeoutSec: 8,

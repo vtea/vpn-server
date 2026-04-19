@@ -89,7 +89,7 @@ EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTER
 # WEB_APP_ORIGIN=https://vpn.example.com
 #
 # IPLIST_DUAL_ENABLED：已废弃；控制面始终启用「国内 + 海外」双库与 /api/ip-lists/download/*，
-# 以便 vpn-agent 与「分流规则 → 全网立即更新」能同步节点。详见 docs/operations.md §8。
+# 以便 vpn-agent 与「分流规则 → 全网立即更新」能同步节点。详见 docs/operations.md §9。
 ```
 
 ### 前后端分离 / 跨域
@@ -149,7 +149,10 @@ EXTERNAL_URL_LAN=... # 可选：仅内网可达时的第二套基址；与 EXTER
 | PATCH | /api/tunnels/:id | 高级：WireGuard `/30` 子网、`ip_a`/`ip_b`、`wg_port`（须满足全局不冲突） |
 | GET | /api/tunnels/:id/metrics | 隧道指标历史 |
 | GET | /api/ip-list/status | IP 库状态 |
-| POST | /api/ip-list/update | 触发全网 IP 库更新 |
+| POST | /api/ip-list/update | 触发全网 IP 库更新（先刷新控制面制品，再 WS 通知节点） |
+| GET | /api/ip-list/sources | IP 库同步源配置（含 `source_kind`：remote / manual） |
+| PATCH | /api/ip-list/sources/:scope | 更新同步源（URL、超时、`source_kind` 等） |
+| POST | /api/ip-list/sources/:scope/upload | 本地上传列表文件（`multipart` 字段 `file`；需该侧为 manual 且启用） |
 | GET/POST | /api/ip-list/exceptions | 例外规则列表/创建 |
 | DELETE | /api/ip-list/exceptions/:id | 删除例外规则 |
 | GET | /api/audit-logs | 审计日志 |
@@ -201,8 +204,7 @@ export ALL_PROXY=socks5h://127.0.0.1:1080
 export ALL_PROXY=socks5h://user:password@127.0.0.1:1080
 ```
 
-`node-setup.sh` 在 Step 7（NAT 规则）下载 `china_ip_list` 时，已内置“默认源（GitHub raw）失败自动回退中国镜像（jsDelivr）”。
-若默认源与镜像都失败，日志会输出上述代理样式供管理员直接套用。
+`node-setup.sh` 在 Step 7（NAT 规则）拉取国内/海外 IP 列表时：**优先**从 **`${API_URL}/api/ip-lists/download/{domestic,overseas}`** 下载（与控制面制品一致）；**仅当控制面不可达或失败时**再回退内置公网地址（如 GitHub raw、jsDelivr、ipdeny）。若公网源仍失败，日志会输出上述代理样式供管理员套用。详见 [`docs/operations.md`](../docs/operations.md) §9.1。
 
 节点脚本会从控制面下载 **vpn-agent**（无需单独传文件）：
 
