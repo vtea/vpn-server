@@ -1815,6 +1815,9 @@ tls-crypt ${PKI}/private/easyrsa-tls.key
 server ${SUBNET_IP} 255.255.255.0
 ifconfig-pool-persist /var/log/openvpn/${MODE}-ipp.txt
 
+# 允许同一实例内 VPN 客户端互访（OpenVPN 默认仅能与服务器通信）
+client-to-client
+
 push "dhcp-option DNS 223.5.5.5"
 push "dhcp-option DNS 8.8.8.8"
 

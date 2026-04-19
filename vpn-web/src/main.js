@@ -2,6 +2,13 @@
 import { createPinia } from 'pinia'
 import { ID_INJECTION_KEY } from 'element-plus/es/hooks/use-id/index.mjs'
 import { ZINDEX_INJECTION_KEY } from 'element-plus/es/hooks/use-z-index/index.mjs'
+/**
+ * 仅模板中使用的组件会由 unplugin-vue-components 注入样式；ElMessage / ElMessageBox / ElNotification
+ * 等编程式 API 不会，缺样式时 MessageBox 会错位（遮罩全屏、内容贴左上角）。
+ */
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
+import 'element-plus/es/components/notification/style/css'
 import './assets/styles/global.scss'
 import App from './App.vue'
 import { routes } from './router/routes'

@@ -874,12 +874,20 @@ const saveNodeMeta = async () => {
   }
 }
 
+/**
+ * 换发 Bootstrap 令牌并弹出「新的部署命令」对话框。
+ * 若接口返回 404，多为控制面 vpn-api 未升级到包含该路由的版本（见 docs/build-and-run.md）。
+ */
 const rotateBootstrap = async () => {
   try {
     await ElMessageBox.confirm(
       '将作废当前 Bootstrap 令牌并签发新令牌；已用旧令牌完成首次注册的节点不受影响，重装须使用新命令。',
       '重新生成部署令牌',
-      { type: 'warning', confirmButtonText: '确定换发' }
+      {
+        type: 'warning',
+        confirmButtonText: '确定换发',
+        center: true
+      }
     )
   } catch {
     return
@@ -1015,6 +1023,7 @@ const saveInstancePatch = async (inst) => {
           confirmButtonText: '立即同步',
           cancelButtonText: '放弃同步',
           type: 'info',
+          center: true,
           distinguishCancelAndClose: true
         }
       )
