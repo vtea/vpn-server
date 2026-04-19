@@ -3,9 +3,18 @@
     <div class="page-card">
       <div class="page-card-header">
         <span class="page-card-title">授权管理</span>
-        <el-button v-if="hasModulePermission('users')" type="primary" @click="openAddDialog">
-          <el-icon><Plus /></el-icon> 添加用户
-        </el-button>
+        <el-tooltip
+          v-if="hasModulePermission('users')"
+          :disabled="!selfVpnUserExists"
+          content="已有与当前登录名一致的 VPN 用户，请直接在列表中点击「授权」进行证书签发。"
+          placement="bottom"
+        >
+          <span class="add-user-btn-wrap">
+            <el-button type="primary" :disabled="selfVpnUserExists" @click="openAddDialog">
+              <el-icon><Plus /></el-icon> 添加用户
+            </el-button>
+          </span>
+        </el-tooltip>
       </div>
 
       <el-alert
@@ -102,8 +111,16 @@
       </div>
     </div>
 
-    <!-- 添加用户 -->
-    <el-dialog v-model="showAdd" title="添加用户" width="min(450px, 92vw)" destroy-on-close class="user-form-dialog">
+    <!-- 添加用户：append-to-body + align-center 避免窄屏滚动后弹窗锚在文档顶部 -->
+    <el-dialog
+      v-model="showAdd"
+      title="添加用户"
+      width="min(450px, 92vw)"
+      destroy-on-close
+      append-to-body
+      align-center
+      class="user-form-dialog"
+    >
       <el-form :model="addForm" label-width="80px">
         <el-form-item label="用户名" :required="isSuperAdminSession()">
           <el-input
@@ -132,8 +149,15 @@
       </template>
     </el-dialog>
 
-    <!-- 编辑用户 -->
-    <el-dialog v-model="showEdit" title="编辑用户" width="min(450px, 92vw)" destroy-on-close class="user-form-dialog">
+    <el-dialog
+      v-model="showEdit"
+      title="编辑用户"
+      width="min(450px, 92vw)"
+      destroy-on-close
+      append-to-body
+      align-center
+      class="user-form-dialog"
+    >
       <el-form :model="editForm" label-width="80px">
         <el-form-item label="姓名">
           <el-input v-model="editForm.display_name" />
@@ -159,6 +183,8 @@
       v-model="showGrants"
       width="min(720px, 94vw)"
       destroy-on-close
+      append-to-body
+      align-center
       :show-close="false"
       class="grant-dialog"
     >
@@ -352,6 +378,20 @@ const filteredRows = computed(() => {
   return list
 })
 
+/**
+ * 非超管仅能建与登录名一致的 VPN 用户；列表中已有该用户时不应再「添加用户」，应走「授权」。
+ * @returns {boolean}
+ */
+const selfVpnUserExists = computed(() => {
+  if (isSuperAdminSession()) return false
+  const u = String(getSessionAdminUsername() ?? '').trim()
+  if (!u) return false
+  const lower = u.toLowerCase()
+  return rows.value.some(
+    (r) => String(r.username ?? '').trim().toLowerCase() === lower
+  )
+})
+
 /** 组网模式中文简称（与节点列表一致） */
 const modeMeshLabel = (mode) => {
   const m = { 'node-direct': '直连', 'cn-split': '分流', global: '全局' }
@@ -388,6 +428,12 @@ const loadUsers = async () => {
 }
 
 const openAddDialog = () => {
+  if (!isSuperAdminSession() && selfVpnUserExists.value) {
+    ElMessage.warning(
+      '已有与当前登录名一致的 VPN 用户，请直接在列表中点击「授权」，无需再次添加。'
+    )
+    return
+  }
   if (isSuperAdminSession()) {
     Object.assign(addForm, { username: '', display_name: '', group_name: '' })
   } else {
@@ -409,15 +455,54 @@ const doAdd = async () => {
   }
   addLoading.value = true
   try {
-    await http.post('/api/users', {
-      username: name,
-      display_name: String(addForm.display_name ?? '').trim(),
-      group_name: String(addForm.group_name ?? '').trim() || 'default'
-    })
+    await http.post(
+      '/api/users',
+      {
+        username: name,
+        display_name: String(addForm.display_name ?? '').trim(),
+        group_name: String(addForm.group_name ?? '').trim() || 'default'
+      },
+      { meta: { silentGlobalError: true } }
+    )
     ElMessage.success('创建成功')
     showAdd.value = false
     Object.assign(addForm, { username: '', display_name: '', group_name: '' })
     loadUsers()
+  } catch (err) {
+    const status = err.response?.status
+    const data = err.response?.data
+    const code = data && typeof data === 'object' ? data.code : undefined
+    const msg =
+      data && typeof data === 'object' && typeof data.error === 'string'
+        ? data.error
+        : ''
+    if (status === 400) {
+      if (code === 'username_exists_self_only') {
+        ElMessage.error(
+          msg ||
+            '该登录名对应的 VPN 用户已存在，请在列表中点击「授权」进行证书签发。'
+        )
+      } else {
+        ElMessage.error(
+          msg || '请求参数不正确（请检查必填项是否与后端要求一致）'
+        )
+      }
+    } else if (status === 403) {
+      ElMessage.error(msg || '没有操作权限')
+    } else if (status === 404) {
+      ElMessage.error(
+        msg ||
+          '接口不存在 (404)。若管理台在 56701：请确认 vpn-api 已启动于 56700，且 API 地址勿填成页面地址。'
+      )
+    } else if (status >= 500) {
+      ElMessage.error(msg || '服务器错误，请稍后重试')
+    } else if (!err.response) {
+      ElMessage.error('无法连接 API，请确认 vpn-api 已启动且地址配置正确')
+    } else if (msg) {
+      ElMessage.error(msg)
+    } else {
+      ElMessage.error(`请求失败（HTTP ${status ?? '未知'}）`)
+    }
   } finally {
     addLoading.value = false
   }
@@ -615,6 +700,11 @@ onMounted(() => void loadUsers().catch(() => {}))
 </script>
 
 <style scoped>
+.add-user-btn-wrap {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
 .action-tooltip-wrap {
   display: inline-flex;
   vertical-align: middle;
@@ -747,9 +837,6 @@ onMounted(() => void loadUsers().catch(() => {}))
   }
   .grant-dialog-header :deep(.el-dialog__title) {
     font-size: 15px;
-  }
-  .grant-dialog :deep(.el-dialog) {
-    margin-top: 4vh !important;
   }
   .grant-dialog :deep(.el-dialog__body),
   .user-form-dialog :deep(.el-dialog__body) {

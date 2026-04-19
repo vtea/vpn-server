@@ -1227,6 +1227,30 @@ func ipListLocalFile(scope string) string {
 	return "/etc/vpn-agent/cn-ip-list.txt"
 }
 
+// parseIPv4CIDRLine 从一行文本解析出可写入 ipset hash:net（仅 IPv4）的 CIDR。
+// 国内/海外列表均须筛掉 IPv6，否则 ipset add 失败被忽略后临时集可能为空，swap 会清空主集。
+func parseIPv4CIDRLine(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	if s == "" || strings.HasPrefix(s, "#") {
+		return "", false
+	}
+	if ip, ipNet, err := net.ParseCIDR(s); err == nil {
+		if ip.To4() == nil {
+			return "", false
+		}
+		// 使用规范化 CIDR，避免主机位非零等写法导致 ipset add 静默失败
+		return ipNet.String(), true
+	}
+	if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
+		return fmt.Sprintf("%s/32", ip.String()), true
+	}
+	return "", false
+}
+
+// ipsetHashNetLargeCreateArgs 与 node-setup.sh 中 vpn_ipset_flush_and_restore_from_cidr_file /
+// vpn_ipset_recreate_hash_net_large 使用的 hash:net 参数一致，以便 ipset swap 时类型匹配。
+const ipsetHashNetLargeCreateArgs = "hash:net family inet hashsize 65536 maxelem 2621440"
+
 func ipSetName(scope string) string {
 	if scope == "overseas" {
 		return "overseas-ip"
@@ -1259,52 +1283,93 @@ func updateIPListFromAPI(cfg *Config, scope, downloadURL, version string) error 
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+	bodyStr := strings.TrimPrefix(string(body), "\ufeff")
+	lines := strings.Split(strings.ReplaceAll(bodyStr, "\r\n", "\n"), "\n")
 	filtered := make([]string, 0, len(lines))
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+		if s, ok := parseIPv4CIDRLine(line); ok {
+			filtered = append(filtered, s)
 		}
-		if scope == "overseas" {
-			ip, _, err := net.ParseCIDR(line)
-			if err != nil || ip.To4() == nil {
-				continue
-			}
-		}
-		filtered = append(filtered, line)
 	}
 	if len(filtered) == 0 {
 		return fmt.Errorf("empty ip list")
 	}
 	content := strings.Join(filtered, "\n") + "\n"
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("iplist-%s-%d.txt", scope, time.Now().UnixNano()))
-	if err := os.WriteFile(tmpFile, []byte(content), 0o644); err != nil {
-		return err
+	dest := ipListLocalFile(scope)
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("ip list directory: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	pf, err := os.CreateTemp(dir, filepath.Base(dest)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("temp ip list: %w", err)
+	}
+	tmpPath := pf.Name()
+	if _, err := pf.Write([]byte(content)); err != nil {
+		_ = pf.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write temp ip list: %w", err)
+	}
+	if err := pf.Sync(); err != nil {
+		_ = pf.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("sync temp ip list: %w", err)
+	}
+	// CreateTemp 默认为 0600；与历史 WriteFile(...,0644) 及运维只读查看一致
+	if err := pf.Chmod(0o644); err != nil {
+		_ = pf.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp ip list: %w", err)
+	}
+	if err := pf.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp ip list: %w", err)
+	}
+	if err := os.Rename(tmpPath, dest); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("finalize ip list: %w", err)
+	}
 	setName := ipSetName(scope)
 	script := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
-TMPFILE=%q
+export LC_ALL=C
+LISTFILE=%q
 SET_NAME=%q
-NEW_SET="${SET_NAME}-new"
-ipset create "$NEW_SET" hash:net -exist
-ipset flush "$NEW_SET"
+TMP_SET="${SET_NAME}_tmpnst"
+# 与 node-setup 一致的临时集名；并清理旧版 Agent 的 "${SET_NAME}-new" 残留
+ipset destroy "${SET_NAME}-new" 2>/dev/null || true
+ipset destroy "$TMP_SET" 2>/dev/null || true
+# destroy 若因仍被引用等失败，裸 create 会报「已存在」；与 node-setup 注释一致，用 -exist 后 flush 覆盖
+if ! ipset create "$TMP_SET" %s -exist; then
+  exit 1
+fi
+ipset flush "$TMP_SET"
 while IFS= read -r cidr; do
   [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-  ipset add "$NEW_SET" "$cidr" -exist || true
-done < "$TMPFILE"
-ipset create "$SET_NAME" hash:net -exist
-ipset swap "$NEW_SET" "$SET_NAME"
-ipset destroy "$NEW_SET" 2>/dev/null || true
-`, tmpFile, setName)
+  ipset add "$TMP_SET" "$cidr" -exist || true
+done < "$LISTFILE"
+ent=$(ipset list "$TMP_SET" 2>/dev/null | awk '/^Number of entries/{print $NF; exit}')
+if ! [[ "${ent:-}" =~ ^[0-9]+$ ]] || [[ "$ent" == "0" ]]; then
+  echo "ipset: temporary set has no entries or unreadable count (${ent:-?}), refusing swap/rename" >&2
+  ipset destroy "$TMP_SET" 2>/dev/null || true
+  exit 1
+fi
+if ipset list "$SET_NAME" &>/dev/null; then
+  if ! ipset swap "$SET_NAME" "$TMP_SET"; then
+    ipset destroy "$TMP_SET" 2>/dev/null || true
+    exit 1
+  fi
+  ipset destroy "$TMP_SET" 2>/dev/null || true
+else
+  if ! ipset rename "$TMP_SET" "$SET_NAME"; then
+    ipset destroy "$TMP_SET" 2>/dev/null || true
+    exit 1
+  fi
+fi
+`, dest, setName, ipsetHashNetLargeCreateArgs)
 	cmd := exec.Command("bash", "-c", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("apply ipset failed: %w %s", err, strings.TrimSpace(string(out)))
-	}
-	if err := os.WriteFile(ipListLocalFile(scope), []byte(content), 0o644); err != nil {
-		return err
 	}
 	if scope == "domestic" {
 		_ = exec.Command("bash", "-c", "[[ -x /etc/vpn-agent/policy-routing.sh ]] && /etc/vpn-agent/policy-routing.sh || true").Run()
@@ -1388,13 +1453,13 @@ func cronHealthReport(activeConn **websocket.Conn, connMu *sync.Mutex, cfg *Conf
 }
 
 type tunnelHealthItem struct {
-	PeerNodeID            string  `json:"peer_node_id"`
-	PeerPubKeyPresent     bool    `json:"peer_pubkey_present"`
-	IfaceUp               bool    `json:"iface_up"`
-	LatestHandshakeAgeSec int64   `json:"latest_handshake_age_sec"`
-	RxBytesTotal          int64   `json:"rx_bytes_total"`
-	TxBytesTotal          int64   `json:"tx_bytes_total"`
-	Error                 string  `json:"error,omitempty"`
+	PeerNodeID            string `json:"peer_node_id"`
+	PeerPubKeyPresent     bool   `json:"peer_pubkey_present"`
+	IfaceUp               bool   `json:"iface_up"`
+	LatestHandshakeAgeSec int64  `json:"latest_handshake_age_sec"`
+	RxBytesTotal          int64  `json:"rx_bytes_total"`
+	TxBytesTotal          int64  `json:"tx_bytes_total"`
+	Error                 string `json:"error,omitempty"`
 }
 
 func collectTunnelHealth() []tunnelHealthItem {

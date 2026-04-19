@@ -1589,6 +1589,14 @@ body {
     margin-top: 4vh !important;
   }
 
+  /**
+   * align-center 依赖 margin:auto 垂直居中；上面 margin-top 带 !important 会压过 EP 默认样式，
+   * 导致窄屏长页面滚动后弹窗仍像在「页顶」需上滑才看见。
+   */
+  .el-dialog.is-align-center {
+    margin: auto !important;
+  }
+
   .el-dialog__header {
     padding: 12px 14px;
   }

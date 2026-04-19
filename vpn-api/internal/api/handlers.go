@@ -909,7 +909,14 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	}
 
 	if _, err := h.firstVPNUserByUsernameCI(req.Username); err == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "该 VPN 用户名已存在，请换一个名称，或在列表中编辑已有用户", "code": "username_exists"})
+		if !unrestricted {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "该登录名对应的 VPN 用户已在系统中，无需再次添加；请在「授权管理」列表中找到该用户并点击「授权」进行证书签发。",
+				"code":  "username_exists_self_only",
+			})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "该 VPN 用户名已存在，请换一个名称，或在列表中编辑已有用户", "code": "username_exists"})
+		}
 		return
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -923,7 +930,14 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	if err := h.db.Create(&u).Error; err != nil {
 		em := err.Error()
 		if strings.Contains(strings.ToLower(em), "unique") || strings.Contains(strings.ToLower(em), "duplicate") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "该 VPN 用户名已存在（数据库唯一约束）", "code": "username_exists"})
+			if !unrestricted {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "该登录名对应的 VPN 用户已在系统中，无需再次添加；请在「授权管理」列表中找到该用户并点击「授权」进行证书签发。",
+					"code":  "username_exists_self_only",
+				})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "该 VPN 用户名已存在（数据库唯一约束）", "code": "username_exists"})
+			}
 			return
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": em})

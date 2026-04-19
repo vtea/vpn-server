@@ -210,6 +210,7 @@ sudo /usr/sbin/openvpn --suppress-timestamps --config /etc/openvpn/server/cn-spl
 - `systemctl cat openvpn-cn-split.service`：`StartLimitIntervalSec` 在 **`[Unit]`**，且无 Unknown key 警告。
 - 部署 Step 7：**无**大规模 `ipset ... IPv6` / prefix 超范围报错；`overseas-ip` 正常加载或为空并有清晰 WARNING。
 - `systemctl is-active openvpn-cn-split.service` 为 **active**；`/var/log/openvpn/cn-split.log` 无持续 Fatal。
+- **Agent 国内/海外列表同步**：vpn-agent 灌入 `china-ip` / `overseas-ip` 时与 `node-setup.sh` 使用相同的 `hash:net family inet hashsize … maxelem …` 参数及临时集名 `*_tmpnst`（`ipset swap` 要求类型一致）。若仍出现 `Set cannot be created: set with the same name already exists`，可检查残留临时集（旧版为 `*-new`）并 `sudo ipset destroy <名称>` 后重试同步。
 
 ### 5) WireGuard `AllowedIPs` 与 `exit_node`（数据面深入）
 
